@@ -1,0 +1,34 @@
+
+name: Steam Engine
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-engine:
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: Install Go 1.26
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+
+      - name: Download go-steam source
+        run: git clone --depth 1 https://github.com/BirknerAlex/go-steam.git engine
+
+      - name: Download dependencies
+        working-directory: engine
+        run: go mod download
+
+      - name: Run engine tests
+        working-directory: engine
+        run: go test ./...
+
+      - name: Compile engine packages
+        working-directory: engine
+        run: go build ./...
