@@ -20,6 +20,7 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.26.x'
+          cache: false
 
       - name: Install gomobile tools
         run: |
@@ -43,11 +44,17 @@ jobs:
           }
           EOF
 
+      - name: Add gomobile module dependency
+        working-directory: ios-test
+        run: go get -tool golang.org/x/mobile/cmd/gobind
+
       - name: Build iOS framework
+        working-directory: ios-test
         run: |
-          cd ios-test
           gomobile bind -v -target=ios \
             -o ../IOSBridge.xcframework .
 
       - name: Verify framework
-        run: test -d IOSBridge.xcframework
+        run: |
+          test -d IOSBridge.xcframework
+          find IOSBridge.xcframework -maxdepth 3 -type f
