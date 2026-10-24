@@ -1,115 +1,95 @@
-name: Build Steam Workshop IPA
-
+name: Build ModShelf IPA
 on:
   workflow_dispatch:
-
 permissions:
   contents: write
-
 jobs:
   build:
     runs-on: macos-15
     timeout-minutes: 45
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
       - name: Install Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.26.x'
           cache: false
-
       - name: Install gomobile
         run: |
           go install golang.org/x/mobile/cmd/gomobile@latest
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
-
       - name: Prepare Go dependencies and tools
         working-directory: ios-engine
         run: |
           go get github.com/BirknerAlex/go-steam@latest
           go get -tool golang.org/x/mobile/cmd/gobind@latest
           go mod tidy
-
       - name: Build Steam engine XCFramework
         working-directory: ios-engine
         run: |
           gomobile init
           gomobile bind -v -target=ios -o ../SteamEngine.xcframework .
-
       - name: Install XcodeGen
         run: brew install xcodegen
-
-      - name: Verify project files
+      - name: Verify source files
         run: |
           test -f project.yml
           test -f Sources/ContentView.swift
           test -f ios-engine/go.mod
           test -f ios-engine/bridge.go
-          test -d SteamEngine.xcframework
-
       - name: Generate Xcode project
         run: xcodegen generate
-
       - name: Build unsigned iOS app
         run: |
+          test -d SteamEngine.xcframework
           xcodebuild \
-            -project WorkshopDownloader.xcodeproj \
+            -project ModShelf.xcodeproj \
             -scheme WorkshopDownloader \
             -sdk iphoneos \
             -configuration Release \
             -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO \
             build
-
       - name: Package IPA
         run: |
           set -euo pipefail
-
-          APP_PATH="build/Build/Products/Release-iphoneos/WorkshopDownloader.app"
-
+          APP_PATH="build/Build/Products/Release-iphoneos/ModShelf.app"
           if [ ! -d "$APP_PATH" ]; then
             echo "ERROR: App bundle not found: $APP_PATH"
+            echo "Available app bundles:"
+            find build/Build/Products -maxdepth 3 -name '*.app' -print || true
             exit 1
           fi
-
-          rm -rf Payload WorkshopDownloader.ipa
+          rm -rf Payload ModShelf.ipa
           mkdir -p Payload
-          cp -R "$APP_PATH" Payload/WorkshopDownloader.app
-
+          cp -R "$APP_PATH" Payload/ModShelf.app
           /usr/bin/ditto -c -k --sequesterRsrc --keepParent \
-            Payload WorkshopDownloader.ipa
-
+            Payload ModShelf.ipa
           echo "Checking IPA archive..."
-          /usr/bin/unzip -t WorkshopDownloader.ipa
-          /usr/bin/unzip -l WorkshopDownloader.ipa
-
-          if ! /usr/bin/unzip -Z1 WorkshopDownloader.ipa | grep -q '^Payload/WorkshopDownloader.app/'; then
+          /usr/bin/unzip -t ModShelf.ipa
+          /usr/bin/unzip -l ModShelf.ipa
+          if ! /usr/bin/unzip -Z1 ModShelf.ipa | grep -q '^Payload/ModShelf.app/'; then
             echo "ERROR: IPA does not contain the expected app bundle."
             exit 1
           fi
-
-          shasum -a 256 WorkshopDownloader.ipa
-          ls -lh WorkshopDownloader.ipa
-
+          shasum -a 256 ModShelf.ipa
+          ls -lh ModShelf.ipa
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
-          name: WorkshopDownloader-IPA
-          path: WorkshopDownloader.ipa
+          name: ModShelf-IPA
+          path: ModShelf.ipa
           if-no-files-found: error
           compression-level: 0
-
       - name: Publish direct IPA download
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ios-build
-          name: iOS Build
-          body: Latest unsigned Workshop Downloader IPA.
+          name: ModShelf iOS Build
+          body: Latest unsigned ModShelf IPA.
           prerelease: true
-          files: WorkshopDownloader.ipa
+          files: ModShelf.ipa
           overwrite_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
