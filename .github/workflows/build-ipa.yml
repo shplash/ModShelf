@@ -1,3 +1,4 @@
+
 name: Build Steam Workshop IPA
 
 on:
@@ -24,14 +25,13 @@ jobs:
       - name: Install gomobile
         run: |
           go install golang.org/x/mobile/cmd/gomobile@latest
-          go install golang.org/x/mobile/cmd/gobind@latest
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
-      - name: Prepare Go dependencies
+      - name: Prepare Go dependencies and tools
         working-directory: ios-engine
         run: |
-          go get golang.org/x/mobile@latest
           go get github.com/BirknerAlex/go-steam@latest
+          go get -tool golang.org/x/mobile/cmd/gobind@latest
           go mod tidy
 
       - name: Build Steam engine XCFramework
@@ -42,6 +42,14 @@ jobs:
 
       - name: Install XcodeGen
         run: brew install xcodegen
+
+      - name: Verify project files
+        run: |
+          test -f project.yml
+          test -f Sources/ContentView.swift
+          test -f ios-engine/go.mod
+          test -f ios-engine/bridge.go
+          test -d SteamEngine.xcframework
 
       - name: Generate Xcode project
         run: xcodegen generate
@@ -60,14 +68,16 @@ jobs:
       - name: Package IPA
         run: |
           APP_PATH="build/Build/Products/Release-iphoneos/WorkshopDownloader.app"
-          test -d "$APP_PATH" || {
-            echo "ERROR: Built app not found at $APP_PATH"
+
+          if [ ! -d "$APP_PATH" ]; then
+            echo "ERROR: App bundle not found: $APP_PATH"
             exit 1
-          }
+          fi
 
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
-          /usr/bin/ditto -c -k --sequesterRsrc --keepParent Payload WorkshopDownloader.ipa
+          /usr/bin/ditto -c -k --sequesterRsrc --keepParent \
+            Payload WorkshopDownloader.ipa
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
