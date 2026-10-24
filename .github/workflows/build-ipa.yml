@@ -1,0 +1,161 @@
+name: Build Steam Workshop IPA
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Create SwiftUI app
+        run: |
+          mkdir -p Sources
+
+          cat > project.yml <<'EOF'
+          name: WorkshopDownloader
+          options:
+            bundleIdPrefix: com.shplash
+          settings:
+            base:
+              IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+              SWIFT_VERSION: "5.0"
+          targets:
+            WorkshopDownloader:
+              type: application
+              platform: iOS
+              sources:
+                - Sources
+              settings:
+                base:
+                  PRODUCT_BUNDLE_IDENTIFIER: com.shplash.workshopdownloader
+                  PRODUCT_NAME: WorkshopDownloader
+                  TARGETED_DEVICE_FAMILY: "1,2"
+                  GENERATE_INFOPLIST_FILE: YES
+                  INFOPLIST_KEY_CFBundleDisplayName: Workshop Downloader
+          EOF
+
+          cat > Sources/ContentView.swift <<'EOF'
+          import SwiftUI
+
+          @main
+          struct WorkshopDownloaderApp: App {
+              var body: some Scene {
+                  WindowGroup {
+                      ContentView()
+                  }
+              }
+          }
+
+          struct ContentView: View {
+              @State private var workshopURL = ""
+              @State private var selectedTab = 0
+
+              var body: some View {
+                  TabView(selection: $selectedTab) {
+                      NavigationStack {
+                          Form {
+                              Section("Workshop item") {
+                                  TextField(
+                                      "Paste Steam Workshop URL",
+                                      text: $workshopURL
+                                  )
+                                  .keyboardType(.URL)
+                                  .textInputAutocapitalization(.never)
+                                  .autocorrectionDisabled()
+
+                                  Button("Prepare download") {
+                                      selectedTab = 1
+                                  }
+                                  .disabled(workshopURL.trimmingCharacters(
+                                      in: .whitespacesAndNewlines
+                                  ).isEmpty)
+                              }
+
+                              Section("Status") {
+                                  Label(
+                                      "Downloader setup",
+                                      systemImage: "arrow.down.circle"
+                                  )
+                                  Text(
+                                      "Steam authentication and downloading " +
+                                      "will be connected in the next stage."
+                                  )
+                                  .foregroundStyle(.secondary)
+                              }
+                          }
+                          .navigationTitle("Workshop Downloader")
+                      }
+                      .tabItem {
+                          Label("Download", systemImage: "arrow.down.circle")
+                      }
+                      .tag(0)
+
+                      NavigationStack {
+                          List {
+                              Text("Downloaded items will appear here.")
+                                  .foregroundStyle(.secondary)
+                          }
+                          .navigationTitle("Library")
+                      }
+                      .tabItem {
+                          Label("Library", systemImage: "square.grid.2x2")
+                      }
+                      .tag(1)
+
+                      NavigationStack {
+                          List {
+                              Text("Download history will appear here.")
+                                  .foregroundStyle(.secondary)
+                          }
+                          .navigationTitle("History")
+                      }
+                      .tabItem {
+                          Label("History", systemImage: "clock")
+                      }
+                      .tag(2)
+                  }
+              }
+          }
+          EOF
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build unsigned iOS app
+        run: |
+          xcodebuild \
+            -project WorkshopDownloader.xcodeproj \
+            -scheme WorkshopDownloader \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Package IPA
+        run: |
+          APP_PATH="build/Build/Products/Release-iphoneos/WorkshopDownloader.app"
+          test -d "$APP_PATH"
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
+          zip -qry WorkshopDownloader.ipa Payload
+          test -f WorkshopDownloader.ipa
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WorkshopDownloader-IPA
+          path: WorkshopDownloader.ipa
+          if-no-files-found: error
+          retention-days: 7
