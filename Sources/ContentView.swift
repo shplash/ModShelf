@@ -123,7 +123,7 @@ final class WorkshopStore: ObservableObject {
             DownloadRecord(workshopID: $0, title: "Workshop item \($0)", date: Date(), result: "Attempted")
         }
         status = engine.status()
-        startPolling()
+        // Poll only while a login or download is active, not while the app is idle.
         if !username.isEmpty && !password.isEmpty { Task { await signIn(automatic: true) } }
     }
 
@@ -131,9 +131,16 @@ final class WorkshopStore: ObservableObject {
 
     private func startPolling() {
         guard poller == nil else { return }
-        poller = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refreshState() }
+        poller = Timer.scheduledTimer(withTimeInterval: 0.75, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.refreshState()
+            }
         }
+    }
+
+    private func stopPolling() {
+        poller?.invalidate()
+        poller = nil
     }
     private static func load<T: Decodable>(_ type: T.Type, key: String) -> T? {
         guard let data = UserDefaults.standard.data(forKey: key) else { return nil }
@@ -226,12 +233,14 @@ final class WorkshopStore: ObservableObject {
             return
         }
         isBusy = true; status = "Signing in to Steam…"; errorMessage = ""
+        startPolling()
         let user = username, pass = password, code = guardCode, path = sessionPath
         let activeEngine = engine
         let result = await Task.detached(priority: .userInitiated) {
             activeEngine.login(user, password: pass, guardCode: code, cachePath: path)
         }.value
         isBusy = false
+        stopPolling()
         status = engine.status()
         if engine.isAuthenticated() {
             Keychain.write(username, key: "steam.username")
@@ -267,23 +276,39 @@ final class WorkshopStore: ObservableObject {
             try? FileManager.default.removeItem(at: staging)
             errorMessage = result; status = result; record(id, title: meta.title, result: "Failed", error: result); return
         }
-        isBusy = true; progress = 0; currentFile = ""; status = "Starting download…"; lastOutcome = ""
+        isBusy = true
+        progress = 0
+        currentFile = ""
+        status = "Starting download…"
+        lastOutcome = ""
+        lastObservedTerminalStatus = ""
         record(id, title: meta.title, result: "Downloading")
+        startPolling()
         // Store staging path in memory so only a verified completed download is promoted.
         UserDefaults.standard.set(staging.path, forKey: "modshelf.activeStaging")
         UserDefaults.standard.set(finalFolder.path, forKey: "modshelf.activeFinal")
     }
 
     func refreshState() {
-        status = engine.status()
-        progress = min(1, max(0, engine.progress()))
-        currentFile = engine.currentFile()
-        guard isBusy else { return }
-        let s = status.lowercased()
+        let nextStatus = engine.status()
+        let nextProgress = min(1, max(0, engine.progress()))
+        let nextFile = engine.currentFile()
+
+        // Avoid triggering SwiftUI updates when the engine state has not changed.
+        if status != nextStatus { status = nextStatus }
+        if abs(progress - nextProgress) > 0.001 { progress = nextProgress }
+        if currentFile != nextFile { currentFile = nextFile }
+
+        guard isBusy else {
+            stopPolling()
+            return
+        }
+
+        let s = nextStatus.lowercased()
         guard ["download complete", "download failed", "download cancelled"].contains(where: { s.contains($0) }) else { return }
-        guard status != lastObservedTerminalStatus || isBusy else { return }
-        lastObservedTerminalStatus = status
+        lastObservedTerminalStatus = nextStatus
         isBusy = false
+        stopPolling()
         let stagingPath = UserDefaults.standard.string(forKey: "modshelf.activeStaging") ?? ""
         let finalPath = UserDefaults.standard.string(forKey: "modshelf.activeFinal") ?? ""
         UserDefaults.standard.removeObject(forKey: "modshelf.activeStaging")
