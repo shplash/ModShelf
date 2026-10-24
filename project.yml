@@ -1,0 +1,32 @@
+name: WorkshopDownloader
+options:
+  bundleIdPrefix: com.shplash
+  deploymentTarget:
+    iOS: "16.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+    TARGETED_DEVICE_FAMILY: "1"
+targets:
+  WorkshopDownloader:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+    dependencies:
+      - framework:
+          path: SteamEngine.xcframework
+          embed: true
+      - package: ZIPFoundation
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.shplash.workshopdownloader
+        PRODUCT_NAME: WorkshopDownloader
+        INFOPLIST_KEY_CFBundleDisplayName: Workshop Downloader
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGNING_ALLOWED: NO
+packages:
+  ZIPFoundation:
+    url: https://github.com/weichsel/ZIPFoundation.git
+    from: 0.9.19
