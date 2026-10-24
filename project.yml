@@ -1,4 +1,4 @@
-name: WorkshopDownloader
+name: ModShelf
 options:
   bundleIdPrefix: com.shplash
   deploymentTarget:
@@ -20,8 +20,8 @@ targets:
       - package: ZIPFoundation
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.shplash.workshopdownloader
-        PRODUCT_NAME: WorkshopDownloader
+        PRODUCT_BUNDLE_IDENTIFIER: com.shplash.modshelf
+        PRODUCT_NAME: ModShelf
         INFOPLIST_KEY_CFBundleDisplayName: ModShelf
         GENERATE_INFOPLIST_FILE: YES
         CODE_SIGNING_ALLOWED: NO
