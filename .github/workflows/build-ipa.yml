@@ -1,11 +1,10 @@
-
 name: Build Steam Workshop IPA
 
 on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -67,6 +66,8 @@ jobs:
 
       - name: Package IPA
         run: |
+          set -euo pipefail
+
           APP_PATH="build/Build/Products/Release-iphoneos/WorkshopDownloader.app"
 
           if [ ! -d "$APP_PATH" ]; then
@@ -74,10 +75,24 @@ jobs:
             exit 1
           fi
 
+          rm -rf Payload WorkshopDownloader.ipa
           mkdir -p Payload
-          cp -R "$APP_PATH" Payload/
+          cp -R "$APP_PATH" Payload/WorkshopDownloader.app
+
           /usr/bin/ditto -c -k --sequesterRsrc --keepParent \
             Payload WorkshopDownloader.ipa
+
+          echo "Checking IPA archive..."
+          /usr/bin/unzip -t WorkshopDownloader.ipa
+          /usr/bin/unzip -l WorkshopDownloader.ipa
+
+          if ! /usr/bin/unzip -Z1 WorkshopDownloader.ipa | grep -q '^Payload/WorkshopDownloader.app/'; then
+            echo "ERROR: IPA does not contain the expected app bundle."
+            exit 1
+          fi
+
+          shasum -a 256 WorkshopDownloader.ipa
+          ls -lh WorkshopDownloader.ipa
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
@@ -85,3 +100,16 @@ jobs:
           name: WorkshopDownloader-IPA
           path: WorkshopDownloader.ipa
           if-no-files-found: error
+          compression-level: 0
+
+      - name: Publish direct IPA download
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ios-build
+          name: iOS Build
+          body: Latest unsigned Workshop Downloader IPA.
+          prerelease: true
+          files: WorkshopDownloader.ipa
+          overwrite_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
