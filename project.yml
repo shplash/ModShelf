@@ -15,9 +15,8 @@ targets:
     sources:
       - Sources
     dependencies:
-      - framework:
-          path: SteamEngine.xcframework
-          embed: true
+      - framework: SteamEngine.xcframework
+        embed: true
       - package: ZIPFoundation
     settings:
       base:
