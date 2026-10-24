@@ -1,5 +1,5 @@
 
-name: iOS Go Compatibility Test
+name: Steam Engine iOS Compatibility
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ permissions:
 jobs:
   build:
     runs-on: macos-15
-    timeout-minutes: 30
+    timeout-minutes: 40
 
     steps:
       - name: Checkout repository
@@ -22,7 +22,7 @@ jobs:
           go-version: '1.26.x'
           cache: false
 
-      - name: Install gomobile tools
+      - name: Install gomobile
         run: |
           go install golang.org/x/mobile/cmd/gomobile@latest
           go install golang.org/x/mobile/cmd/gobind@latest
@@ -31,30 +31,37 @@ jobs:
       - name: Initialise gomobile
         run: gomobile init
 
-      - name: Create minimal Go wrapper
+      - name: Create engine bridge
         run: |
-          mkdir -p ios-test
-          cd ios-test
-          go mod init example.com/iostest
-          cat > bridge.go <<'EOF'
-          package iostest
+          mkdir -p ios-engine-test
+          cd ios-engine-test
+          go mod init example.com/iosenginetest
 
-          func Greeting() string {
-              return "iOS Go bridge works"
+          cat > bridge.go <<'EOF'
+          package iosenginetest
+
+          import steam "github.com/BirknerAlex/go-steam"
+
+          func EngineCompileCheck() string {
+              _ = steam.New
+              return "Steam engine linked"
           }
           EOF
 
-      - name: Add gomobile module dependency
-        working-directory: ios-test
-        run: go get -tool golang.org/x/mobile/cmd/gobind
+      - name: Add dependencies
+        working-directory: ios-engine-test
+        run: |
+          go get -tool golang.org/x/mobile/cmd/gobind
+          go get github.com/BirknerAlex/go-steam@latest
+          go mod tidy
 
-      - name: Build iOS framework
-        working-directory: ios-test
+      - name: Compile Steam engine for iOS
+        working-directory: ios-engine-test
         run: |
           gomobile bind -v -target=ios \
-            -o ../IOSBridge.xcframework .
+            -o ../SteamEngine.xcframework .
 
       - name: Verify framework
         run: |
-          test -d IOSBridge.xcframework
-          find IOSBridge.xcframework -maxdepth 3 -type f
+          test -d SteamEngine.xcframework
+          find SteamEngine.xcframework -maxdepth 3 -type f
