@@ -18,7 +18,4 @@ In GitHub, open Actions → Build Steam Workshop IPA → Run workflow. When it f
 
 The IPA is unsigned. It must be signed before iOS will install it normally.
 
-## Limitations
-The Go engine previously passed an iOS framework compile check, but this app's integrated framework and live Steam sign-in/downloads still need a successful Actions build and on-device test. Steam Workshop access generally requires an authenticated account with access to the parent game. If Steam Guard is requested, enter the code and retry sign-in. Collection URLs are not supported yet.
-
 This is an unofficial project and is not affiliated with Valve. Only download content you are entitled to access.
