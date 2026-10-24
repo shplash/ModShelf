@@ -1,3 +1,4 @@
+
 import SwiftUI
 import UIKit
 import Security
@@ -51,7 +52,10 @@ final class WorkshopStore: ObservableObject {
         }
     }
 
-    private static func load<T: Decodable>(_ type: T.Type, key: String) -> T? {
+    private static func load<T: Decodable>(
+        _ type: T.Type,
+        key: String
+    ) -> T? {
         guard let data = UserDefaults.standard.data(forKey: key) else {
             return nil
         }
@@ -175,6 +179,30 @@ final class WorkshopStore: ObservableObject {
         save(library, key: "library")
     }
 
+    func clearHistory() {
+        history.removeAll()
+        save(history, key: "history")
+    }
+
+    func clearTemporaryExports() {
+        let temp = FileManager.default.temporaryDirectory
+
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: temp,
+            includingPropertiesForKeys: nil
+        ) else {
+            return
+        }
+
+        for file in files where
+            file.lastPathComponent.hasPrefix("Workshop-")
+            && file.pathExtension == "zip" {
+            try? FileManager.default.removeItem(at: file)
+        }
+
+        exportURL = nil
+    }
+
     func export(_ item: WorkshopItem) {
         let source = URL(
             fileURLWithPath: item.folder,
@@ -278,6 +306,21 @@ final class WorkshopStore: ObservableObject {
 struct ContentView: View {
     @StateObject private var store = WorkshopStore()
     @State private var selectedTab = 0
+
+    @AppStorage("options.appearance")
+    private var appearance = "system"
+
+    @AppStorage("options.confirmDelete")
+    private var confirmDelete = true
+
+    @AppStorage("options.showIDs")
+    private var showIDs = false
+
+    @AppStorage("options.compactLibrary")
+    private var compactLibrary = false
+
+    @State private var pendingDelete: WorkshopItem?
+    @State private var showDeleteConfirmation = false
 
     var body: some View {
         TabView(selection: $selectedTab) {
@@ -404,7 +447,7 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                     }
                 }
-                .navigationTitle("Workshop")
+                .navigationTitle("Download")
             }
             .tabItem {
                 Label("Download", systemImage: "arrow.down.circle")
@@ -419,9 +462,16 @@ struct ContentView: View {
                     }
 
                     ForEach(store.library) { item in
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Workshop item \(item.id)")
-                                .font(.headline)
+                        VStack(
+                            alignment: .leading,
+                            spacing: compactLibrary ? 4 : 8
+                        ) {
+                            Text(
+                                showIDs
+                                    ? "Workshop item \(item.id)"
+                                    : "Downloaded mod"
+                            )
+                            .font(.headline)
 
                             Text(
                                 "Last updated \(item.updatedAt.formatted(date: .abbreviated, time: .shortened))"
@@ -444,17 +494,42 @@ struct ContentView: View {
                                 Spacer()
 
                                 Button(role: .destructive) {
-                                    store.remove(item)
+                                    if confirmDelete {
+                                        pendingDelete = item
+                                        showDeleteConfirmation = true
+                                    } else {
+                                        store.remove(item)
+                                    }
                                 } label: {
                                     Image(systemName: "trash")
                                 }
                             }
                             .buttonStyle(.borderless)
                         }
-                        .padding(.vertical, 4)
+                        .padding(.vertical, compactLibrary ? 0 : 4)
                     }
                 }
                 .navigationTitle("Library")
+                .confirmationDialog(
+                    "Remove this mod?",
+                    isPresented: $showDeleteConfirmation,
+                    titleVisibility: .visible
+                ) {
+                    Button("Remove from Library", role: .destructive) {
+                        if let item = pendingDelete {
+                            store.remove(item)
+                        }
+                        pendingDelete = nil
+                    }
+
+                    Button("Cancel", role: .cancel) {
+                        pendingDelete = nil
+                    }
+                } message: {
+                    Text(
+                        "This removes the entry from your library, not the downloaded files."
+                    )
+                }
                 .sheet(
                     item: Binding(
                         get: {
@@ -502,7 +577,75 @@ struct ContentView: View {
                 Label("History", systemImage: "clock")
             }
             .tag(2)
+
+            NavigationStack {
+                Form {
+                    Section("Appearance") {
+                        Picker("Theme", selection: $appearance) {
+                            Text("System").tag("system")
+                            Text("Dark").tag("dark")
+                            Text("Light").tag("light")
+                        }
+                    }
+
+                    Section("Library") {
+                        Toggle(
+                            "Confirm before deleting",
+                            isOn: $confirmDelete
+                        )
+
+                        Toggle(
+                            "Show Workshop IDs",
+                            isOn: $showIDs
+                        )
+
+                        Toggle(
+                            "Compact library",
+                            isOn: $compactLibrary
+                        )
+                    }
+
+                    Section("Storage & History") {
+                        Button("Clear Download History", role: .destructive) {
+                            store.clearHistory()
+                        }
+
+                        Button(
+                            "Clear Temporary ZIP Exports",
+                            role: .destructive
+                        ) {
+                            store.clearTemporaryExports()
+                        }
+
+                        Text(
+                            "Clearing history does not delete downloaded mods. Clearing temporary exports may remove ZIP files created for sharing."
+                        )
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    }
+
+                    Section("About ModShelf") {
+                        Label(
+                            "Your Steam Workshop library, on iPhone.",
+                            systemImage: "square.grid.2x2.fill"
+                        )
+
+                        Text("Unofficial app. Not affiliated with Valve.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .navigationTitle("Options")
+            }
+            .tabItem {
+                Label("Options", systemImage: "slider.horizontal.3")
+            }
+            .tag(3)
         }
+        .preferredColorScheme(
+            appearance == "dark" ? .dark :
+                appearance == "light" ? .light : nil
+        )
     }
 }
 
