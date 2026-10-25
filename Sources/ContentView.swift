@@ -14,6 +14,7 @@ struct ModShelfApp: App {
 }
 
 let modShelfInfoFileName = "ModShelf Information.txt"
+let modShelfVersion = "0.1.0"
 
 // MARK: - Models
 
@@ -216,24 +217,90 @@ final class ImageStore {
         cfg.requestCachePolicy = .returnCacheDataElseLoad
         session = URLSession(configuration: cfg)
     }
-    func cached(_ url: URL) -> UIImage? { memory.object(forKey: url.absoluteString as NSString) }
+
+    /// "loop", "repeat5" or "off". Read from the Options setting "Workshop GIFs".
+    static var gifMode: String { UserDefaults.standard.string(forKey: "options.gifMode") ?? "loop" }
+
+    private func key(_ url: URL) -> NSString { (url.absoluteString + "|" + Self.gifMode) as NSString }
+    func cached(_ url: URL) -> UIImage? { memory.object(forKey: key(url)) }
+
     func load(_ url: URL, maxPixel: CGFloat) async -> UIImage? {
-        let key = url.absoluteString as NSString
-        if let hit = memory.object(forKey: key) { return hit }
+        let k = key(url)
+        if let hit = memory.object(forKey: k) { return hit }
         guard let (data, _) = try? await session.data(from: url) else { return nil }
+        let animate = Self.isGIF(data) && Self.gifMode != "off"
         let image = await Task.detached(priority: .utility) { () -> UIImage? in
-            let opts: [CFString: Any] = [kCGImageSourceCreateThumbnailFromImageAlways: true,
-                                         kCGImageSourceCreateThumbnailWithTransform: true,
-                                         kCGImageSourceThumbnailMaxPixelSize: maxPixel]
-            if let src = CGImageSourceCreateWithData(data as CFData, nil),
-               let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) { return UIImage(cgImage: cg) }
-            return UIImage(data: data)
+            animate ? Self.animatedGIF(data, maxPixel: maxPixel) : Self.still(data, maxPixel: maxPixel)
         }.value
         if let image {
             let cost = Int(image.size.width * image.size.height * image.scale * image.scale * 4)
-            memory.setObject(image, forKey: key, cost: cost)
+            memory.setObject(image, forKey: k, cost: cost)
         }
         return image
+    }
+
+    static func isGIF(_ data: Data) -> Bool {
+        data.count > 3 && data[0] == 0x47 && data[1] == 0x49 && data[2] == 0x46
+    }
+
+    static func still(_ data: Data, maxPixel: CGFloat) -> UIImage? {
+        let opts: [CFString: Any] = [kCGImageSourceCreateThumbnailFromImageAlways: true,
+                                     kCGImageSourceCreateThumbnailWithTransform: true,
+                                     kCGImageSourceThumbnailMaxPixelSize: maxPixel]
+        if let src = CGImageSourceCreateWithData(data as CFData, nil),
+           let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) { return UIImage(cgImage: cg) }
+        return UIImage(data: data)
+    }
+
+    /// Every frame of the GIF, with its real timing, as one animated UIImage.
+    static func animatedGIF(_ data: Data, maxPixel: CGFloat) -> UIImage? {
+        guard let src = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        let count = CGImageSourceGetCount(src)
+        guard count > 1 else { return still(data, maxPixel: maxPixel) }
+        let opts: [CFString: Any] = [kCGImageSourceCreateThumbnailFromImageAlways: true,
+                                     kCGImageSourceCreateThumbnailWithTransform: true,
+                                     kCGImageSourceThumbnailMaxPixelSize: maxPixel]
+        var frames: [UIImage] = []
+        var total: Double = 0
+        for i in 0..<count {
+            guard let cg = CGImageSourceCreateThumbnailAtIndex(src, i, opts as CFDictionary) else { continue }
+            var delay = 0.1
+            if let props = CGImageSourceCopyPropertiesAtIndex(src, i, nil) as? [CFString: Any],
+               let gif = props[kCGImagePropertyGIFDictionary] as? [CFString: Any] {
+                let d = (gif[kCGImagePropertyGIFUnclampedDelayTime] as? Double) ?? (gif[kCGImagePropertyGIFDelayTime] as? Double) ?? 0.1
+                delay = d > 0.011 ? d : 0.1
+            }
+            total += delay
+            frames.append(UIImage(cgImage: cg))
+        }
+        guard !frames.isEmpty else { return nil }
+        return UIImage.animatedImage(with: frames, duration: total)
+    }
+}
+
+/// Plays an animated image. "loops" is the repeat count; 0 loops forever.
+/// The animation starts again each time this view is created, which happens every time a mod's view opens.
+struct AnimatedUIImageView: UIViewRepresentable {
+    let image: UIImage
+    var fill = true
+    var loops = 0
+
+    func makeUIView(context: Context) -> UIImageView {
+        let view = UIImageView()
+        view.contentMode = fill ? .scaleAspectFill : .scaleAspectFit
+        view.clipsToBounds = true
+        view.animationRepeatCount = loops
+        view.image = image
+        view.startAnimating()
+        return view
+    }
+
+    func updateUIView(_ view: UIImageView, context: Context) {
+        if view.image !== image {
+            view.image = image
+            view.animationRepeatCount = loops
+            view.startAnimating()
+        }
     }
 }
 
@@ -241,98 +308,29 @@ struct CachedImage: View {
     let urlString: String?
     var fill = true
     var maxPixel: CGFloat = 600
-    @AppStorage("options.gifAnimate") private var gifAnimate = true
+    @AppStorage("options.gifMode") private var gifMode = "loop"
     @State private var image: UIImage?
+
     var body: some View {
-        if gifAnimate, let u = urlString, u.lowercased().contains(".gif") {
-            AnimatedGIFView(urlString: u, fill: fill, loops: 5)
-                .id(u)
-        } else {
-            stillImage
-        }
-    }
-    private var stillImage: some View {
         ZStack {
             if let image {
-                if fill { Image(uiImage: image).resizable().scaledToFill() }
-                else { Image(uiImage: image).resizable().scaledToFit() }
+                if image.images != nil {
+                    AnimatedUIImageView(image: image, fill: fill, loops: gifMode == "repeat5" ? 5 : 0)
+                } else if fill {
+                    Image(uiImage: image).resizable().scaledToFill()
+                } else {
+                    Image(uiImage: image).resizable().scaledToFit()
+                }
             } else {
                 Color(uiColor: .tertiarySystemFill)
                 Image(systemName: "shippingbox").font(.title2).foregroundStyle(.tertiary)
             }
         }
-        .task(id: urlString) {
+        .task(id: (urlString ?? "") + gifMode) {
             guard let s = urlString, !s.isEmpty, let url = URL(string: s) else { image = nil; return }
             if let hit = ImageStore.shared.cached(url) { image = hit; return }
             image = await ImageStore.shared.load(url, maxPixel: maxPixel)
         }
-    }
-}
-
-// MARK: - Animated GIFs (5 loops, restarts every time the view appears)
-
-struct AnimatedGIFView: UIViewRepresentable {
-    let urlString: String
-    var fill = true
-    var loops = 5
-
-    func makeUIView(context: Context) -> UIImageView {
-        let view = UIImageView()
-        view.contentMode = fill ? .scaleAspectFill : .scaleAspectFit
-        view.clipsToBounds = true
-        view.backgroundColor = .clear
-        return view
-    }
-
-    func updateUIView(_ view: UIImageView, context: Context) {
-        guard context.coordinator.loadedURL != urlString else { return }
-        context.coordinator.loadedURL = urlString
-        guard let url = URL(string: urlString) else { return }
-        Task {
-            guard let (data, _) = try? await URLSession.shared.data(from: url),
-                  let animated = await Self.decode(data) else { return }
-            await MainActor.run {
-                view.animationImages = nil
-                view.image = animated
-                view.animationRepeatCount = loops
-                view.startAnimating()
-                // Stop on the last frame after the final loop, as a still image.
-                DispatchQueue.main.asyncAfter(deadline: .now() + animated.duration * Double(loops) + 0.05) {
-                    view.stopAnimating()
-                    view.image = animated.images?.first
-                }
-            }
-        }
-    }
-
-    func makeCoordinator() -> Coordinator { Coordinator() }
-    final class Coordinator { var loadedURL: String? }
-
-    /// Decodes every frame of the GIF into a single animated UIImage, scaled down to limit memory.
-    static func decode(_ data: Data) async -> UIImage? {
-        await Task.detached(priority: .utility) { () -> UIImage? in
-            guard let src = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
-            let count = CGImageSourceGetCount(src)
-            guard count > 0 else { return nil }
-            var frames: [UIImage] = []
-            var total: Double = 0
-            let opts: [CFString: Any] = [kCGImageSourceCreateThumbnailFromImageAlways: true,
-                                         kCGImageSourceCreateThumbnailWithTransform: true,
-                                         kCGImageSourceThumbnailMaxPixelSize: 600]
-            for i in 0..<count {
-                guard let cg = CGImageSourceCreateThumbnailAtIndex(src, i, opts as CFDictionary) else { continue }
-                var delay = 0.1
-                if let props = CGImageSourceCopyPropertiesAtIndex(src, i, nil) as? [CFString: Any],
-                   let gif = props[kCGImagePropertyGIFDictionary] as? [CFString: Any] {
-                    let d = (gif[kCGImagePropertyGIFUnclampedDelayTime] as? Double) ?? (gif[kCGImagePropertyGIFDelayTime] as? Double) ?? 0.1
-                    delay = d > 0.011 ? d : 0.1
-                }
-                total += delay
-                frames.append(UIImage(cgImage: cg))
-            }
-            guard !frames.isEmpty else { return nil }
-            return UIImage.animatedImage(with: frames, duration: total)
-        }.value
     }
 }
 
@@ -1488,7 +1486,7 @@ struct ContentView: View {
     @AppStorage("options.showIDs") private var showIDs = false
     @AppStorage("options.compactLibrary") private var compactLibrary = true
     @AppStorage("options.haptics") private var haptics = true
-    @AppStorage("options.gifAnimate") private var gifAnimate = true
+    @AppStorage("options.gifMode") private var gifMode = "loop"
     @AppStorage("options.tabStyle") private var tabStyle = "bar"
     @AppStorage("options.sortOrder") private var sortOrder = "Recently added"
     @AppStorage("options.autoCheck") private var autoCheck = true
@@ -1514,6 +1512,9 @@ struct ContentView: View {
     @State private var themeOpen = false
     @State private var tabStyleOpen = false
     @State private var sortOpen = false
+
+    /// Space reserved under every tab for the tab bar, so content can always scroll clear of it.
+    private var tabBarReserve: CGFloat { tabStyle == "bar" ? 84 : 100 }
 
     private let sortOrders = ["Recently added", "Oldest added", "Name", "Updates first", "Highest rated", "Favourites first"]
 
@@ -1595,6 +1596,7 @@ struct ContentView: View {
         .safeAreaInset(edge: .bottom, spacing: 0) {
             AppTabBar(selected: $selectedTab, style: tabStyle, collapsed: tabCollapsed,
                       libraryBadge: store.library.contains(where: { $0.updateAvailable }))
+                .frame(height: tabBarReserve, alignment: .bottom)
         }
         .tint(Color.accentColor)
         .preferredColorScheme(appearance == "System" ? nil : (appearance == "Dark" ? .dark : .light))
@@ -1798,7 +1800,7 @@ struct ContentView: View {
                         if store.preview == nil && !store.isDownloading { browseRow }
                         if !store.operationMessage.isEmpty { operationBanner }
                     }
-                    .padding(.horizontal, 15).padding(.top, 10).padding(.bottom, 24)
+                    .padding(.horizontal, 15).padding(.top, 10).padding(.bottom, tabBarReserve)
                 }
             }
             .coordinateSpace(name: "scroll")
@@ -1883,21 +1885,36 @@ struct ContentView: View {
     }
 
     private var progressCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text(store.status).font(.headline).lineLimit(1)
-                Spacer()
-                Text("\(Int(store.progress * 100))%").font(.subheadline.monospacedDigit().weight(.semibold))
+        HStack(spacing: 14) {
+            ZStack {
+                Circle().stroke(Color.accentColor.opacity(0.18), lineWidth: 6)
+                Circle().trim(from: 0, to: max(0.02, store.progress))
+                    .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 6, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                    .animation(.easeOut(duration: 0.25), value: store.progress)
+                Text("\(Int(store.progress * 100))%").font(.system(size: 13, weight: .bold).monospacedDigit())
             }
-            ProgressView(value: store.progress).tint(.accentColor)
-            if !store.currentFile.isEmpty { Text(store.currentFile).font(.caption).foregroundStyle(.secondary).lineLimit(2) }
-            Button { store.cancel() } label: {
-                Text("Cancel download").font(.system(size: 14, weight: .semibold)).foregroundStyle(Color.red)
-                    .padding(.horizontal, 14).frame(height: 36)
-                    .background(RoundedRectangle(cornerRadius: 10).fill(Color.red.opacity(0.12)))
-            }.buttonStyle(.plain)
+            .frame(width: 62, height: 62)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(store.activeTitle.isEmpty ? "Downloading" : store.activeTitle)
+                    .font(.system(size: 15, weight: .semibold)).lineLimit(1)
+                Text(store.status).font(.system(size: 13)).foregroundStyle(.secondary).lineLimit(1)
+                if !store.currentFile.isEmpty {
+                    Text(store.currentFile).font(.system(size: 11)).foregroundStyle(.tertiary)
+                        .lineLimit(1).truncationMode(.middle)
+                }
+            }
+            Spacer(minLength: 0)
+            Button { Haptics.tap(); store.cancel() } label: {
+                Image(systemName: "xmark").font(.system(size: 13, weight: .bold)).foregroundStyle(.red)
+                    .frame(width: 34, height: 34)
+                    .background(Circle().fill(Color.red.opacity(0.12)))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Cancel download")
         }
-        .padding(15).background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+        .padding(14)
+        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
     }
 
     private func downloadButton(_ item: WorkshopMetadata) -> some View {
@@ -2158,7 +2175,7 @@ struct ContentView: View {
                 LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 16) {
                     ForEach(items) { item in gridCard(item) }
                 }
-                .padding(.horizontal, 14).padding(.top, 2).padding(.bottom, 24)
+                .padding(.horizontal, 14).padding(.top, 2).padding(.bottom, tabBarReserve)
             }
         }
         .coordinateSpace(name: "scroll")
@@ -2176,7 +2193,7 @@ struct ContentView: View {
                         Rectangle().fill(Color.gray.opacity(0.2)).frame(height: 0.5).padding(.leading, 112)
                     }
                 }
-                .padding(.bottom, 24)
+                .padding(.bottom, tabBarReserve)
             }
         }
         .coordinateSpace(name: "scroll")
@@ -2224,8 +2241,8 @@ struct ContentView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             }
             .buttonStyle(.plain)
-            .overlay(alignment: .topLeading) { favouriteStar(item, size: 15) }
-            .overlay(alignment: .topTrailing) { dotsButton(item, circle: 26) }
+            .overlay(alignment: .topLeading) { favouriteStar(item, size: 15).padding(8) }
+            .overlay(alignment: .topTrailing) { dotsButton(item, circle: 29).padding(8) }
 
             Button { Haptics.tap(); popupItem = item } label: {
                 VStack(alignment: .leading, spacing: 3) {
@@ -2268,7 +2285,7 @@ struct ContentView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            dotsButton(item, circle: 30)
+            dotsButton(item, circle: 26)
         }
         .padding(.horizontal, 15).padding(.vertical, 10)
     }
@@ -2289,7 +2306,7 @@ struct ContentView: View {
                                 Rectangle().fill(Color.gray.opacity(0.2)).frame(height: 0.5).padding(.leading, 83)
                             }
                         }
-                        .padding(.bottom, 24)
+                        .padding(.bottom, tabBarReserve)
                     }
                 }
                 .coordinateSpace(name: "scroll")
@@ -2365,6 +2382,7 @@ struct ContentView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
+                    ScrollOffsetReader()
                     Text("Options").font(.system(size: 27, weight: .bold, design: .rounded)).padding(.top, 10)
 
                     settingsGroup("Appearance") {
@@ -2392,7 +2410,15 @@ struct ContentView: View {
                         divider
                         toggleRow("Haptic feedback", symbol: "iphone.radiowaves.left.and.right", isOn: $haptics)
                         divider
-                        toggleRow("Animate GIF icons (5 loops)", symbol: "sparkles", isOn: $gifAnimate)
+                        row("Workshop GIFs", symbol: "sparkles") {
+                            Menu {
+                                ForEach([("loop", "On (loops forever)"), ("repeat5", "Repeat 5 times"), ("off", "Off (still image)")], id: \.0) { mode in
+                                    Button { Haptics.select(); gifMode = mode.0 } label: {
+                                        if gifMode == mode.0 { Label(mode.1, systemImage: "checkmark") } else { Text(mode.1) }
+                                    }
+                                }
+                            } label: { menuChip(gifMode == "loop" ? "On" : (gifMode == "repeat5" ? "Repeat 5×" : "Off")) }
+                        }
                         divider
                         VStack(alignment: .leading, spacing: 8) {
                             HStack {
@@ -2453,21 +2479,21 @@ struct ContentView: View {
                     }
 
                     settingsGroup("Credits") {
-                        creditRow("ModShelf", "Created by Splash (@shplash)")
+                        creditRow("ModShelf", "Created by Splash (@shplash) · Version \(modShelfVersion) beta")
                         divider
-                        creditRow("go-steam", "Steam protocol library by Alexander Birkner (@BirknerAlex) · MIT license")
+                        creditLicenseRow("go-steam", "Engine by Alexander Birkner (@BirknerAlex)", license: "MIT License")
                         divider
                         VStack(alignment: .leading, spacing: 6) {
-                            Text("Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown")")
-                                .font(.system(size: 12)).foregroundStyle(.secondary)
                             Text("Steam and the Steam Workshop are trademarks of Valve Corporation. ModShelf is not made by or endorsed by Valve.")
                                 .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                         }
                         .padding(.horizontal, 15).padding(.vertical, 12)
                     }
                 }
-                .padding(.horizontal, 15).padding(.bottom, 24)
+                .padding(.horizontal, 15).padding(.bottom, tabBarReserve)
             }
+            .coordinateSpace(name: "scroll")
+            .onPreferenceChange(ScrollOffsetKey.self) { handleScroll($0) }
             .background(Color(uiColor: .systemGroupedBackground))
             .toolbar(.hidden, for: .navigationBar)
         }
@@ -2476,6 +2502,19 @@ struct ContentView: View {
     private func creditRow(_ title: String, _ detail: String) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(title).font(.system(size: 15, weight: .semibold))
+            Text(detail).font(.system(size: 13)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 15).padding(.vertical, 11)
+    }
+
+    private func creditLicenseRow(_ title: String, _ detail: String, license: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(title).font(.system(size: 15, weight: .semibold))
+                Text(license).font(.system(size: 11)).foregroundStyle(.tertiary)
+                Spacer(minLength: 0)
+            }
             Text(detail).font(.system(size: 13)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -2825,16 +2864,8 @@ struct MediaCarousel: View {
                             CachedImage(urlString: url, fill: false, maxPixel: 1000)
                                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                         case .video(let id):
-                            VStack(spacing: 8) {
-                                YouTubeView(videoID: id)
-                                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                                Link(destination: URL(string: "https://www.youtube.com/watch?v=\(id)")!) {
-                                    Label("Open in YouTube", systemImage: "arrow.up.right.square")
-                                        .font(.system(size: 14, weight: .semibold))
-                                        .frame(maxWidth: .infinity).frame(height: 36)
-                                        .background(Capsule().fill(Color(uiColor: .tertiarySystemFill)))
-                                }
-                            }
+                            YouTubeView(videoID: id)
+                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                         }
                     }
                     .padding(.horizontal, 2)
@@ -2855,8 +2886,8 @@ struct MediaCarousel: View {
     }
 }
 
-/// Embeds a YouTube video. Loading it from a bare youtube.com URL in a WKWebView triggers Error 153,
-/// so the player is served from an HTML page with a real base URL, which YouTube accepts.
+/// Embeds a YouTube video using the player's own controls (mute, quality, fullscreen).
+/// Links inside the player, such as "Watch on YouTube", open in the YouTube app or Safari instead of this page.
 struct YouTubeView: UIViewRepresentable {
     let videoID: String
     private static let origin = "https://modshelf.app"
@@ -2869,6 +2900,7 @@ struct YouTubeView: UIViewRepresentable {
         view.isOpaque = false
         view.backgroundColor = .black
         view.scrollView.isScrollEnabled = false
+        view.navigationDelegate = context.coordinator
         return view
     }
 
@@ -2878,29 +2910,36 @@ struct YouTubeView: UIViewRepresentable {
         let html = """
         <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
         <meta name="referrer" content="strict-origin-when-cross-origin">
-        <style>html,body{margin:0;height:100%;background:#000;overflow:hidden}
-        iframe{position:absolute;inset:0;width:100%;height:100%;border:0}
-        #mute{position:absolute;top:8px;right:8px;z-index:2;border:0;border-radius:16px;padding:6px 11px;font:600 13px -apple-system,sans-serif;color:#fff;background:rgba(0,0,0,.6)}</style>
+        <style>html,body{margin:0;height:100%;background:#000;overflow:hidden}iframe{position:absolute;inset:0;width:100%;height:100%;border:0}</style>
         </head><body>
-        <iframe id="yt" src="https://www.youtube-nocookie.com/embed/\(videoID)?enablejsapi=1&playsinline=1&rel=0&modestbranding=1&origin=\(Self.origin)"
+        <iframe src="https://www.youtube-nocookie.com/embed/\(videoID)?playsinline=1&rel=0&modestbranding=1&origin=\(Self.origin)"
           referrerpolicy="strict-origin-when-cross-origin" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen></iframe>
-        <button id="mute" onclick="toggleMute()">Unmute</button>
-        <script>
-        var muted = true;
-        function toggleMute(){
-          var f = document.getElementById('yt');
-          muted = !muted;
-          f.contentWindow.postMessage(JSON.stringify({event:'command', func: muted ? 'mute' : 'unMute', args: []}), '*');
-          document.getElementById('mute').textContent = muted ? 'Unmute' : 'Mute';
-        }
-        </script>
         </body></html>
         """
         view.loadHTMLString(html, baseURL: URL(string: Self.origin))
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
-    final class Coordinator { var loaded: String? }
+
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        var loaded: String?
+
+        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            if let url = navigationAction.request.url,
+               navigationAction.navigationType == .linkActivated || navigationAction.targetFrame == nil,
+               Self.isYouTube(url) {
+                UIApplication.shared.open(url)
+                decisionHandler(.cancel)
+                return
+            }
+            decisionHandler(.allow)
+        }
+
+        static func isYouTube(_ url: URL) -> Bool {
+            let host = url.host?.lowercased() ?? ""
+            return host == "youtu.be" || host == "youtube.com" || host.hasSuffix(".youtube.com")
+        }
+    }
 }
 
 // MARK: - Folder picker and share sheet
@@ -3037,6 +3076,10 @@ struct WorkshopWebContainer: UIViewRepresentable {
 
     func updateUIView(_ view: WKWebView, context: Context) {
         if abs(view.pageZoom - zoom) > 0.001 { view.pageZoom = zoom }
+        if let url = requestedURL {
+            view.load(URLRequest(url: url))
+            DispatchQueue.main.async { self.requestedURL = nil }
+        }
         context.coordinator.parent = self
         if cleanPages != context.coordinator.lastClean {
             context.coordinator.lastClean = cleanPages
