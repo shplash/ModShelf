@@ -13,7 +13,7 @@ struct ModShelfApp: App {
     var body: some Scene { WindowGroup { ContentView() } }
 }
 
-let modShelfInfoFileName = "ModShelf Info.txt"
+let modShelfInfoFileName = "ModShelf Information.txt"
 
 // MARK: - Models
 
@@ -241,8 +241,17 @@ struct CachedImage: View {
     let urlString: String?
     var fill = true
     var maxPixel: CGFloat = 600
+    @AppStorage("options.gifAnimate") private var gifAnimate = true
     @State private var image: UIImage?
     var body: some View {
+        if gifAnimate, let u = urlString, u.lowercased().contains(".gif") {
+            AnimatedGIFView(urlString: u, fill: fill, loops: 5)
+                .id(u)
+        } else {
+            stillImage
+        }
+    }
+    private var stillImage: some View {
         ZStack {
             if let image {
                 if fill { Image(uiImage: image).resizable().scaledToFill() }
@@ -257,6 +266,73 @@ struct CachedImage: View {
             if let hit = ImageStore.shared.cached(url) { image = hit; return }
             image = await ImageStore.shared.load(url, maxPixel: maxPixel)
         }
+    }
+}
+
+// MARK: - Animated GIFs (5 loops, restarts every time the view appears)
+
+struct AnimatedGIFView: UIViewRepresentable {
+    let urlString: String
+    var fill = true
+    var loops = 5
+
+    func makeUIView(context: Context) -> UIImageView {
+        let view = UIImageView()
+        view.contentMode = fill ? .scaleAspectFill : .scaleAspectFit
+        view.clipsToBounds = true
+        view.backgroundColor = .clear
+        return view
+    }
+
+    func updateUIView(_ view: UIImageView, context: Context) {
+        guard context.coordinator.loadedURL != urlString else { return }
+        context.coordinator.loadedURL = urlString
+        guard let url = URL(string: urlString) else { return }
+        Task {
+            guard let (data, _) = try? await URLSession.shared.data(from: url),
+                  let animated = await Self.decode(data) else { return }
+            await MainActor.run {
+                view.animationImages = nil
+                view.image = animated
+                view.animationRepeatCount = loops
+                view.startAnimating()
+                // Stop on the last frame after the final loop, as a still image.
+                DispatchQueue.main.asyncAfter(deadline: .now() + animated.duration * Double(loops) + 0.05) {
+                    view.stopAnimating()
+                    view.image = animated.images?.first
+                }
+            }
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+    final class Coordinator { var loadedURL: String? }
+
+    /// Decodes every frame of the GIF into a single animated UIImage, scaled down to limit memory.
+    static func decode(_ data: Data) async -> UIImage? {
+        await Task.detached(priority: .utility) { () -> UIImage? in
+            guard let src = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+            let count = CGImageSourceGetCount(src)
+            guard count > 0 else { return nil }
+            var frames: [UIImage] = []
+            var total: Double = 0
+            let opts: [CFString: Any] = [kCGImageSourceCreateThumbnailFromImageAlways: true,
+                                         kCGImageSourceCreateThumbnailWithTransform: true,
+                                         kCGImageSourceThumbnailMaxPixelSize: 600]
+            for i in 0..<count {
+                guard let cg = CGImageSourceCreateThumbnailAtIndex(src, i, opts as CFDictionary) else { continue }
+                var delay = 0.1
+                if let props = CGImageSourceCopyPropertiesAtIndex(src, i, nil) as? [CFString: Any],
+                   let gif = props[kCGImagePropertyGIFDictionary] as? [CFString: Any] {
+                    let d = (gif[kCGImagePropertyGIFUnclampedDelayTime] as? Double) ?? (gif[kCGImagePropertyGIFDelayTime] as? Double) ?? 0.1
+                    delay = d > 0.011 ? d : 0.1
+                }
+                total += delay
+                frames.append(UIImage(cgImage: cg))
+            }
+            guard !frames.isEmpty else { return nil }
+            return UIImage.animatedImage(with: frames, duration: total)
+        }.value
     }
 }
 
@@ -625,10 +701,21 @@ final class WorkshopStore: ObservableObject {
     }
     func setCustomFolder(_ url: URL) {
         scopedURL?.stopAccessingSecurityScopedResource(); scopedURL = nil
+        // Access must be started before the folder can be tested or bookmarked.
         let ok = url.startAccessingSecurityScopedResource()
-        guard FileManager.default.isWritableFile(atPath: url.path) else {
+        let probe = url.appendingPathComponent(".modshelf-write-test-\(UUID().uuidString)")
+        let writable: Bool
+        do {
+            try Data("ok".utf8).write(to: probe)
+            try? FileManager.default.removeItem(at: probe)
+            writable = true
+        } catch {
+            writable = false
+        }
+        guard writable else {
             if ok { url.stopAccessingSecurityScopedResource() }
-            errorMessage = "That folder isn't writable. Pick a folder in Files that ModShelf can save into."
+            errorMessage = "ModShelf can't save into that folder. Pick a folder on this iPhone or in iCloud Drive that ModShelf is allowed to write to."
+            Haptics.error()
             return
         }
         guard let data = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) else {
@@ -700,6 +787,15 @@ final class WorkshopStore: ObservableObject {
     // MARK: sign in
 
     func signIn(automatic: Bool = false) async {
+        if isBusy && needsGuardCode {
+            let code = guardCode.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !code.isEmpty else { errorMessage = "Enter the Steam Guard code from the Steam app."; return }
+            Haptics.tap()
+            engine.submitGuardCode(code)
+            guardCode = ""
+            status = "Checking code…"
+            return
+        }
         guard !isBusy else { errorMessage = "Cancel the current download before signing in or out."; return }
         guard !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !password.isEmpty else {
             if !automatic { showLogin = true }
@@ -812,6 +908,9 @@ final class WorkshopStore: ObservableObject {
         let nextStatus = engine.status()
         let nextProgress = min(1, max(0, engine.progress()))
         let nextFile = engine.currentFile()
+        let waitingForCode = nextStatus == "Steam Guard code required"
+        if waitingForCode != needsGuardCode { needsGuardCode = waitingForCode }
+        if waitingForCode && !showLogin { showLogin = true }
         if status != nextStatus { status = nextStatus }
         if abs(progress - nextProgress) > 0.001 { progress = nextProgress }
         if currentFile != nextFile { currentFile = nextFile }
@@ -957,36 +1056,30 @@ final class WorkshopStore: ObservableObject {
     }
 
     private func infoText(meta: WorkshopMetadata, id: String, destination: URL, files: Int, bytes: Int64, existing: WorkshopItem?, singleMod: Bool) -> String {
-        let stamp = DateFormatter(); stamp.dateFormat = "d MMM yyyy, HH:mm"
+        let stamp = DateFormatter(); stamp.dateFormat = "d MMM yyyy, h:mm a"
         let info = Bundle.main.infoDictionary
-        let version = info?["CFBundleShortVersionString"] as? String ?? "?"
-        let build = info?["CFBundleVersion"] as? String ?? "?"
-        var lines: [String] = ["ModShelf download info", "======================", ""]
+        let version = info?["CFBundleShortVersionString"] as? String ?? "unknown"
+        let build = info?["CFBundleVersion"] as? String ?? "unknown"
+        var lines: [String] = ["ModShelf Information", "===================="]
+        lines.append("")
         lines.append("Title: \(meta.title)")
         lines.append("Workshop ID: \(id)")
         lines.append("Workshop page: https://steamcommunity.com/sharedfiles/filedetails/?id=\(id)")
         if let game = meta.gameName ?? existing?.gameName {
             lines.append("Game: \(game)\(meta.appID.map { " (App ID \($0))" } ?? "")")
-        } else if let app = meta.appID { lines.append("Game App ID: \(app)") }
+        } else if let app = meta.appID { lines.append("Game: App ID \(app)") }
         if !meta.tags.isEmpty { lines.append("Tags: \(meta.tags.joined(separator: ", "))") }
         if let r = meta.rating {
             let n = meta.ratingCount.map { " from \($0) ratings" } ?? ""
-            lines.append("Workshop rating: \(Int(r)) of 5 stars\(n)")
+            lines.append("Workshop rating: \(Int(r))/5 stars\(n)")
         }
         if meta.updatedAt > 0 { lines.append("Last updated on Workshop: \(Fmt.date(unix: meta.updatedAt))") }
         lines.append("")
-        lines.append("Installed with: ModShelf \(version) (build \(build))")
         lines.append("Installed on: \(stamp.string(from: Date()))")
-        if let ex = existing {
-            lines.append("First installed: \(stamp.string(from: ex.addedAt))")
-            lines.append("This copy replaced the previous download.")
-        }
-        lines.append("Files: \(files)   Size: \(Fmt.bytes(bytes))")
-        lines.append("Saved to: \(destination.path)")
-        lines.append(singleMod ? "Layout: Steam's <id>/mods wrapper folders were removed; this folder is the mod itself."
-                               : "Layout: Steam's <id> wrapper folder was removed.")
+        lines.append("Installed with: ModShelf \(version) (build \(build))")
+        lines.append("Size: \(Fmt.bytes(bytes)) - Files: \(files)")
         lines.append("")
-        lines.append("This file is written by ModShelf and is safe to delete.")
+        lines.append("This file is written by ModShelf and is safe to delete, turn future info files off in ModShelf's options.")
         return lines.joined(separator: "\n")
     }
 
@@ -1269,7 +1362,7 @@ struct AppTabBar: View {
             selected = i
         } label: {
             VStack(spacing: compact ? 0 : 3) {
-                icon(i, size: compact ? 22 : 24)
+                icon(i, size: compact ? 22 : 24, compact: compact)
                 if !compact { Text(items[i].0).font(.system(size: 12, weight: .semibold)).lineLimit(1) }
             }
             .foregroundStyle(on ? Color.accentColor : Color.secondary)
@@ -1281,11 +1374,17 @@ struct AppTabBar: View {
         .accessibilityLabel(items[i].0)
     }
 
-    private func icon(_ i: Int, size: CGFloat) -> some View {
+    private func icon(_ i: Int, size: CGFloat, compact: Bool = false) -> some View {
         ZStack(alignment: .topTrailing) {
             Image(systemName: items[i].1).font(.system(size: size, weight: .semibold))
             if i == 2 && libraryBadge {
-                Circle().fill(Color.orange).frame(width: 9, height: 9).offset(x: 5, y: -2)
+                // Blue update badge; scaled down when the pill is folded.
+                Circle()
+                    .fill(Color.accentColor)
+                    .frame(width: compact ? 7 : 9, height: compact ? 7 : 9)
+                    .overlay(Circle().stroke(Color(uiColor: .secondarySystemGroupedBackground), lineWidth: 1.5))
+                    .offset(x: compact ? 3 : 5, y: compact ? -1 : -2)
+                    .accessibilityLabel("Updates available")
             }
         }
     }
@@ -1358,7 +1457,7 @@ struct StatusGlyph: View {
         case .upToDate:
             Image(systemName: "checkmark.circle.fill").font(.system(size: size)).foregroundStyle(Color.green)
         case .needsUpdate:
-            Image(systemName: "arrow.down.circle.fill").font(.system(size: size)).foregroundStyle(Color.orange)
+            Image(systemName: "arrow.down.circle.fill").font(.system(size: size)).foregroundStyle(Color.accentColor)
         case .unverified:
             Image(systemName: "exclamationmark.triangle.fill").font(.system(size: size)).foregroundStyle(Color.yellow)
         }
@@ -1389,7 +1488,8 @@ struct ContentView: View {
     @AppStorage("options.showIDs") private var showIDs = false
     @AppStorage("options.compactLibrary") private var compactLibrary = true
     @AppStorage("options.haptics") private var haptics = true
-    @AppStorage("options.tabStyle") private var tabStyle = "pill"
+    @AppStorage("options.gifAnimate") private var gifAnimate = true
+    @AppStorage("options.tabStyle") private var tabStyle = "bar"
     @AppStorage("options.sortOrder") private var sortOrder = "Recently added"
     @AppStorage("options.autoCheck") private var autoCheck = true
     @AppStorage("options.wifiOnly") private var wifiOnly = false
@@ -1463,9 +1563,20 @@ struct ContentView: View {
         }
         .sheet(isPresented: $store.showLogin) { loginSheet.presentationDetents([.medium, .large]) }
         .sheet(isPresented: $showShare, onDismiss: { store.shareURL = nil }) { if let url = store.shareURL { ShareSheet(activityItems: [url]) } }
-        .sheet(isPresented: $showFolderPicker) { FolderPicker { url in store.setCustomFolder(url) } }
+        .sheet(isPresented: $showFolderPicker) {
+            FolderPicker(onPick: { url in
+                showFolderPicker = false
+                store.setCustomFolder(url)
+            }, onCancel: { showFolderPicker = false })
+        }
         .onChange(of: store.shareURL) { showShare = $0 != nil }
         .onChange(of: confirmDelete) { UserDefaults.standard.set($0, forKey: "options.confirmDelete") }
+        .onChange(of: store.errorMessage) { message in
+            guard !message.isEmpty else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
+                if store.errorMessage == message { withAnimation { store.errorMessage = "" } }
+            }
+        }
         .onChange(of: store.library.count) { _ in
             if let g = selectedGame, !installedGames.contains(where: { $0.id == g }) { selectedGame = nil }
             if let t = selectedTag, !installedTags.contains(t) { selectedTag = nil }
@@ -1569,7 +1680,7 @@ struct ContentView: View {
                 Spacer()
                 signInPill
             }
-            .padding(.horizontal, 16).padding(.top, 0).padding(.bottom, 8)
+            .padding(.horizontal, 16).padding(.top, 0).padding(.bottom, 14)
             fadingLine
         }
     }
@@ -1583,9 +1694,9 @@ struct ContentView: View {
                 Text(store.isAuthenticated ? "Signed in" : "Sign in")
             }
             .font(.subheadline.weight(.semibold))
-            .foregroundStyle(store.isAuthenticated ? Color.green : Color.primary)
+            .foregroundStyle(store.isAuthenticated ? Color.accentColor : Color.primary)
             .padding(.horizontal, 12).padding(.vertical, 7)
-            .background(store.isAuthenticated ? Color.green.opacity(0.12) : Color(uiColor: .secondarySystemGroupedBackground), in: Capsule())
+            .background(store.isAuthenticated ? Color.accentColor.opacity(0.14) : Color(uiColor: .secondarySystemGroupedBackground), in: Capsule())
         }
         .buttonStyle(.plain)
         .accessibilityLabel(store.isAuthenticated ? "Signed in to Steam" : "Sign in to Steam")
@@ -1604,14 +1715,25 @@ struct ContentView: View {
 
     @ViewBuilder private var errorBanner: some View {
         if !store.errorMessage.isEmpty {
-            HStack(alignment: .top, spacing: 9) {
-                Image(systemName: "exclamationmark.circle.fill").foregroundStyle(.red)
-                Text(store.errorMessage).font(.footnote).fixedSize(horizontal: false, vertical: true)
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "xmark.octagon.fill").font(.system(size: 20)).foregroundStyle(.white)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Something went wrong").font(.system(size: 14, weight: .bold)).foregroundStyle(.white)
+                    Text(store.errorMessage).font(.system(size: 13)).foregroundStyle(.white.opacity(0.95))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 Spacer(minLength: 0)
-                Button { store.errorMessage = "" } label: { Image(systemName: "xmark").font(.caption.bold()) }.accessibilityLabel("Dismiss error")
+                Button { store.errorMessage = "" } label: {
+                    Image(systemName: "xmark").font(.system(size: 12, weight: .bold)).foregroundStyle(.white.opacity(0.9))
+                        .frame(width: 28, height: 28)
+                }
+                .accessibilityLabel("Dismiss error")
             }
-            .padding(11).background(Color.red.opacity(0.09), in: RoundedRectangle(cornerRadius: 12))
+            .padding(12)
+            .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.red))
+            .shadow(color: .red.opacity(0.35), radius: 10, y: 4)
             .padding(.horizontal, 14).padding(.top, 8).padding(.bottom, 4)
+            .transition(.move(edge: .top).combined(with: .opacity))
         }
     }
 
@@ -1785,21 +1907,18 @@ struct ContentView: View {
         return Button {
             dismissKeyboard(); Haptics.medium(); store.download(item.id)
         } label: {
-            ZStack {
-                HStack(spacing: 8) { Image(systemName: "arrow.down.to.line.compact"); Text(label) }.font(.headline)
-                HStack {
-                    Spacer()
-                    if item.fileSize > 0 {
-                        Text(Fmt.bytes(item.fileSize))
-                            .font(.system(size: 12, weight: .semibold))
-                            .padding(.horizontal, 9).padding(.vertical, 4)
-                            .background(Capsule().fill(Color.white.opacity(0.22)))
-                    }
-                }.padding(.trailing, 12)
+            HStack(spacing: 8) {
+                Image(systemName: "arrow.down.to.line.compact").font(.system(size: 15, weight: .semibold))
+                Text(label).font(.system(size: 16, weight: .semibold))
+                if item.fileSize > 0 {
+                    Text("· \(Fmt.bytes(item.fileSize))")
+                        .font(.system(size: 14, weight: .medium))
+                        .opacity(0.85)
+                }
             }
             .foregroundStyle(.white)
-            .frame(maxWidth: .infinity).frame(height: 50)
-            .background(RoundedRectangle(cornerRadius: 14).fill(Color.accentColor))
+            .frame(maxWidth: .infinity).frame(height: 46)
+            .background(RoundedRectangle(cornerRadius: 13).fill(Color.accentColor))
         }
         .buttonStyle(.plain)
     }
@@ -1855,6 +1974,7 @@ struct ContentView: View {
 
     private func workshopRow(_ item: WorkshopMetadata) -> some View {
         HStack(spacing: 10) {
+            Spacer(minLength: 0)
             Button { Haptics.tap(); openWorkshop(item.id) } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "safari").font(.system(size: 16, weight: .semibold))
@@ -2076,7 +2196,9 @@ struct ContentView: View {
             Image(systemName: item.isFavourite ? "star.fill" : "star")
                 .font(.system(size: size, weight: .bold)).foregroundStyle(.white)
                 .shadow(color: .black.opacity(0.7), radius: 2)
-                .frame(width: size + 20, height: size + 20).contentShape(Rectangle())
+                .frame(width: size + 14, height: size + 14)
+                .background(Circle().fill(Color.black.opacity(0.55)))
+                .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel(item.isFavourite ? "Remove favourite" : "Add favourite")
@@ -2270,6 +2392,8 @@ struct ContentView: View {
                         divider
                         toggleRow("Haptic feedback", symbol: "iphone.radiowaves.left.and.right", isOn: $haptics)
                         divider
+                        toggleRow("Animate GIF icons (5 loops)", symbol: "sparkles", isOn: $gifAnimate)
+                        divider
                         VStack(alignment: .leading, spacing: 8) {
                             HStack {
                                 Label("Browser text size", systemImage: "textformat.size").font(.system(size: 16))
@@ -2328,14 +2452,34 @@ struct ContentView: View {
                         }
                     }
 
-                    Text("ModShelf \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "") · Steam mods are not affiliated with Valve.")
-                        .font(.footnote).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .center).padding(.top, 4)
+                    settingsGroup("Credits") {
+                        creditRow("ModShelf", "Created by Splash (@shplash)")
+                        divider
+                        creditRow("go-steam", "Steam protocol library by Alexander Birkner (@BirknerAlex) · MIT license")
+                        divider
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown")")
+                                .font(.system(size: 12)).foregroundStyle(.secondary)
+                            Text("Steam and the Steam Workshop are trademarks of Valve Corporation. ModShelf is not made by or endorsed by Valve.")
+                                .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        }
+                        .padding(.horizontal, 15).padding(.vertical, 12)
+                    }
                 }
                 .padding(.horizontal, 15).padding(.bottom, 24)
             }
             .background(Color(uiColor: .systemGroupedBackground))
             .toolbar(.hidden, for: .navigationBar)
         }
+    }
+
+    private func creditRow(_ title: String, _ detail: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title).font(.system(size: 15, weight: .semibold))
+            Text(detail).font(.system(size: 13)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 15).padding(.vertical, 11)
     }
 
     private var divider: some View { Rectangle().fill(Color.gray.opacity(0.2)).frame(height: 0.5).padding(.leading, 48) }
@@ -2418,14 +2562,14 @@ struct ContentView: View {
                             Task { await store.signIn() }
                         } label: {
                             HStack(spacing: 8) {
-                                if store.isBusy { ProgressView().tint(.white) }
-                                Text(store.isBusy ? "Signing in…" : "Sign in")
+                                if store.isBusy && !store.needsGuardCode { ProgressView().tint(.white) }
+                                Text(store.needsGuardCode ? "Submit code" : (store.isBusy ? "Signing in…" : "Sign in"))
                             }
                             .font(.headline).foregroundStyle(.white)
                             .frame(maxWidth: .infinity).frame(height: 48)
                             .background(RoundedRectangle(cornerRadius: 13).fill(Color.accentColor))
                         }
-                        .buttonStyle(.plain).disabled(store.isBusy)
+                        .buttonStyle(.plain).disabled(store.isBusy && !store.needsGuardCode)
                     } else {
                         Button { store.showLogin = false } label: {
                             Text("Done").font(.headline).foregroundStyle(.white)
@@ -2436,7 +2580,6 @@ struct ContentView: View {
                     if !store.errorMessage.isEmpty {
                         Text(store.errorMessage).font(.footnote).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
                     }
-                    Text(store.status).font(.caption).foregroundStyle(.secondary)
                 }
                 .padding(20)
             }
@@ -2682,8 +2825,16 @@ struct MediaCarousel: View {
                             CachedImage(urlString: url, fill: false, maxPixel: 1000)
                                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                         case .video(let id):
-                            YouTubeView(videoID: id)
-                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            VStack(spacing: 8) {
+                                YouTubeView(videoID: id)
+                                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                Link(destination: URL(string: "https://www.youtube.com/watch?v=\(id)")!) {
+                                    Label("Open in YouTube", systemImage: "arrow.up.right.square")
+                                        .font(.system(size: 14, weight: .semibold))
+                                        .frame(maxWidth: .infinity).frame(height: 36)
+                                        .background(Capsule().fill(Color(uiColor: .tertiarySystemFill)))
+                                }
+                            }
                         }
                     }
                     .padding(.horizontal, 2)
@@ -2727,10 +2878,22 @@ struct YouTubeView: UIViewRepresentable {
         let html = """
         <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
         <meta name="referrer" content="strict-origin-when-cross-origin">
-        <style>html,body{margin:0;height:100%;background:#000;overflow:hidden}iframe{position:absolute;inset:0;width:100%;height:100%;border:0}</style>
+        <style>html,body{margin:0;height:100%;background:#000;overflow:hidden}
+        iframe{position:absolute;inset:0;width:100%;height:100%;border:0}
+        #mute{position:absolute;top:8px;right:8px;z-index:2;border:0;border-radius:16px;padding:6px 11px;font:600 13px -apple-system,sans-serif;color:#fff;background:rgba(0,0,0,.6)}</style>
         </head><body>
-        <iframe src="https://www.youtube-nocookie.com/embed/\(videoID)?playsinline=1&rel=0&modestbranding=1&origin=\(Self.origin)"
+        <iframe id="yt" src="https://www.youtube-nocookie.com/embed/\(videoID)?enablejsapi=1&playsinline=1&rel=0&modestbranding=1&origin=\(Self.origin)"
           referrerpolicy="strict-origin-when-cross-origin" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen></iframe>
+        <button id="mute" onclick="toggleMute()">Unmute</button>
+        <script>
+        var muted = true;
+        function toggleMute(){
+          var f = document.getElementById('yt');
+          muted = !muted;
+          f.contentWindow.postMessage(JSON.stringify({event:'command', func: muted ? 'mute' : 'unMute', args: []}), '*');
+          document.getElementById('mute').textContent = muted ? 'Unmute' : 'Mute';
+        }
+        </script>
         </body></html>
         """
         view.loadHTMLString(html, baseURL: URL(string: Self.origin))
@@ -2744,7 +2907,8 @@ struct YouTubeView: UIViewRepresentable {
 
 struct FolderPicker: UIViewControllerRepresentable {
     let onPick: (URL) -> Void
-    func makeCoordinator() -> Coordinator { Coordinator(onPick: onPick) }
+    var onCancel: () -> Void = { }
+    func makeCoordinator() -> Coordinator { Coordinator(onPick: onPick, onCancel: onCancel) }
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
         let picker = UIDocumentPickerViewController(forOpeningContentTypes: [UTType.folder], asCopy: false)
         picker.allowsMultipleSelection = false
@@ -2754,9 +2918,13 @@ struct FolderPicker: UIViewControllerRepresentable {
     func updateUIViewController(_ controller: UIDocumentPickerViewController, context: Context) { }
     final class Coordinator: NSObject, UIDocumentPickerDelegate {
         let onPick: (URL) -> Void
-        init(onPick: @escaping (URL) -> Void) { self.onPick = onPick }
+        let onCancel: () -> Void
+        init(onPick: @escaping (URL) -> Void, onCancel: @escaping () -> Void) { self.onPick = onPick; self.onCancel = onCancel }
         func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
-            if let url = urls.first { onPick(url) }
+            if let url = urls.first { onPick(url) } else { onCancel() }
+        }
+        func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+            onCancel()
         }
     }
 }
