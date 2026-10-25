@@ -378,6 +378,11 @@ enum CookieVault {
         }
         group.notify(queue: .main) { completion() }
     }
+    static func hasSteamLogin() -> Bool {
+        guard let text = Keychain.read(key), let data = text.data(using: .utf8),
+              let rows = try? JSONDecoder().decode([[String: String]].self, from: data) else { return false }
+        return rows.contains { $0["name"] == "steamLoginSecure" }
+    }
     static func clear(from store: WKHTTPCookieStore) {
         store.getAllCookies { cookies in
             for c in cookies where isSteam(c) { store.delete(c) }
@@ -1589,6 +1594,7 @@ struct ContentView: View {
     @State private var sortOpen = false
     @State private var confirmClearHistory = false
     @State private var lastScrollY: CGFloat = 0
+    @State private var libraryFilter = "All"
     @State private var upwardRun: CGFloat = 0
 
     /// Space reserved under every tab for the tab bar, so content can always scroll clear of it.
@@ -1615,7 +1621,9 @@ struct ContentView: View {
     }
     private var filteredLibrary: [WorkshopItem] {
         let filtered = store.library.filter { item in
-            if favouritesOnly && !item.isFavourite { return false }
+            if libraryFilter == "Favourites" && !item.isFavourite { return false }
+            if libraryFilter == "Updates" && !item.updateAvailable { return false }
+            if libraryFilter == "Problems" && !(item.filesBroken || item.checkFailed) { return false }
             if let g = selectedGame, item.appID != g { return false }
             if let t = selectedTag, !item.tags.contains(t) { return false }
             if searchText.isEmpty { return true }
@@ -1697,14 +1705,24 @@ struct ContentView: View {
     }
 
     private var browserTab: some View {
-        WorkshopBrowserView(onValidItem: { url in
-            store.browserURL = nil
-            store.input = url.absoluteString
-            inputWasSubmitted = false
-            selectedTab = 0
-            store.fetchPreview()
-        }, requestedURL: $store.browserURL, cleanPages: cleanBrowser, zoom: browserZoom,
-           onScroll: { y in handleScroll(y) })
+        WorkshopBrowserView(library: store.library,
+                            onValidItem: { url in
+                                store.browserURL = nil
+                                store.input = url.absoluteString
+                                inputWasSubmitted = false
+                                selectedTab = 0
+                                store.fetchPreview()
+                            },
+                            onOpenInApp: { id in
+                                store.input = id
+                                inputWasSubmitted = false
+                                selectedTab = 0
+                                store.fetchPreview()
+                            },
+                            requestedURL: $store.browserURL,
+                            cleanPages: cleanBrowser,
+                            zoom: browserZoom,
+                            onScroll: { y in handleScroll(y) })
     }
 
     @ViewBuilder private var overlays: some View {
@@ -1723,6 +1741,7 @@ struct ContentView: View {
             ItemActionPopup(item: currentItem(item),
                             openWorkshop: { openWorkshop(item.id); contextItem = nil },
                             copyID: { UIPasteboard.general.string = item.id; store.operationMessage = "Workshop ID copied."; contextItem = nil },
+                            share: { store.shareURL = URL(string: "https://steamcommunity.com/sharedfiles/filedetails/?id=\(item.id)"); contextItem = nil },
                             favourite: { store.toggleFavourite(item); contextItem = nil },
                             updateNow: { store.update(item); selectedTab = 0; contextItem = nil },
                             checkUpdates: { store.checkUpdates(item); contextItem = nil },
@@ -2075,12 +2094,6 @@ struct ContentView: View {
             infoRow(item)
             if !item.description.isEmpty { ExpandableDescription(text: item.description, lineLimit: 7) }
             workshopRow(item)
-            if showIDs {
-                Text("ID: \(item.id)")
-                    .font(.system(size: 12, weight: .medium, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .center)
-            }
         }
         .padding(14).background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
     }
@@ -2115,9 +2128,16 @@ struct ContentView: View {
         HStack(spacing: 10) {
             Spacer(minLength: 0)
             Button { Haptics.tap(); openWorkshop(item.id) } label: {
-                HStack(spacing: 6) {
+                HStack(spacing: 8) {
                     Image(systemName: "safari").font(.system(size: 16, weight: .semibold))
-                    Text("Workshop").font(.system(size: 15, weight: .semibold))
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Workshop").font(.system(size: 15, weight: .semibold))
+                        if showIDs {
+                            Text("ID: \(item.id)")
+                                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                 }
                 .foregroundStyle(Color.accentColor)
                 .padding(.horizontal, 14).frame(height: 48)
@@ -2225,7 +2245,7 @@ struct ContentView: View {
             .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
             .padding(.horizontal, 14).padding(.bottom, 8)
 
-            if !store.library.isEmpty { filterRow }
+            if !store.library.isEmpty { chipRow; filterRow }
 
             let items = filteredLibrary
             if store.library.isEmpty {
@@ -2243,6 +2263,39 @@ struct ContentView: View {
                 listContent(items)
             }
         }
+    }
+
+    private func chipCount(_ name: String) -> Int {
+        switch name {
+        case "Updates": return store.library.filter { $0.updateAvailable }.count
+        case "Favourites": return store.library.filter { $0.isFavourite }.count
+        case "Problems": return store.library.filter { $0.filesBroken || $0.checkFailed }.count
+        default: return 0
+        }
+    }
+
+    private var chipRow: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(["All", "Updates", "Favourites", "Problems"], id: \.self) { name in
+                    let count = chipCount(name)
+                    let on = libraryFilter == name
+                    Button { Haptics.select(); libraryFilter = name } label: {
+                        HStack(spacing: 5) {
+                            Text(name)
+                            if count > 0 { Text("\(count)").font(.system(size: 12, weight: .bold).monospacedDigit()).opacity(0.85) }
+                        }
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(on ? Color.white : Color.primary)
+                        .padding(.horizontal, 12).padding(.vertical, 7)
+                        .background(Capsule().fill(on ? Color.accentColor : Color(uiColor: .secondarySystemGroupedBackground)))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 14)
+        }
+        .padding(.bottom, 8)
     }
 
     private var filterRow: some View {
@@ -2272,15 +2325,6 @@ struct ContentView: View {
                         }
                     } label: { FilterPill(symbol: "tag.fill", title: selectedTag ?? "Tags", active: selectedTag != nil) }
                 }
-                Button { Haptics.select(); favouritesOnly.toggle() } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: favouritesOnly ? "star.fill" : "star").font(.system(size: 12, weight: .semibold))
-                        Text("Favourites").font(.system(size: 13, weight: .semibold))
-                    }
-                    .foregroundStyle(favouritesOnly ? Color.white : Color.primary)
-                    .padding(.horizontal, 11).padding(.vertical, 7)
-                    .background(Capsule().fill(favouritesOnly ? Color.accentColor : Color(uiColor: .secondarySystemGroupedBackground)))
-                }.buttonStyle(.plain)
             }
             .padding(.horizontal, 14)
         }
@@ -2304,19 +2348,34 @@ struct ContentView: View {
     }
 
     private func listContent(_ items: [WorkshopItem]) -> some View {
-        ScrollView {
-            VStack(spacing: 0) {
-                ScrollSpy(onChange: handleScroll)
-                LazyVStack(spacing: 0) {
-                    ForEach(items) { item in
-                        listRow(item)
-                        Rectangle().fill(Color.gray.opacity(0.2)).frame(height: 0.5).padding(.leading, 112)
+        List {
+            ScrollSpy(onChange: handleScroll).listRowInsets(EdgeInsets()).listRowBackground(Color.clear)
+            ForEach(items) { item in
+                listRow(item)
+                    .listRowInsets(EdgeInsets())
+                    .listRowBackground(Color(uiColor: .systemGroupedBackground))
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                        Button(role: .destructive) { store.requestDelete(item) } label: {
+                            Label("Delete", systemImage: "trash")
+                        }
                     }
-                }
-                .padding(.bottom, tabBarReserve)
+                    .swipeActions(edge: .leading, allowsFullSwipe: false) {
+                        if item.updateAvailable {
+                            Button { Haptics.tap(); store.update(item); selectedTab = 0 } label: {
+                                Label("Update", systemImage: "arrow.down.circle")
+                            }
+                            .tint(Color.accentColor)
+                        }
+                        Button { store.toggleFavourite(item) } label: {
+                            Label(item.isFavourite ? "Unfavourite" : "Favourite", systemImage: item.isFavourite ? "star.slash" : "star")
+                        }
+                        .tint(.yellow)
+                    }
             }
         }
-        .coordinateSpace(name: "scroll")
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .background(Color(uiColor: .systemGroupedBackground))
         .scrollDismissesKeyboard(.interactively)
     }
 
@@ -2368,7 +2427,7 @@ struct ContentView: View {
                     HStack(spacing: 6) {
                         RatingLine(rating: item.rating, count: item.ratingCount, size: 12)
                         if showIDs {
-                            Text(item.id).font(.system(size: 10, weight: .medium, design: .monospaced))
+                            Text("ID: \(item.id)").font(.system(size: 10, weight: .medium, design: .monospaced))
                                 .foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.6)
                         }
                     }
@@ -2406,7 +2465,7 @@ struct ContentView: View {
                         HStack(spacing: 6) {
                             RatingLine(rating: item.rating, count: item.ratingCount, size: 13)
                             if showIDs {
-                                Text(item.id).font(.system(size: 11, weight: .medium, design: .monospaced))
+                                Text("ID: \(item.id)").font(.system(size: 11, weight: .medium, design: .monospaced))
                                     .foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.6)
                             }
                         }
@@ -2486,7 +2545,6 @@ struct ContentView: View {
                     Text(error).font(.system(size: 12)).foregroundStyle(Color.red.opacity(0.9)).lineLimit(3).fixedSize(horizontal: false, vertical: true)
                 }
                 if let game = record.gameName { Text(game).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1) }
-                if showIDs { IDChip(id: record.workshopID, small: true) }
                 if failed {
                     Button { Haptics.tap(); store.retry(record); selectedTab = 0 } label: {
                         Label("Try again", systemImage: "arrow.clockwise").font(.system(size: 13, weight: .semibold))
@@ -2542,9 +2600,28 @@ struct ContentView: View {
                             } label: { menuChip(tabStyle == "bar" ? "Classic" : (tabStyle == "pill" ? "Pill" : "Pill full")) }
                         }
                         divider
-                        toggleRow("Workshop GIFs in Downloads", symbol: "sparkles", isOn: $gifDownloads)
-                        divider
-                        toggleRow("Workshop GIFs in Library and History", symbol: "sparkles", isOn: $gifLibrary)
+                        row("Workshop GIFs", symbol: "sparkles") {
+                            Menu {
+                                Section("Downloads") {
+                                    Button { Haptics.select(); gifDownloads = true } label: {
+                                        if gifDownloads { Label("On", systemImage: "checkmark") } else { Text("On") }
+                                    }
+                                    Button { Haptics.select(); gifDownloads = false } label: {
+                                        if !gifDownloads { Label("Off", systemImage: "checkmark") } else { Text("Off") }
+                                    }
+                                }
+                                Section("Library & History") {
+                                    Button { Haptics.select(); gifLibrary = true } label: {
+                                        if gifLibrary { Label("On", systemImage: "checkmark") } else { Text("On") }
+                                    }
+                                    Button { Haptics.select(); gifLibrary = false } label: {
+                                        if !gifLibrary { Label("Off", systemImage: "checkmark") } else { Text("Off") }
+                                    }
+                                }
+                            } label: {
+                                menuChip(gifDownloads == gifLibrary ? (gifDownloads ? "On" : "Off") : "Mixed")
+                            }
+                        }
                         divider
                         toggleRow("Compact library grid", symbol: "square.grid.2x2", isOn: $compactLibrary)
                         divider
@@ -2841,6 +2918,7 @@ struct ItemActionPopup: View {
     let item: WorkshopItem
     let openWorkshop: () -> Void
     let copyID: () -> Void
+    let share: () -> Void
     let favourite: () -> Void
     let updateNow: () -> Void
     let checkUpdates: () -> Void
@@ -2861,6 +2939,7 @@ struct ItemActionPopup: View {
             action("Check for updates", "arrow.clockwise", favourite: false, action: checkUpdates)
             action("Verify files", "checkmark.shield", favourite: false, action: verify)
             action("Export as ZIP", "square.and.arrow.up", favourite: false, action: export)
+            action("Share link", "square.and.arrow.up", favourite: false, action: share)
             action("Copy Workshop ID", "doc.on.doc", favourite: false, action: copyID)
             action("Delete download", "trash", favourite: false, tint: .red, action: delete)
         }
@@ -3134,10 +3213,228 @@ struct ShareSheet: UIViewControllerRepresentable {
     func updateUIViewController(_ controller: UIActivityViewController, context: Context) { }
 }
 
+
+// MARK: - Browser home (custom start page)
+
+struct GameHit: Codable, Identifiable, Equatable {
+    let id: Int
+    let name: String
+    let tiny_image: String?
+}
+
+struct GameSearchResponse: Codable { let items: [GameHit] }
+
+enum GameSearch {
+    /// Finds games by name using Steam's public store search (no sign-in needed).
+    static func search(_ term: String) async -> [GameHit] {
+        guard let q = term.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+              let url = URL(string: "https://store.steampowered.com/api/storesearch/?term=\(q)&l=english&cc=US"),
+              let (data, _) = try? await URLSession.shared.data(from: url),
+              let root = try? JSONDecoder().decode(GameSearchResponse.self, from: data) else { return [] }
+        return root.items
+    }
+}
+
+struct BrowserHome: View {
+    let library: [WorkshopItem]
+    let lastPage: URL?
+    let signedIn: Bool
+    let onOpenURL: (URL) -> Void
+    let onOpenMod: (WorkshopItem) -> Void
+    let onScroll: (CGFloat) -> Void
+
+    @State private var query = ""
+    @State private var results: [GameHit] = []
+    @State private var searching = false
+    @AppStorage("browser.recentGames") private var recentJSON = "[]"
+
+    private var recent: [GameHit] {
+        (try? JSONDecoder().decode([GameHit].self, from: Data(recentJSON.utf8))) ?? []
+    }
+    private var favourites: [WorkshopItem] { library.filter { $0.isFavourite } }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                ScrollSpy(onChange: onScroll)
+                Text("Browse Workshop")
+                    .font(.system(size: 27, weight: .bold, design: .rounded))
+                    .padding(.top, 6)
+                searchField
+                if !query.trimmingCharacters(in: .whitespaces).isEmpty {
+                    resultsSection
+                } else {
+                    if let lastPage { continueCard(lastPage) }
+                    signInCard
+                    if !recent.isEmpty {
+                        sectionTitle("Recent games")
+                        ForEach(recent) { hit in gameRow(hit) }
+                    }
+                    if !favourites.isEmpty { favouritesSection }
+                    if recent.isEmpty && favourites.isEmpty {
+                        Text("Search a game above to browse its Workshop.")
+                            .font(.subheadline).foregroundStyle(.secondary).padding(.top, 4)
+                    }
+                }
+            }
+            .padding(15)
+            .padding(.bottom, 110)
+        }
+        .background(Color(uiColor: .systemGroupedBackground))
+        .task(id: query) { await runSearch() }
+    }
+
+    private func runSearch() async {
+        let term = query.trimmingCharacters(in: .whitespaces)
+        guard term.count >= 2 else { results = []; searching = false; return }
+        searching = true
+        try? await Task.sleep(nanoseconds: 350_000_000)
+        if Task.isCancelled { return }
+        let found = await GameSearch.search(term)
+        if Task.isCancelled { return }
+        results = found
+        searching = false
+    }
+
+    private var searchField: some View {
+        HStack(spacing: 9) {
+            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+            TextField("Search a game", text: $query)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .submitLabel(.search)
+            if !query.isEmpty {
+                Button { query = "" } label: {
+                    Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                }
+                .accessibilityLabel("Clear search")
+            }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 11)
+        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var resultsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if searching {
+                ProgressView().frame(maxWidth: .infinity).padding(.top, 8)
+            } else if results.isEmpty {
+                Text("No games found for \"\(query)\".").font(.subheadline).foregroundStyle(.secondary)
+            }
+            ForEach(results) { hit in gameRow(hit) }
+        }
+    }
+
+    private func gameRow(_ hit: GameHit) -> some View {
+        Button { openGame(hit) } label: {
+            HStack(spacing: 12) {
+                CachedImage(urlString: hit.tiny_image, fill: true, maxPixel: 120)
+                    .frame(width: 46, height: 46)
+                    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                Text(hit.name)
+                    .font(.system(size: 15, weight: .semibold)).lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Image(systemName: "chevron.right").font(.caption.bold()).foregroundStyle(.tertiary)
+            }
+            .padding(10)
+            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func openGame(_ hit: GameHit) {
+        var list = recent.filter { $0.id != hit.id }
+        list.insert(hit, at: 0)
+        if let data = try? JSONEncoder().encode(Array(list.prefix(8))),
+           let text = String(data: data, encoding: .utf8) { recentJSON = text }
+        query = ""
+        Haptics.tap()
+        onOpenURL(URL(string: "https://steamcommunity.com/app/\(hit.id)/workshop/")!)
+    }
+
+    private func sectionTitle(_ title: String) -> some View {
+        Text(title.uppercased())
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(.secondary)
+            .padding(.leading, 4)
+    }
+
+    private func continueCard(_ url: URL) -> some View {
+        Button { Haptics.tap(); onOpenURL(url) } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "arrow.uturn.forward.circle.fill")
+                    .font(.system(size: 26)).foregroundStyle(Color.accentColor)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Continue where you left off").font(.system(size: 15, weight: .semibold))
+                    Text(url.absoluteString.replacingOccurrences(of: "https://", with: ""))
+                        .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right").font(.caption.bold()).foregroundStyle(.tertiary)
+            }
+            .padding(14)
+            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var signInCard: some View {
+        HStack(spacing: 12) {
+            Image(systemName: signedIn ? "checkmark.shield.fill" : "person.crop.circle.badge.key")
+                .font(.system(size: 24))
+                .foregroundStyle(signedIn ? Color.accentColor : Color.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(signedIn ? "Signed in to Steam" : "Sign in to Steam")
+                    .font(.system(size: 15, weight: .semibold))
+                Text(signedIn ? "Your browser session is saved on this iPhone." : "Lets Steam pages in the browser know it's you.")
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+            if !signedIn {
+                Button { Haptics.tap(); onOpenURL(URL(string: "https://steamcommunity.com/login/home/")!) } label: {
+                    Text("Sign in")
+                        .font(.system(size: 14, weight: .semibold)).foregroundStyle(.white)
+                        .padding(.horizontal, 14).frame(height: 34)
+                        .background(Capsule().fill(Color.accentColor))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(14)
+        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    private var favouritesSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionTitle("Favourite mods")
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 12) {
+                    ForEach(favourites) { item in
+                        Button { Haptics.tap(); onOpenMod(item) } label: {
+                            VStack(alignment: .leading, spacing: 6) {
+                                CachedImage(urlString: item.imageURL, fill: true, maxPixel: 240)
+                                    .frame(width: 118, height: 118)
+                                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                Text(item.displayTitle)
+                                    .font(.system(size: 13, weight: .semibold)).lineLimit(2)
+                                    .frame(width: 118, alignment: .leading)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+    }
+}
+
 // MARK: - Workshop browser
 
 struct WorkshopBrowserView: View {
+    let library: [WorkshopItem]
     let onValidItem: (URL) -> Void
+    let onOpenInApp: (String) -> Void
     @Binding var requestedURL: URL?
     let cleanPages: Bool
     let zoom: Double
@@ -3149,50 +3446,94 @@ struct WorkshopBrowserView: View {
     @State private var canGoForward = false
     @State private var isLoading = false
     @State private var showUse = false
+    @State private var showHome = true
+    @State private var signedIn = CookieVault.hasSteamLogin()
 
     static let home = URL(string: "https://steamcommunity.com/workshop/")!
     static let lastPageKey = "browser.lastURL"
 
+    private var savedLastPage: URL? {
+        UserDefaults.standard.string(forKey: Self.lastPageKey).flatMap { URL(string: $0) }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                navButton("chevron.left", "Back", enabled: canGoBack) { webView?.goBack() }
-                navButton("chevron.right", "Forward", enabled: canGoForward) { webView?.goForward() }
-                navButton("arrow.clockwise", "Reload", enabled: true) { webView?.reload() }
-                navButton("house", "Workshop home", enabled: true) { if let webView { webView.load(URLRequest(url: Self.home)) } }
-                Spacer(minLength: 4)
-                if isLoading { ProgressView().scaleEffect(0.8) }
-                if showUse, let url = currentURL {
-                    Button { onValidItem(url) } label: {
-                        Text("Use item").font(.system(size: 13, weight: .semibold)).foregroundStyle(.white)
-                            .padding(.horizontal, 12).frame(height: 32)
-                            .background(Capsule().fill(Color.accentColor))
-                    }.buttonStyle(.plain)
+            if !showHome { navBar }
+            ZStack {
+                WorkshopWebContainer(webView: $webView, currentURL: $currentURL, canGoBack: $canGoBack,
+                                     canGoForward: $canGoForward, isLoading: $isLoading, showUse: $showUse,
+                                     requestedURL: $requestedURL, cleanPages: cleanPages, zoom: zoom,
+                                     onScroll: onScroll, onOpenInApp: onOpenInApp)
+                    .opacity(showHome ? 0 : 1)
+                    .allowsHitTesting(!showHome)
+                if showHome {
+                    BrowserHome(library: library,
+                                lastPage: savedLastPage,
+                                signedIn: signedIn,
+                                onOpenURL: { open($0) },
+                                onOpenMod: { open(Self.modURL($0.id)) },
+                                onScroll: onScroll)
                 }
             }
-            .padding(.horizontal, 14).padding(.vertical, 8)
-            .background(Color(uiColor: .systemGroupedBackground))
-
-            WorkshopWebContainer(webView: $webView, currentURL: $currentURL, canGoBack: $canGoBack, canGoForward: $canGoForward,
-                                 isLoading: $isLoading, showUse: $showUse, requestedURL: $requestedURL,
-                                 cleanPages: cleanPages, zoom: zoom, onScroll: onScroll)
         }
         .background(Color(uiColor: .systemBackground))
         .onChange(of: requestedURL) { url in
-            guard let url, let webView else { return }
-            webView.load(URLRequest(url: url))
-            requestedURL = nil
+            if url != nil { showHome = false }
         }
+        .onChange(of: currentURL) { _ in
+            signedIn = CookieVault.hasSteamLogin()
+        }
+    }
+
+    private func open(_ url: URL) {
+        showHome = false
+        requestedURL = url
+    }
+
+    static func modURL(_ id: String) -> URL {
+        URL(string: "https://steamcommunity.com/sharedfiles/filedetails/?id=\(id)")!
+    }
+
+    private var addressText: String {
+        guard let u = currentURL else { return "" }
+        return (u.host ?? "") + u.path
+    }
+
+    private var navBar: some View {
+        HStack(spacing: 8) {
+            navButton("chevron.left", "Back", enabled: canGoBack) { webView?.goBack() }
+            navButton("chevron.right", "Forward", enabled: canGoForward) { webView?.goForward() }
+            navButton("arrow.clockwise", "Reload", enabled: true) { webView?.reload() }
+            navButton("house.fill", "Browse home", enabled: true) { showHome = true }
+            Text(addressText)
+                .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.leading, 4)
+            if isLoading { ProgressView().scaleEffect(0.8) }
+            if showUse, let url = currentURL {
+                Button { onValidItem(url) } label: {
+                    Text("Use item")
+                        .font(.system(size: 13, weight: .semibold)).foregroundStyle(.white)
+                        .padding(.horizontal, 12).frame(height: 32)
+                        .background(Capsule().fill(Color.accentColor))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .background(Color(uiColor: .systemGroupedBackground))
     }
 
     private func navButton(_ symbol: String, _ label: String, enabled: Bool, action: @escaping () -> Void) -> some View {
         Button { Haptics.tap(); action() } label: {
-            Image(systemName: symbol).font(.system(size: 16, weight: .semibold))
+            Image(systemName: symbol).font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(enabled ? Color.accentColor : Color.secondary.opacity(0.4))
-                .frame(width: 36, height: 36)
+                .frame(width: 34, height: 34)
                 .background(RoundedRectangle(cornerRadius: 10).fill(Color.accentColor.opacity(enabled ? 0.12 : 0.05)))
         }
-        .buttonStyle(.plain).disabled(!enabled).accessibilityLabel(label)
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .accessibilityLabel(label)
     }
 }
 
@@ -3207,27 +3548,31 @@ struct WorkshopWebContainer: UIViewRepresentable {
     let cleanPages: Bool
     let zoom: Double
     let onScroll: (CGFloat) -> Void
+    let onOpenInApp: (String) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
-        config.websiteDataStore = .default()          // keeps cookies between launches
-        config.userContentController.addUserScript(WKUserScript(source: WorkshopWebContainer.hideScript,
-                                                                injectionTime: .atDocumentEnd, forMainFrameOnly: false))
+        config.websiteDataStore = .default()           // keeps the Steam sign-in between launches
+        let controller = config.userContentController
+        controller.add(context.coordinator, name: "modshelf")
+        controller.addUserScript(WKUserScript(source: Self.hideScript, injectionTime: .atDocumentEnd, forMainFrameOnly: false))
+        controller.addUserScript(WKUserScript(source: Self.openButtonScript, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
+
         let view = WKWebView(frame: .zero, configuration: config)
         view.navigationDelegate = context.coordinator
         view.allowsBackForwardNavigationGestures = true
         view.isOpaque = false
         view.backgroundColor = UIColor.systemBackground
+        view.scrollView.backgroundColor = UIColor.systemBackground
         view.scrollView.contentInsetAdjustmentBehavior = .never
         view.pageZoom = zoom
         context.coordinator.observe(view)
         webView = view
 
-        // Restore Steam cookies first, then open the last page (or the Workshop home on first launch).
         let start = requestedURL ?? Self.lastPage() ?? WorkshopBrowserView.home
-        requestedURL = nil
+        DispatchQueue.main.async { self.requestedURL = nil }
         CookieVault.restore(into: view.configuration.websiteDataStore.httpCookieStore) {
             view.load(URLRequest(url: start))
         }
@@ -3235,30 +3580,31 @@ struct WorkshopWebContainer: UIViewRepresentable {
     }
 
     func updateUIView(_ view: WKWebView, context: Context) {
+        context.coordinator.parent = self
         if abs(view.pageZoom - zoom) > 0.001 { view.pageZoom = zoom }
         if let url = requestedURL {
             view.load(URLRequest(url: url))
             DispatchQueue.main.async { self.requestedURL = nil }
         }
-        context.coordinator.parent = self
         if cleanPages != context.coordinator.lastClean {
             context.coordinator.lastClean = cleanPages
-            view.evaluateJavaScript(cleanPages ? WorkshopWebContainer.hideScript : WorkshopWebContainer.showScript, completionHandler: nil)
+            view.evaluateJavaScript(cleanPages ? Self.hideScript : Self.showScript, completionHandler: nil)
         }
     }
 
     static func lastPage() -> URL? {
-        guard let s = UserDefaults.standard.string(forKey: WorkshopBrowserView.lastPageKey), let u = URL(string: s) else { return nil }
-        return u
+        UserDefaults.standard.string(forKey: WorkshopBrowserView.lastPageKey).flatMap { URL(string: $0) }
     }
 
-    /// Hides the Workshop home news, RSS, About box and footer so the browser shows only the search and the game grid.
-    /// Works by matching visible text, so it doesn't depend on Steam's class names.
+    /// Hides the Steam header, store link, news, RSS and About box so the page is just search and mods.
+    /// Hiding works by matching visible text, so it doesn't depend on Steam's class names.
     static let hideScript = """
     (function(){
-      var markers = ['LATEST WORKSHOP NEWS','Subscribe to RSS feed','ABOUT - THE WORKSHOP','Workshop Home About Workshop','Read the full post on our Steam Blog','Here\\'s a quick look'];
-      var css = '#global_header,.global_header,#footer,.footer,.supernav_container,.store_header,#store_nav_area{display:none!important}' +
-                ' body{padding-top:0!important;margin-top:0!important}';
+      var markers = ['LATEST WORKSHOP NEWS','Subscribe to RSS feed','ABOUT - THE WORKSHOP','Workshop Home About Workshop','Read the full post on our Steam Blog',"Here's a quick look"];
+      var css = '#global_header,.global_header,#footer,.footer,.supernav_container,.store_header,#store_nav_area,.responsive_header,#workshop_header,.workshop_header,.workshopBanner,.workshop_banner{display:none!important}' +
+                ' body{padding-top:0!important;margin-top:0!important;margin-left:0!important;margin-right:0!important;background:#1b2838!important}' +
+                ' html,body{width:100%!important;min-width:0!important;max-width:100%!important}' +
+                ' .responsive_page_content{padding-top:0!important;max-width:100%!important}';
       if(!document.getElementById('ms-clean')){var s=document.createElement('style');s.id='ms-clean';s.innerHTML=css;document.head.appendChild(s);}
       function hide(){
         var all=document.querySelectorAll('div,section,table,td,p,h1,h2,h3,h4,span,a');
@@ -3284,13 +3630,42 @@ struct WorkshopWebContainer: UIViewRepresentable {
       document.querySelectorAll('[data-ms-hidden]').forEach(function(e){e.style.removeProperty('display');e.removeAttribute('data-ms-hidden');});})();
     """
 
-    final class Coordinator: NSObject, WKNavigationDelegate, UIScrollViewDelegate {
+    /// Adds an "Open in ModShelf" button beside Steam's Subscribe button on a mod's page.
+    static let openButtonScript = """
+    (function(){
+      function addOpenButton(){
+        if (document.getElementById('ms-open')) return;
+        if (location.pathname.indexOf('filedetails') < 0) return;
+        var id = new URLSearchParams(location.search).get('id');
+        if (!id) return;
+        var sub = document.getElementById('SubscribeItemBtn');
+        if (!sub) {
+          var els = Array.prototype.slice.call(document.querySelectorAll('a,button,span,div'));
+          sub = els.find(function(e){ return /^\\s*subscribe\\s*$/i.test(e.textContent || ''); });
+        }
+        if (!sub) return;
+        var b = document.createElement('a');
+        b.id = 'ms-open';
+        b.textContent = 'Open in ModShelf';
+        b.href = '#';
+        b.style.cssText = 'display:inline-block;margin-left:8px;padding:7px 14px;background:#0A84FF;color:#fff;border-radius:6px;font:600 13px -apple-system,sans-serif;text-decoration:none;vertical-align:middle';
+        b.addEventListener('click', function(e){ e.preventDefault(); window.webkit.messageHandlers.modshelf.postMessage(id); });
+        sub.insertAdjacentElement('afterend', b);
+      }
+      addOpenButton(); setTimeout(addOpenButton, 800); setTimeout(addOpenButton, 2000);
+      new MutationObserver(addOpenButton).observe(document.body, {childList: true, subtree: true});
+    })();
+    """
+
+    final class Coordinator: NSObject, WKNavigationDelegate, UIScrollViewDelegate, WKScriptMessageHandler {
         var parent: WorkshopWebContainer
         var lastClean: Bool
         private var observations: [NSKeyValueObservation] = []
-        private var scrollObservation: NSKeyValueObservation?
 
-        init(_ parent: WorkshopWebContainer) { self.parent = parent; self.lastClean = parent.cleanPages }
+        init(_ parent: WorkshopWebContainer) {
+            self.parent = parent
+            self.lastClean = parent.cleanPages
+        }
 
         func observe(_ view: WKWebView) {
             observations = [
@@ -3303,13 +3678,15 @@ struct WorkshopWebContainer: UIViewRepresentable {
         }
 
         func scrollViewDidScroll(_ scrollView: UIScrollView) {
-            parent.onScroll(-scrollView.contentOffset.y)
+            parent.onScroll(-(scrollView.contentOffset.y + scrollView.adjustedContentInset.top))
         }
 
         func updateURL(_ url: URL?) {
             parent.currentURL = url
-            guard let url, WorkshopStore.workshopID(from: url.absoluteString) != nil, url.path.contains("/sharedfiles/filedetails") else {
-                parent.showUse = false; return
+            guard let url, WorkshopStore.workshopID(from: url.absoluteString) != nil,
+                  url.path.contains("/sharedfiles/filedetails") else {
+                parent.showUse = false
+                return
             }
             parent.showUse = true
         }
@@ -3320,10 +3697,13 @@ struct WorkshopWebContainer: UIViewRepresentable {
                 UserDefaults.standard.set(url.absoluteString, forKey: WorkshopBrowserView.lastPageKey)
             }
             CookieVault.save(from: webView.configuration.websiteDataStore.httpCookieStore)
-            if parent.cleanPages { webView.evaluateJavaScript(WorkshopWebContainer.hideScript, completionHandler: nil) }
+            if parent.cleanPages {
+                webView.evaluateJavaScript(WorkshopWebContainer.hideScript, completionHandler: nil)
+            }
         }
 
-        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
+                     decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
             // Steam often uses target="_blank". Keep those links in this same web view.
             if navigationAction.targetFrame == nil, let url = navigationAction.request.url {
                 webView.load(URLRequest(url: url))
@@ -3332,6 +3712,10 @@ struct WorkshopWebContainer: UIViewRepresentable {
             }
             decisionHandler(.allow)
         }
+
+        func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            guard message.name == "modshelf", let id = message.body as? String else { return }
+            parent.onOpenInApp(id)
+        }
     }
 }
-
