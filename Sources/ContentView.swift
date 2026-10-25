@@ -14,7 +14,8 @@ struct ModShelfApp: App {
 }
 
 let modShelfInfoFileName = "ModShelf Information.txt"
-let modShelfVersion = "0.1.0"
+let modShelfVersion = "0.1b"
+let modShelfBuild = "30"
 
 // MARK: - Models
 
@@ -1083,10 +1084,9 @@ final class WorkshopStore: ObservableObject {
 
     private func infoText(meta: WorkshopMetadata, id: String, destination: URL, files: Int, bytes: Int64, existing: WorkshopItem?, singleMod: Bool) -> String {
         let stamp = DateFormatter(); stamp.dateFormat = "d MMM yyyy, h:mm a"
-        let info = Bundle.main.infoDictionary
-        let version = info?["CFBundleShortVersionString"] as? String ?? "unknown"
-        let build = info?["CFBundleVersion"] as? String ?? "unknown"
-        var lines: [String] = ["ModShelf Information", "===================="]
+        let version = modShelfVersion
+        let build = modShelfBuild
+        var lines: [String] = ["ModShelf Information"]
         lines.append("")
         lines.append("Title: \(meta.title)")
         lines.append("Workshop ID: \(id)")
@@ -3749,17 +3749,34 @@ struct WorkshopWebContainer: UIViewRepresentable {
     })();
     """
 
-    /// Clicks Steam's cookie "Accept" button, but only on pages that show a cookie notice.
+    /// Accepts Steam's cookie notice. If the notice still covers the page, it is hidden so the page can be used.
     static let cookieScript = """
     (function(){
       var words = /^(accept|accept all|accept all cookies|i accept|i agree|agree|allow all|allow cookies|got it)$/i;
-      function accept(){
-        if (!document.body || !/cookie/i.test(document.body.innerText || '')) return;
-        var els = Array.prototype.slice.call(document.querySelectorAll('button,a,input[type=button],input[type=submit]'));
-        var b = els.find(function(e){ return words.test((e.textContent || e.value || '').trim()); });
-        if (b) b.click();
+      function dismiss(){
+        if (!document.body) return;
+        var text = document.body.innerText || '';
+        if (!/cookie/i.test(text)) return;
+        var buttons = Array.prototype.slice.call(document.querySelectorAll('button,a,input[type=button],input[type=submit]'));
+        var accept = buttons.find(function(e){ return words.test((e.textContent || e.value || '').replace(/[,.!]/g,'').trim()); });
+        if (accept) { accept.click(); }
+        var boxes = Array.prototype.slice.call(document.querySelectorAll('div,section,aside,dialog,form'));
+        boxes.forEach(function(e){
+          var t = (e.innerText || '').trim();
+          if (!t || t.length > 2500 || !/cookie/i.test(t)) return;
+          var cs = getComputedStyle(e);
+          if (cs.position === 'fixed' || cs.position === 'absolute' || parseInt(cs.zIndex, 10) > 0) {
+            e.style.setProperty('display', 'none', 'important');
+          }
+        });
       }
-      accept(); setTimeout(accept, 800); setTimeout(accept, 2500);
+      dismiss(); setTimeout(dismiss, 800); setTimeout(dismiss, 2500); setTimeout(dismiss, 5000);
+      var pending = false;
+      new MutationObserver(function(){
+        if (pending) return;
+        pending = true;
+        setTimeout(function(){ pending = false; dismiss(); }, 300);
+      }).observe(document.body, {childList: true, subtree: true});
     })();
     """
 
