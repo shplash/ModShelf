@@ -587,6 +587,7 @@ final class WorkshopStore: ObservableObject {
     @Published var folderLabel = ""
     @Published var activeTitle = ""
     @Published var phases: [String] = []
+    @Published var revealFolderURL: URL?
 
 
     private let engine = SteamengineNewEngine()!
@@ -750,6 +751,21 @@ final class WorkshopStore: ObservableObject {
         } else { folderLabel = "On My iPhone / ModShelf / Downloaded Mods" }
     }
     var usingCustomFolder: Bool { customRoot != nil }
+    var currentRootURL: URL { customRoot ?? defaultRoot }
+    func revealInFiles(_ item: WorkshopItem) {
+        let path = item.folder
+        if path.hasPrefix(documents.path + "/") {
+            // Inside ModShelf's own storage: Files can open it directly.
+            let encoded = path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? path
+            guard let url = URL(string: "shareddocuments://" + encoded) else { return }
+            UIApplication.shared.open(url)
+        } else if FileManager.default.fileExists(atPath: path) {
+            // A folder you picked: show the Files browser opened at the mod's folder.
+            revealFolderURL = URL(fileURLWithPath: path, isDirectory: true)
+        } else {
+            operationMessage = "That mod's folder is missing. Download it again."
+        }
+    }
     private func isManagedPath(_ path: String) -> Bool {
         var roots = [defaultRoot.path]
         if let c = customRoot { roots.append(c.path) }
@@ -1406,6 +1422,7 @@ extension View {
 
 struct AppTabBar: View {
     @Binding var selected: Int
+    var onTap: (Int) -> Void = { _ in }
     let style: String          // "pill" (shrinks on scroll), "pillFull", "bar"
     let collapsed: Bool
     let libraryBadge: Bool
@@ -1436,6 +1453,7 @@ struct AppTabBar: View {
         let on = selected == i
         return Button {
             if selected != i { Haptics.select() }
+            onTap(i)
             selected = i
         } label: {
             VStack(spacing: compact ? 0 : 3) {
@@ -1471,6 +1489,7 @@ struct AppTabBar: View {
             ForEach(0..<items.count, id: \.self) { i in
                 Button {
                     if selected != i { Haptics.select() }
+                    onTap(i)
                     selected = i
                 } label: {
                     VStack(spacing: 3) {
@@ -1597,6 +1616,8 @@ struct ContentView: View {
     @State private var lastScrollY: CGFloat = 0
     @State private var libraryFilter = "All"
     @State private var upwardRun: CGFloat = 0
+    @State private var browserHomeToken = 0
+    @State private var lastWorkshopTap = Date.distantPast
 
     /// Space reserved under every tab for the tab bar, so content can always scroll clear of it.
     private var tabBarReserve: CGFloat { tabStyle == "bar" ? 84 : 100 }
@@ -1651,11 +1672,17 @@ struct ContentView: View {
         }
         .sheet(isPresented: $store.showLogin) { loginSheet.presentationDetents([.medium, .large]) }
         .sheet(isPresented: $showShare, onDismiss: { store.shareURL = nil }) { if let url = store.shareURL { ShareSheet(activityItems: [url]) } }
+        .sheet(isPresented: Binding(get: { store.revealFolderURL != nil },
+                                    set: { if !$0 { store.revealFolderURL = nil } })) {
+            FolderPicker(onPick: { _ in store.revealFolderURL = nil },
+                         onCancel: { store.revealFolderURL = nil },
+                         startURL: store.revealFolderURL)
+        }
         .sheet(isPresented: $showFolderPicker) {
             FolderPicker(onPick: { url in
                 showFolderPicker = false
                 store.setCustomFolder(url)
-            }, onCancel: { showFolderPicker = false })
+            }, onCancel: { showFolderPicker = false }, startURL: store.currentRootURL)
         }
         .onChange(of: store.shareURL) { showShare = $0 != nil }
         .onChange(of: confirmDelete) { UserDefaults.standard.set($0, forKey: "options.confirmDelete") }
@@ -1688,7 +1715,8 @@ struct ContentView: View {
         .background(Color(uiColor: .systemGroupedBackground))
         .safeAreaInset(edge: .bottom, spacing: 0) {
             AppTabBar(selected: $selectedTab, style: tabStyle, collapsed: tabCollapsed,
-                      libraryBadge: store.library.contains(where: { $0.updateAvailable }))
+                      libraryBadge: store.library.contains(where: { $0.updateAvailable }),
+                      onTap: { tabTapped($0) })
                 .frame(height: tabBarReserve, alignment: .bottom)
         }
         .tint(Color.accentColor)
@@ -1706,14 +1734,7 @@ struct ContentView: View {
     }
 
     private var browserTab: some View {
-        WorkshopBrowserView(onValidItem: { url in
-                                store.browserURL = nil
-                                store.input = url.absoluteString
-                                inputWasSubmitted = false
-                                selectedTab = 0
-                                store.fetchPreview()
-                            },
-                            onOpenInApp: { id in
+        WorkshopBrowserView(onOpenInApp: { id in
                                 inputWasSubmitted = false
                                 selectedTab = 0
                                 if autoDownload {
@@ -1727,6 +1748,7 @@ struct ContentView: View {
                             cleanPages: cleanBrowser,
                             zoom: browserZoom,
                             bottomInset: tabBarReserve,
+                            homeToken: browserHomeToken,
                             onScroll: { y in handleScroll(y) })
             .ignoresSafeArea(edges: .bottom)
     }
@@ -1748,6 +1770,7 @@ struct ContentView: View {
                             openWorkshop: { openWorkshop(item.id); contextItem = nil },
                             copyID: { UIPasteboard.general.string = item.id; store.operationMessage = "Workshop ID copied."; contextItem = nil },
                             share: { store.shareURL = URL(string: "https://steamcommunity.com/sharedfiles/filedetails/?id=\(item.id)"); contextItem = nil },
+                            reveal: { store.revealInFiles(item); contextItem = nil },
                             favourite: { store.toggleFavourite(item); contextItem = nil },
                             updateNow: { store.update(item); selectedTab = 0; contextItem = nil },
                             checkUpdates: { store.checkUpdates(item); contextItem = nil },
@@ -1919,6 +1942,19 @@ struct ContentView: View {
             upwardRun += delta
             if upwardRun > 40 && tabCollapsed { tabCollapsed = false; upwardRun = 0 }
         }
+    }
+
+    private func tabTapped(_ index: Int) {
+        guard index == 1 else { lastWorkshopTap = .distantPast; return }
+        // Two taps on the Workshop tab within about half a second go back to the start page.
+        let now = Date()
+        let gap = now.timeIntervalSince(lastWorkshopTap)
+        if selectedTab == 1 && gap > 0.08 && gap < 0.45 {
+            browserHomeToken += 1
+            lastWorkshopTap = .distantPast
+            return
+        }
+        lastWorkshopTap = now
     }
 
     private func openWorkshop(_ id: String) {
@@ -2927,6 +2963,7 @@ struct ItemActionPopup: View {
     let openWorkshop: () -> Void
     let copyID: () -> Void
     let share: () -> Void
+    let reveal: () -> Void
     let favourite: () -> Void
     let updateNow: () -> Void
     let checkUpdates: () -> Void
@@ -2947,6 +2984,7 @@ struct ItemActionPopup: View {
             action("Check for updates", "arrow.clockwise", favourite: false, action: checkUpdates)
             action("Verify files", "checkmark.shield", favourite: false, action: verify)
             action("Export as ZIP", "square.and.arrow.up", favourite: false, action: export)
+            action("Reveal in Files", "folder", favourite: false, action: reveal)
             action("Share link", "square.and.arrow.up", favourite: false, action: share)
             action("Copy Workshop ID", "doc.on.doc", favourite: false, action: copyID)
             action("Delete download", "trash", favourite: false, tint: .red, action: delete)
@@ -3194,10 +3232,12 @@ struct YouTubeView: UIViewRepresentable {
 struct FolderPicker: UIViewControllerRepresentable {
     let onPick: (URL) -> Void
     var onCancel: () -> Void = { }
+    var startURL: URL? = nil
     func makeCoordinator() -> Coordinator { Coordinator(onPick: onPick, onCancel: onCancel) }
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
         let picker = UIDocumentPickerViewController(forOpeningContentTypes: [UTType.folder], asCopy: false)
         picker.allowsMultipleSelection = false
+        picker.directoryURL = startURL
         picker.delegate = context.coordinator
         return picker
     }
@@ -3352,25 +3392,30 @@ struct BrowserHome: View {
     }
 
     private var favouritesGrid: some View {
-        LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
-            ForEach(Array(favourites.prefix(4))) { hit in
-                ZStack(alignment: .topTrailing) {
-                    Button { openGame(hit) } label: {
-                        VStack(alignment: .leading, spacing: 8) {
-                            CachedImage(urlString: hit.tiny_image, fill: true, maxPixel: 400)
-                                .frame(height: 86)
-                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                            Text(hit.name)
-                                .font(.system(size: 13, weight: .semibold)).lineLimit(2)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        .padding(8)
-                        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
-                    starButton(hit).padding(4)
+        LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
+            ForEach(Array(favourites.prefix(4))) { hit in favouriteTile(hit) }
+        }
+    }
+
+    private func favouriteTile(_ hit: GameHit) -> some View {
+        ZStack(alignment: .topTrailing) {
+            Button { openGame(hit) } label: {
+                VStack(alignment: .leading, spacing: 6) {
+                    Color.clear
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 54)
+                        .overlay(CachedImage(urlString: hit.tiny_image, fill: true, maxPixel: 300))
+                        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    Text(hit.name)
+                        .font(.system(size: 12, weight: .semibold)).lineLimit(1)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .padding(7)
+                .frame(maxWidth: .infinity)
+                .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color(uiColor: .secondarySystemGroupedBackground)))
             }
+            .buttonStyle(.plain)
+            starButton(hit).padding(2)
         }
     }
 
@@ -3458,12 +3503,12 @@ struct BrowserHome: View {
 // MARK: - Workshop browser
 
 struct WorkshopBrowserView: View {
-    let onValidItem: (URL) -> Void
     let onOpenInApp: (String) -> Void
     @Binding var requestedURL: URL?
     let cleanPages: Bool
     let zoom: Double
     let bottomInset: CGFloat
+    let homeToken: Int
     let onScroll: (CGFloat) -> Void
 
     @State private var webView: WKWebView?
@@ -3484,7 +3529,7 @@ struct WorkshopBrowserView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if !showHome { topBar }
+            topBar
             ZStack {
                 WorkshopWebContainer(webView: $webView, currentURL: $currentURL, canGoBack: $canGoBack,
                                      canGoForward: $canGoForward, isLoading: $isLoading, showUse: $showUse,
@@ -3500,10 +3545,10 @@ struct WorkshopBrowserView: View {
             }
         }
         .background(Color(uiColor: .systemBackground))
-        .overlay(alignment: .trailing) { sideControls }
         .onChange(of: requestedURL) { url in
             if url != nil { showHome = false }
         }
+        .onChange(of: homeToken) { _ in showHome = true }
     }
 
     private func open(_ url: URL) {
@@ -3511,25 +3556,41 @@ struct WorkshopBrowserView: View {
         requestedURL = url
     }
 
-    /// Home, Copy link, Forward and Back, stacked down the middle of the right edge.
-    private var sideControls: some View {
-        VStack(spacing: 10) {
-            controlButton("house.fill", "Browse home", enabled: true) { showHome = true }
-            HStack(spacing: 8) {
-                if copied {
-                    Text("Copied")
-                        .font(.system(size: 12, weight: .bold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 9).padding(.vertical, 5)
-                        .background(Capsule().fill(Color.accentColor))
-                        .transition(.opacity.combined(with: .move(edge: .trailing)))
-                }
-                controlButton("doc.on.clipboard", "Copy page link", enabled: !showHome && currentURL != nil) { copyLink() }
-            }
-            controlButton("chevron.right", "Forward", enabled: canGoForward && !showHome) { webView?.goForward() }
-            controlButton("chevron.left", "Back", enabled: canGoBack && !showHome) { webView?.goBack() }
+    /// Back, Forward, the address (tap to copy) and Home, all across the top.
+    private var topBar: some View {
+        HStack(spacing: 8) {
+            navButton("chevron.left", "Back", enabled: canGoBack && !showHome) { webView?.goBack() }
+            navButton("chevron.right", "Forward", enabled: canGoForward && !showHome) { webView?.goForward() }
+            addressField
+            navButton("house.fill", "Browse home", enabled: true) { showHome = true }
         }
-        .padding(.trailing, 12)
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .background(Color(uiColor: .systemGroupedBackground))
+    }
+
+    private var addressText: String {
+        guard let u = currentURL else { return "" }
+        return (u.host ?? "") + u.path
+    }
+
+    /// Tapping the address copies the page link. "Copied" shows in its place for a moment.
+    private var addressField: some View {
+        Button { copyLink() } label: {
+            HStack(spacing: 6) {
+                Text(copied ? "Copied to clipboard" : (showHome ? "Browse Workshop" : addressText))
+                    .font(.system(size: 13, weight: copied ? .bold : .regular))
+                    .foregroundStyle(copied ? Color.accentColor : Color.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if isLoading && !copied { ProgressView().scaleEffect(0.7) }
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 36)
+            .padding(.horizontal, 10)
+            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color(uiColor: .secondarySystemGroupedBackground)))
+        }
+        .buttonStyle(.plain)
+        .disabled(showHome || currentURL == nil)
         .animation(.easeOut(duration: 0.2), value: copied)
     }
 
@@ -3538,36 +3599,16 @@ struct WorkshopBrowserView: View {
         UIPasteboard.general.string = url.absoluteString
         Haptics.tap()
         copied = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { copied = false }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { copied = false }
     }
 
-    private var addressText: String {
-        guard let u = currentURL else { return "" }
-        return (u.host ?? "") + u.path
-    }
-
-    private var topBar: some View {
-        HStack(spacing: 10) {
-            controlButton("arrow.clockwise", "Reload", enabled: true) { webView?.reload() }
-            Text(addressText)
-                .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            if isLoading { ProgressView().scaleEffect(0.8) }
-        }
-        .padding(.horizontal, 12).padding(.vertical, 8)
-        .background(Color(uiColor: .systemGroupedBackground))
-    }
-
-    /// Every control uses the same circle size and icon size.
-    private func controlButton(_ symbol: String, _ label: String, enabled: Bool, action: @escaping () -> Void) -> some View {
+    private func navButton(_ symbol: String, _ label: String, enabled: Bool, action: @escaping () -> Void) -> some View {
         Button { Haptics.tap(); action() } label: {
             Image(systemName: symbol)
-                .font(.system(size: 16, weight: .semibold))
+                .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(enabled ? Color.accentColor : Color.secondary.opacity(0.4))
-                .frame(width: 42, height: 42)
+                .frame(width: 36, height: 36)
                 .background(Circle().fill(Color(uiColor: .secondarySystemGroupedBackground)))
-                .overlay(Circle().stroke(Color.primary.opacity(0.08), lineWidth: 1))
-                .shadow(color: .black.opacity(0.25), radius: 8, y: 3)
         }
         .buttonStyle(.plain)
         .disabled(!enabled)
@@ -3598,6 +3639,7 @@ struct WorkshopWebContainer: UIViewRepresentable {
         controller.add(context.coordinator, name: "modshelf")
         controller.addUserScript(WKUserScript(source: Self.hideScript, injectionTime: .atDocumentEnd, forMainFrameOnly: false))
         controller.addUserScript(WKUserScript(source: Self.openButtonScript, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
+        controller.addUserScript(WKUserScript(source: Self.cookieScript, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
 
         let view = WKWebView(frame: .zero, configuration: config)
         view.navigationDelegate = context.coordinator
@@ -3704,6 +3746,20 @@ struct WorkshopWebContainer: UIViewRepresentable {
       }
       addOpenButton(); setTimeout(addOpenButton, 800); setTimeout(addOpenButton, 2000);
       new MutationObserver(addOpenButton).observe(document.body, {childList: true, subtree: true});
+    })();
+    """
+
+    /// Clicks Steam's cookie "Accept" button, but only on pages that show a cookie notice.
+    static let cookieScript = """
+    (function(){
+      var words = /^(accept|accept all|accept all cookies|i accept|i agree|agree|allow all|allow cookies|got it)$/i;
+      function accept(){
+        if (!document.body || !/cookie/i.test(document.body.innerText || '')) return;
+        var els = Array.prototype.slice.call(document.querySelectorAll('button,a,input[type=button],input[type=submit]'));
+        var b = els.find(function(e){ return words.test((e.textContent || e.value || '').trim()); });
+        if (b) b.click();
+      }
+      accept(); setTimeout(accept, 800); setTimeout(accept, 2500);
     })();
     """
 
