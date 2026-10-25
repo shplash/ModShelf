@@ -1422,10 +1422,10 @@ extension View {
 
 struct AppTabBar: View {
     @Binding var selected: Int
-    var onTap: (Int) -> Void = { _ in }
     let style: String          // "pill" (shrinks on scroll), "pillFull", "bar"
     let collapsed: Bool
     let libraryBadge: Bool
+    var onTap: (Int) -> Void = { _ in }
     private let items: [(String, String)] = [("Download", "arrow.down.circle.fill"), ("Workshop", "safari.fill"),
                                              ("Library", "square.grid.2x2.fill"), ("Options", "gearshape.fill")]
 
