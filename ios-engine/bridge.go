@@ -25,6 +25,7 @@ type Engine struct {
 	authenticated bool
 	cancel        context.CancelFunc
 	guardCh       chan string
+	guardPending  bool
 }
 
 func NewEngine() *Engine { return &Engine{status: "Not connected"} }
@@ -36,6 +37,7 @@ func (e *Engine) SubmitGuardCode(code string) {
 	e.mu.Lock()
 	ch := e.guardCh
 	e.guardCh = nil
+	e.guardPending = false
 	e.mu.Unlock()
 	if ch != nil {
 		ch <- code // buffered channel of size 1, so this never blocks
@@ -70,7 +72,14 @@ func (e *Engine) Login(username, password, guardCode, cachePath string) string {
 		e.mu.Unlock()
 		return "Wait for the current download to finish or cancel it before signing in again."
 	}
+	// If a guard prompt is already pending, do not restart the same login flow.
+	if e.guardPending {
+		e.mu.Unlock()
+		return "Steam is waiting for the current Guard prompt to finish."
+	}
 	e.status, e.lastError = "Connecting to Steam…", ""
+	e.guardCh = nil
+	e.guardPending = false
 	e.mu.Unlock()
 
 	// Keep the constructor context alive through connection establishment only; the client
@@ -86,16 +95,45 @@ func (e *Engine) Login(username, password, guardCode, cachePath string) string {
 			if code != "" {
 				return code, nil
 			}
-			// Wait inside this same login attempt for the user to type the code.
-			// A second Steam login would send another Steam Guard prompt.
-			ch := make(chan string, 1)
+
 			e.mu.Lock()
+			if e.guardPending {
+				ch := e.guardCh
+				e.mu.Unlock()
+				if ch == nil {
+					return "", fmt.Errorf("The Steam Guard request was cancelled. Please try signing in again.")
+				}
+				select {
+				case c := <-ch:
+					if c == "" {
+						return "", fmt.Errorf("The Steam Guard code was empty.")
+					}
+					return c, nil
+				case <-ctx.Done():
+					e.mu.Lock()
+					e.guardCh = nil
+					e.guardPending = false
+					e.mu.Unlock()
+					return "", fmt.Errorf("The Steam Guard code was not entered in time. Try signing in again.")
+				}
+			}
+
+			// The user can satisfy the same prompt either by approving the sign-in in the Steam app
+			// or by entering the Guard code. We only allow one outstanding request so a second prompt
+			// is not started while the original login attempt is still waiting.
+			ch := make(chan string, 1)
 			e.guardCh = ch
+			e.guardPending = true
 			e.status = "Steam Guard code required"
-			e.lastError = "Enter the Steam Guard code from the Steam app."
+			e.lastError = "Approve the sign-in in the Steam app or enter the Guard code."
 			e.mu.Unlock()
+
 			select {
 			case c := <-ch:
+				e.mu.Lock()
+				e.guardCh = nil
+				e.guardPending = false
+				e.mu.Unlock()
 				if c == "" {
 					return "", fmt.Errorf("The Steam Guard code was empty.")
 				}
@@ -103,6 +141,7 @@ func (e *Engine) Login(username, password, guardCode, cachePath string) string {
 			case <-ctx.Done():
 				e.mu.Lock()
 				e.guardCh = nil
+				e.guardPending = false
 				e.mu.Unlock()
 				return "", fmt.Errorf("The Steam Guard code was not entered in time. Try signing in again.")
 			}
@@ -112,6 +151,8 @@ func (e *Engine) Login(username, password, guardCode, cachePath string) string {
 		e.mu.Lock()
 		e.status = "Sign-in failed"
 		e.lastError = err.Error()
+		e.guardCh = nil
+		e.guardPending = false
 		e.mu.Unlock()
 		return err.Error()
 	}
@@ -119,6 +160,7 @@ func (e *Engine) Login(username, password, guardCode, cachePath string) string {
 	oldClient := e.client
 	e.client, e.authenticated = client, true
 	e.guardCh = nil
+	e.guardPending = false
 	e.status, e.lastError = "Connected to Steam", ""
 	e.mu.Unlock()
 	if oldClient != nil {
@@ -227,6 +269,8 @@ func (e *Engine) Logout() {
 	}
 	e.client, e.authenticated = nil, false
 	e.status, e.lastError = "Not connected", ""
+	e.guardCh = nil
+	e.guardPending = false
 	e.mu.Unlock()
 	if client != nil {
 		client.Close()
