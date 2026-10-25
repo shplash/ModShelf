@@ -2,6 +2,7 @@ import SwiftUI
 import UIKit
 import WebKit
 import Security
+import ZIPFoundation
 import Network
 import ImageIO
 import UniformTypeIdentifiers
@@ -11,6 +12,8 @@ import SteamEngine
 struct ModShelfApp: App {
     var body: some Scene { WindowGroup { ContentView() } }
 }
+
+let modShelfInfoFileName = "ModShelf Info.txt"
 
 // MARK: - Models
 
@@ -501,7 +504,6 @@ final class WorkshopStore: ObservableObject {
     @Published var folderLabel = ""
     @Published var activeTitle = ""
 
-    static let infoFileName = "ModShelf Info.txt"
 
     private let engine = SteamengineNewEngine()!
     private var poller: Timer?
@@ -949,7 +951,7 @@ final class WorkshopStore: ObservableObject {
 
         if UserDefaults.standard.object(forKey: "options.infoFile") as? Bool ?? true {
             let text = infoText(meta: meta, id: id, destination: dest, files: counts.count, bytes: counts.bytes, existing: existing, singleMod: singleMod)
-            try? text.write(to: dest.appendingPathComponent(Self.infoFileName), atomically: true, encoding: .utf8)
+            try? text.write(to: dest.appendingPathComponent(modShelfInfoFileName), atomically: true, encoding: .utf8)
         }
         return (dest, counts.count, counts.bytes)
     }
@@ -996,7 +998,7 @@ final class WorkshopStore: ObservableObject {
         var count = 0
         var bytes: Int64 = 0
         for case let file as URL in en {
-            if file.lastPathComponent == WorkshopStore.infoFileName { continue }
+            if file.lastPathComponent == modShelfInfoFileName { continue }
             let values = try? file.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
             if values?.isRegularFile == true { count += 1; bytes += Int64(values?.fileSize ?? 0) }
         }
@@ -2844,7 +2846,7 @@ struct WorkshopWebContainer: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .default()          // keeps cookies between launches
-        config.userContentController.addUserScript(WKUserScript(source: Coordinator.hideScript,
+        config.userContentController.addUserScript(WKUserScript(source: WorkshopWebContainer.hideScript,
                                                                 injectionTime: .atDocumentEnd, forMainFrameOnly: false))
         let view = WKWebView(frame: .zero, configuration: config)
         view.navigationDelegate = context.coordinator
@@ -2870,7 +2872,7 @@ struct WorkshopWebContainer: UIViewRepresentable {
         context.coordinator.parent = self
         if cleanPages != context.coordinator.lastClean {
             context.coordinator.lastClean = cleanPages
-            view.evaluateJavaScript(cleanPages ? Coordinator.hideScript : Coordinator.showScript, completionHandler: nil)
+            view.evaluateJavaScript(cleanPages ? WorkshopWebContainer.hideScript : WorkshopWebContainer.showScript, completionHandler: nil)
         }
     }
 
