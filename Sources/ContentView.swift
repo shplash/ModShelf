@@ -1728,7 +1728,7 @@ struct ContentView: View {
                             zoom: browserZoom,
                             bottomInset: tabBarReserve,
                             onScroll: { y in handleScroll(y) })
-            .ignoresSafeArea(edges: tabStyle == "bar" ? [] : .bottom)
+            .ignoresSafeArea(edges: .bottom)
     }
 
     @ViewBuilder private var overlays: some View {
@@ -3261,11 +3261,14 @@ struct BrowserHome: View {
     @State private var query = ""
     @State private var results: [GameHit] = []
     @State private var searching = false
+    @FocusState private var searchFocused: Bool
     @AppStorage("browser.recentGames") private var recentJSON = "[]"
     @AppStorage("browser.favGames") private var favJSON = "[]"
 
     private var recent: [GameHit] { GameListStore.decode(recentJSON) }
     private var favourites: [GameHit] { GameListStore.decode(favJSON) }
+    /// True until the first game is opened or favourited; the search box is then ready to type in.
+    private var isFirstRun: Bool { recent.isEmpty && favourites.isEmpty && lastPage == nil }
 
     var body: some View {
         ScrollView {
@@ -3287,8 +3290,8 @@ struct BrowserHome: View {
                         sectionTitle("Recently opened")
                         ForEach(recent) { hit in gameRow(hit) }
                     }
-                    if recent.isEmpty && favourites.isEmpty {
-                        Text("Search a game above to browse its Workshop.")
+                    if isFirstRun {
+                        Text("Search for a game above to start browsing its Workshop.")
                             .font(.subheadline).foregroundStyle(.secondary).padding(.top, 4)
                     }
                 }
@@ -3298,6 +3301,7 @@ struct BrowserHome: View {
         }
         .background(Color(uiColor: .systemGroupedBackground))
         .task(id: query) { await runSearch() }
+        .onAppear { if isFirstRun { searchFocused = true } }
     }
 
     private func runSearch() async {
@@ -3313,21 +3317,27 @@ struct BrowserHome: View {
     }
 
     private var searchField: some View {
-        HStack(spacing: 9) {
-            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+        HStack(spacing: 10) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 16, weight: .semibold)).foregroundStyle(.secondary)
             TextField("Search a game", text: $query)
+                .font(.system(size: 16))
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 .submitLabel(.search)
+                .focused($searchFocused)
             if !query.isEmpty {
                 Button { query = "" } label: {
-                    Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 16)).foregroundStyle(.secondary)
+                        .padding(8).contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
                 .accessibilityLabel("Clear search")
             }
         }
-        .padding(.horizontal, 12).padding(.vertical, 11)
-        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+        .padding(.horizontal, 14).padding(.vertical, 12)
+        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 
     private var resultsSection: some View {
@@ -3344,43 +3354,50 @@ struct BrowserHome: View {
     private var favouritesGrid: some View {
         LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
             ForEach(Array(favourites.prefix(4))) { hit in
-                Button { openGame(hit) } label: {
-                    VStack(alignment: .leading, spacing: 8) {
-                        CachedImage(urlString: hit.tiny_image, fill: true, maxPixel: 400)
-                            .frame(height: 86)
-                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        Text(hit.name)
-                            .font(.system(size: 13, weight: .semibold)).lineLimit(2)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                ZStack(alignment: .topTrailing) {
+                    Button { openGame(hit) } label: {
+                        VStack(alignment: .leading, spacing: 8) {
+                            CachedImage(urlString: hit.tiny_image, fill: true, maxPixel: 400)
+                                .frame(height: 86)
+                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            Text(hit.name)
+                                .font(.system(size: 13, weight: .semibold)).lineLimit(2)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .padding(8)
+                        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                     }
-                    .padding(8)
-                    .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+                    .buttonStyle(.plain)
+                    starButton(hit).padding(4)
                 }
-                .buttonStyle(.plain)
-                .contextMenu { favouriteButton(hit) }
             }
         }
     }
 
     private func gameRow(_ hit: GameHit) -> some View {
-        Button { openGame(hit) } label: {
-            HStack(spacing: 12) {
-                CachedImage(urlString: hit.tiny_image, fill: true, maxPixel: 120)
-                    .frame(width: 46, height: 46)
-                    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-                Text(hit.name)
-                    .font(.system(size: 15, weight: .semibold)).lineLimit(2)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                Image(systemName: "chevron.right").font(.caption.bold()).foregroundStyle(.tertiary)
+        HStack(spacing: 0) {
+            Button { openGame(hit) } label: {
+                HStack(spacing: 12) {
+                    CachedImage(urlString: hit.tiny_image, fill: true, maxPixel: 120)
+                        .frame(width: 46, height: 46)
+                        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    Text(hit.name)
+                        .font(.system(size: 15, weight: .semibold)).lineLimit(2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 13, weight: .semibold)).foregroundStyle(.tertiary)
+                }
+                .padding(.leading, 10).padding(.vertical, 10)
+                .contentShape(Rectangle())
             }
-            .padding(10)
-            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+            .buttonStyle(.plain)
+            starButton(hit).padding(.trailing, 4)
         }
-        .buttonStyle(.plain)
-        .contextMenu { favouriteButton(hit) }
+        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 
-    private func favouriteButton(_ hit: GameHit) -> some View {
+    /// The star has a large invisible tap area, so you only favourite when you mean to.
+    private func starButton(_ hit: GameHit) -> some View {
         let isFavourite = favourites.contains(hit)
         return Button {
             Haptics.tap()
@@ -3388,8 +3405,15 @@ struct BrowserHome: View {
             if let index = list.firstIndex(of: hit) { list.remove(at: index) } else { list.insert(hit, at: 0) }
             favJSON = GameListStore.encode(list)
         } label: {
-            Label(isFavourite ? "Remove favourite" : "Favourite", systemImage: isFavourite ? "star.slash" : "star")
+            Image(systemName: isFavourite ? "star.fill" : "star")
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(isFavourite ? Color.yellow : Color.secondary)
+                .frame(width: 20, height: 20)
+                .padding(14)
+                .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .accessibilityLabel(isFavourite ? "Remove favourite" : "Add favourite")
     }
 
     private func openGame(_ hit: GameHit) {
@@ -3411,18 +3435,21 @@ struct BrowserHome: View {
     private func continueCard(_ url: URL) -> some View {
         Button { Haptics.tap(); onOpenURL(url) } label: {
             HStack(spacing: 12) {
-                Image(systemName: "arrow.uturn.forward.circle.fill")
-                    .font(.system(size: 26)).foregroundStyle(Color.accentColor)
+                Image(systemName: "arrow.uturn.forward")
+                    .font(.system(size: 16, weight: .semibold)).foregroundStyle(Color.accentColor)
+                    .frame(width: 36, height: 36)
+                    .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.accentColor.opacity(0.14)))
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Continue where you left off").font(.system(size: 15, weight: .semibold))
                     Text(url.absoluteString.replacingOccurrences(of: "https://", with: ""))
                         .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
                 }
                 Spacer(minLength: 0)
-                Image(systemName: "chevron.right").font(.caption.bold()).foregroundStyle(.tertiary)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 13, weight: .semibold)).foregroundStyle(.tertiary)
             }
             .padding(14)
-            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
         .buttonStyle(.plain)
     }
@@ -3446,6 +3473,7 @@ struct WorkshopBrowserView: View {
     @State private var isLoading = false
     @State private var showUse = false
     @State private var showHome = true
+    @State private var copied = false
 
     static let home = URL(string: "https://steamcommunity.com/workshop/")!
     static let lastPageKey = "browser.lastURL"
@@ -3472,7 +3500,7 @@ struct WorkshopBrowserView: View {
             }
         }
         .background(Color(uiColor: .systemBackground))
-        .overlay(alignment: .bottomLeading) { bottomControls }
+        .overlay(alignment: .trailing) { sideControls }
         .onChange(of: requestedURL) { url in
             if url != nil { showHome = false }
         }
@@ -3483,19 +3511,34 @@ struct WorkshopBrowserView: View {
         requestedURL = url
     }
 
-    /// Home, Back and Forward sit at the bottom left, just above the tab bar.
-    private var bottomControls: some View {
-        HStack(spacing: 6) {
+    /// Home, Copy link, Forward and Back, stacked down the middle of the right edge.
+    private var sideControls: some View {
+        VStack(spacing: 10) {
             controlButton("house.fill", "Browse home", enabled: true) { showHome = true }
-            controlButton("chevron.left", "Back", enabled: canGoBack && !showHome) { webView?.goBack() }
+            HStack(spacing: 8) {
+                if copied {
+                    Text("Copied")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 9).padding(.vertical, 5)
+                        .background(Capsule().fill(Color.accentColor))
+                        .transition(.opacity.combined(with: .move(edge: .trailing)))
+                }
+                controlButton("doc.on.clipboard", "Copy page link", enabled: !showHome && currentURL != nil) { copyLink() }
+            }
             controlButton("chevron.right", "Forward", enabled: canGoForward && !showHome) { webView?.goForward() }
+            controlButton("chevron.left", "Back", enabled: canGoBack && !showHome) { webView?.goBack() }
         }
-        .padding(6)
-        .background(Capsule().fill(Color(uiColor: .secondarySystemGroupedBackground)))
-        .overlay(Capsule().stroke(Color.primary.opacity(0.08), lineWidth: 1))
-        .shadow(color: .black.opacity(0.28), radius: 10, y: 3)
-        .padding(.leading, 12)
-        .padding(.bottom, bottomInset + 8)
+        .padding(.trailing, 12)
+        .animation(.easeOut(duration: 0.2), value: copied)
+    }
+
+    private func copyLink() {
+        guard let url = currentURL else { return }
+        UIPasteboard.general.string = url.absoluteString
+        Haptics.tap()
+        copied = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { copied = false }
     }
 
     private var addressText: String {
@@ -3504,33 +3547,27 @@ struct WorkshopBrowserView: View {
     }
 
     private var topBar: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 10) {
             controlButton("arrow.clockwise", "Reload", enabled: true) { webView?.reload() }
             Text(addressText)
                 .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.leading, 4)
             if isLoading { ProgressView().scaleEffect(0.8) }
-            if showUse, let url = currentURL {
-                Button { onValidItem(url) } label: {
-                    Text("Use item")
-                        .font(.system(size: 13, weight: .semibold)).foregroundStyle(.white)
-                        .padding(.horizontal, 12).frame(height: 32)
-                        .background(Capsule().fill(Color.accentColor))
-                }
-                .buttonStyle(.plain)
-            }
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
         .background(Color(uiColor: .systemGroupedBackground))
     }
 
+    /// Every control uses the same circle size and icon size.
     private func controlButton(_ symbol: String, _ label: String, enabled: Bool, action: @escaping () -> Void) -> some View {
         Button { Haptics.tap(); action() } label: {
-            Image(systemName: symbol).font(.system(size: 15, weight: .semibold))
+            Image(systemName: symbol)
+                .font(.system(size: 16, weight: .semibold))
                 .foregroundStyle(enabled ? Color.accentColor : Color.secondary.opacity(0.4))
-                .frame(width: 36, height: 36)
-                .background(Circle().fill(Color.accentColor.opacity(enabled ? 0.14 : 0.06)))
+                .frame(width: 42, height: 42)
+                .background(Circle().fill(Color(uiColor: .secondarySystemGroupedBackground)))
+                .overlay(Circle().stroke(Color.primary.opacity(0.08), lineWidth: 1))
+                .shadow(color: .black.opacity(0.25), radius: 8, y: 3)
         }
         .buttonStyle(.plain)
         .disabled(!enabled)
@@ -3660,8 +3697,8 @@ struct WorkshopWebContainer: UIViewRepresentable {
         var b = document.createElement('a');
         b.id = 'ms-open';
         b.href = '#';
-        b.innerHTML = '<span style="font-size:24px;font-weight:300;line-height:1;margin-right:12px">+</span><span style="line-height:1.15">Download in<br>ModShelf</span>';
-        b.style.cssText = 'display:flex;align-items:center;justify-content:flex-start;box-sizing:border-box;width:100%;padding:12px 16px;margin-top:6px;background:#0A84FF;color:#fff;border-radius:4px;font:600 15px -apple-system,sans-serif;text-decoration:none;cursor:pointer';
+        b.innerHTML = '<span style="font-size:22px;font-weight:300;line-height:1;margin-right:12px">+</span><span style="line-height:1.2;white-space:nowrap">Download in<br>ModShelf</span>';
+        b.style.cssText = 'display:flex;align-items:center;justify-content:flex-start;box-sizing:border-box;width:100%;padding:10px 16px;margin-top:6px;background:#0A84FF;color:#fff;border:2px solid #000;border-radius:4px;font:600 14px -apple-system,sans-serif;white-space:nowrap;text-decoration:none;cursor:pointer';
         b.addEventListener('click', function(e){ e.preventDefault(); window.webkit.messageHandlers.modshelf.postMessage(id); });
         target.insertAdjacentElement('afterend', b);
       }
@@ -3706,7 +3743,8 @@ struct WorkshopWebContainer: UIViewRepresentable {
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             updateURL(webView.url)
-            if let url = webView.url, url.host?.contains("steamcommunity.com") == true {
+            if let url = webView.url, url.host?.contains("steamcommunity.com") == true,
+               url.path.contains("/app/") || url.path.contains("/sharedfiles/") {
                 UserDefaults.standard.set(url.absoluteString, forKey: WorkshopBrowserView.lastPageKey)
             }
             CookieVault.save(from: webView.configuration.websiteDataStore.httpCookieStore)
