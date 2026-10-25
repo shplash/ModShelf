@@ -39,8 +39,14 @@ func (e *Engine) SubmitGuardCode(code string) {
 	e.guardCh = nil
 	e.guardPending = false
 	e.mu.Unlock()
-	if ch != nil {
-		ch <- code // buffered channel of size 1, so this never blocks
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- code:
+	default:
+		// The callback may already have exited because the login context timed out.
+		// In that case, there is no one left waiting on the channel.
 	}
 }
 
