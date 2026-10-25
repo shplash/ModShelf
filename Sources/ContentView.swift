@@ -218,19 +218,16 @@ final class ImageStore {
         session = URLSession(configuration: cfg)
     }
 
-    /// "loop", "repeat5" or "off". Read from the Options setting "Workshop GIFs".
-    static var gifMode: String { UserDefaults.standard.string(forKey: "options.gifMode") ?? "loop" }
+    private func key(_ url: URL, animate: Bool) -> NSString { (url.absoluteString + (animate ? "|anim" : "|still")) as NSString }
+    func cached(_ url: URL, animate: Bool) -> UIImage? { memory.object(forKey: key(url, animate: animate)) }
 
-    private func key(_ url: URL) -> NSString { (url.absoluteString + "|" + Self.gifMode) as NSString }
-    func cached(_ url: URL) -> UIImage? { memory.object(forKey: key(url)) }
-
-    func load(_ url: URL, maxPixel: CGFloat) async -> UIImage? {
-        let k = key(url)
+    func load(_ url: URL, maxPixel: CGFloat, animate: Bool) async -> UIImage? {
+        let k = key(url, animate: animate)
         if let hit = memory.object(forKey: k) { return hit }
         guard let (data, _) = try? await session.data(from: url) else { return nil }
-        let animate = Self.isGIF(data) && Self.gifMode != "off"
+        let shouldAnimate = animate && Self.isGIF(data)
         let image = await Task.detached(priority: .utility) { () -> UIImage? in
-            animate ? Self.animatedGIF(data, maxPixel: maxPixel) : Self.still(data, maxPixel: maxPixel)
+            shouldAnimate ? Self.animatedGIF(data, maxPixel: maxPixel) : Self.still(data, maxPixel: maxPixel)
         }.value
         if let image {
             let cost = Int(image.size.width * image.size.height * image.scale * image.scale * 4)
@@ -312,14 +309,17 @@ struct CachedImage: View {
     let urlString: String?
     var fill = true
     var maxPixel: CGFloat = 600
-    @AppStorage("options.gifMode") private var gifMode = "loop"
+    @AppStorage("options.gifDownloads") private var gifDownloads = true
+    @AppStorage("options.gifLibrary") private var gifLibrary = true
+    var isDownloadPreview = false
     @State private var image: UIImage?
+    private var animate: Bool { isDownloadPreview ? gifDownloads : gifLibrary }
 
     var body: some View {
         ZStack {
             if let image {
                 if image.images != nil {
-                    AnimatedUIImageView(image: image, fill: fill, loops: gifMode == "repeat5" ? 5 : 0)
+                    AnimatedUIImageView(image: image, fill: fill, loops: 5)
                 } else if fill {
                     Image(uiImage: image).resizable().scaledToFill()
                 } else {
@@ -330,10 +330,10 @@ struct CachedImage: View {
                 Image(systemName: "shippingbox").font(.title2).foregroundStyle(.tertiary)
             }
         }
-        .task(id: (urlString ?? "") + gifMode) {
+        .task(id: (urlString ?? "") + (animate ? "|1" : "|0")) {
             guard let s = urlString, !s.isEmpty, let url = URL(string: s) else { image = nil; return }
-            if let hit = ImageStore.shared.cached(url) { image = hit; return }
-            image = await ImageStore.shared.load(url, maxPixel: maxPixel)
+            if let hit = ImageStore.shared.cached(url, animate: animate) { image = hit; return }
+            image = await ImageStore.shared.load(url, maxPixel: maxPixel, animate: animate)
         }
     }
 }
@@ -741,8 +741,7 @@ final class WorkshopStore: ObservableObject {
     }
     private func updateFolderLabel() {
         if let root = customRoot {
-            let parent = root.deletingLastPathComponent().lastPathComponent
-            folderLabel = parent.isEmpty ? root.lastPathComponent : "\(parent) / \(root.lastPathComponent)"
+            folderLabel = (try? root.resourceValues(forKeys: [.localizedNameKey]).localizedName) ?? root.lastPathComponent
         } else { folderLabel = "On My iPhone / ModShelf / Downloaded Mods" }
     }
     var usingCustomFolder: Bool { customRoot != nil }
@@ -1154,44 +1153,71 @@ final class WorkshopStore: ObservableObject {
         }
     }
 
+    /// Steam's size and the files on disk are close, not always identical, so allow a small margin.
+    nonisolated static func sizeMatches(disk: Int64, steam: Int64) -> Bool {
+        let tolerance = max(256 * 1024, steam / 10)
+        return abs(disk - steam) <= tolerance
+    }
+
+    private func applyCheck(_ id: String, broken: Bool) {
+        if let i = library.firstIndex(where: { $0.id == id }) { library[i].filesBroken = broken; saveLibrary() }
+    }
+
     func verify(_ item: WorkshopItem) {
-        operationMessage = "Verifying files for \(item.displayTitle)…"
-        let folder = item.folder, expectedCount = item.fileCount, expectedBytes = item.byteCount
+        guard !isVerifyingAll else { return }
+        let folder = item.folder
+        operationMessage = "Checking \(item.displayTitle)…"
         Task { @MainActor in
             let scan = await Task.detached(priority: .utility) { Self.scan(folder: folder) }.value
-            let problem = Self.problem(scan: scan, expectedCount: expectedCount, expectedBytes: expectedBytes)
-            if let i = library.firstIndex(where: { $0.id == item.id }) { library[i].filesBroken = problem != nil; saveLibrary() }
-            if let problem { operationMessage = "Verification failed for \(item.displayTitle): \(problem)." }
-            else { operationMessage = "Verified \(scan.count) files for \(item.displayTitle)." }
+            guard scan.exists, scan.count > 0 else {
+                applyCheck(item.id, broken: true)
+                operationMessage = "\(item.displayTitle) is missing its files. Download it again."
+                return
+            }
+            guard let meta = await SteamMeta.fetch(id: item.id, includePage: false), meta.fileSize > 0 else {
+                operationMessage = "Couldn't get \(item.displayTitle)'s size from Steam. Check your connection and try again."
+                return
+            }
+            let ok = Self.sizeMatches(disk: scan.bytes, steam: meta.fileSize)
+            applyCheck(item.id, broken: !ok)
+            operationMessage = ok
+                ? "\(item.displayTitle) matches Steam (\(Fmt.bytes(scan.bytes)))."
+                : "\(item.displayTitle) is \(Fmt.bytes(scan.bytes)) here, but Steam lists \(Fmt.bytes(meta.fileSize)). Try downloading it again."
         }
-    }
-    nonisolated static func problem(scan: (exists: Bool, count: Int, bytes: Int64), expectedCount: Int?, expectedBytes: Int64?) -> String? {
-        if !scan.exists { return "folder is missing" }
-        if scan.count == 0 { return "folder contains no files" }
-        if let c = expectedCount, c != scan.count { return "expected \(c) files but found \(scan.count)" }
-        if let b = expectedBytes, b != scan.bytes { return "file sizes don't match the download" }
-        return nil
     }
 
     func verifyAllFiles() {
         guard !isVerifyingAll else { return }
         guard !library.isEmpty else { operationMessage = "Your library is empty."; return }
         isVerifyingAll = true
-        let entries = library.map { ($0.id, $0.folder, $0.fileCount, $0.byteCount) }
-        operationMessage = "Verifying 0 of \(entries.count) items…"
+        let entries = library.map { ($0.id, $0.displayTitle, $0.folder) }
         Task { @MainActor in
-            var bad: [String] = []
+            var localTotal: Int64 = 0
+            var steamTotal: Int64 = 0
+            var mismatches: [String] = []
+            var checked = 0
             for (index, entry) in entries.enumerated() {
-                operationMessage = "Verifying \(index + 1) of \(entries.count)…"
-                let folder = entry.1
+                operationMessage = "Checking \(index + 1) of \(entries.count)…"
+                let folder = entry.2
                 let scan = await Task.detached(priority: .utility) { Self.scan(folder: folder) }.value
-                let problem = Self.problem(scan: scan, expectedCount: entry.2, expectedBytes: entry.3)
-                if let i = library.firstIndex(where: { $0.id == entry.0 }) { library[i].filesBroken = problem != nil }
-                if problem != nil { bad.append(entry.0) }
+                guard scan.exists, scan.count > 0 else {
+                    applyCheck(entry.0, broken: true)
+                    mismatches.append(entry.1)
+                    continue
+                }
+                guard let meta = await SteamMeta.fetch(id: entry.0, includePage: false), meta.fileSize > 0 else { continue }
+                checked += 1
+                localTotal += scan.bytes
+                steamTotal += meta.fileSize
+                let ok = Self.sizeMatches(disk: scan.bytes, steam: meta.fileSize)
+                applyCheck(entry.0, broken: !ok)
+                if !ok { mismatches.append(entry.1) }
+                try? await Task.sleep(nanoseconds: 300_000_000)
             }
-            saveLibrary()
             isVerifyingAll = false
-            operationMessage = bad.isEmpty ? "Verified all \(entries.count) library items." : "Verified \(entries.count - bad.count) of \(entries.count). Problems with: \(bad.joined(separator: ", "))."
+            operationMessage = mismatches.isEmpty
+                ? "All \(checked) mods match Steam (\(Fmt.bytes(localTotal)) of \(Fmt.bytes(steamTotal)))."
+                : "\(mismatches.count) of \(checked) mods don't match Steam: \(mismatches.joined(separator: ", "))."
         }
     }
 
@@ -1534,7 +1560,8 @@ struct ContentView: View {
     @AppStorage("options.showIDs") private var showIDs = false
     @AppStorage("options.compactLibrary") private var compactLibrary = true
     @AppStorage("options.haptics") private var haptics = true
-    @AppStorage("options.gifMode") private var gifMode = "loop"
+    @AppStorage("options.gifDownloads") private var gifDownloads = true
+    @AppStorage("options.gifLibrary") private var gifLibrary = true
     @AppStorage("options.tabStyle") private var tabStyle = "bar"
     @AppStorage("options.sortOrder") private var sortOrder = "Recently added"
     @AppStorage("options.autoCheck") private var autoCheck = true
@@ -1561,6 +1588,8 @@ struct ContentView: View {
     @State private var tabStyleOpen = false
     @State private var sortOpen = false
     @State private var confirmClearHistory = false
+    @State private var lastScrollY: CGFloat = 0
+    @State private var upwardRun: CGFloat = 0
 
     /// Space reserved under every tab for the tab bar, so content can always scroll clear of it.
     private var tabBarReserve: CGFloat { tabStyle == "bar" ? 84 : 100 }
@@ -1848,17 +1877,22 @@ struct ContentView: View {
 
     private func handleScroll(_ y: CGFloat) {
         guard tabStyle == "pill" else { return }
+        let delta = y - lastScrollY
+        lastScrollY = y
         if y > -8 {
+            // At the top the bar always opens.
             if tabCollapsed { tabCollapsed = false }
-            scrollAnchor = y
+            upwardRun = 0
             return
         }
-        if y < scrollAnchor - 22 {
-            if !tabCollapsed { tabCollapsed = true }
-            scrollAnchor = y
-        } else if y > scrollAnchor + 22 {
-            if tabCollapsed { tabCollapsed = false }
-            scrollAnchor = y
+        if delta < 0 {
+            // Scrolling down: fold once past the first part of the page, and stay folded.
+            upwardRun = 0
+            if y < -40 && !tabCollapsed { tabCollapsed = true }
+        } else if delta > 0 {
+            // Scrolling up: only open after a real upward run, so small bounces don't reopen it.
+            upwardRun += delta
+            if upwardRun > 40 && tabCollapsed { tabCollapsed = false; upwardRun = 0 }
         }
     }
 
@@ -1971,12 +2005,14 @@ struct ContentView: View {
     }
 
     private var progressCard: some View {
-        let steps = store.phases.isEmpty ? [store.status] : store.phases
+        let total = max(3, store.phases.count)
+        let filled = min(store.phases.count, total)
+        let percent = Int(Double(filled) / Double(total) * 100)
         return VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 10) {
-                Text("Downloading…").font(.system(size: 15, weight: .semibold))
+                Text("Downloading").font(.system(size: 15, weight: .semibold))
                 Spacer(minLength: 0)
-                Text("\(Int(store.progress * 100))%").font(.system(size: 14, weight: .bold).monospacedDigit())
+                Text("\(percent)%").font(.system(size: 14, weight: .bold).monospacedDigit())
                     .foregroundStyle(Color.accentColor)
                 Button { Haptics.tap(); store.cancel() } label: {
                     Image(systemName: "xmark").font(.system(size: 12, weight: .bold)).foregroundStyle(.red)
@@ -1986,19 +2022,13 @@ struct ContentView: View {
                 .accessibilityLabel("Cancel download")
             }
             HStack(spacing: 4) {
-                ForEach(Array(steps.enumerated()), id: \.offset) { index, _ in
-                    let isLast = index == steps.count - 1
+                ForEach(0..<total, id: \.self) { i in
                     Capsule()
-                        .fill(isLast ? Color.accentColor.opacity(0.55) : Color.accentColor)
+                        .fill(i < filled ? Color.accentColor : Color.accentColor.opacity(0.18))
                         .frame(height: 8)
                 }
             }
-            .animation(.easeOut(duration: 0.25), value: steps.count)
-            Text(store.status).font(.system(size: 13)).foregroundStyle(.secondary).lineLimit(1)
-            if !store.currentFile.isEmpty {
-                Text(store.currentFile).font(.system(size: 11)).foregroundStyle(.tertiary)
-                    .lineLimit(1).truncationMode(.middle)
-            }
+            .animation(.easeOut(duration: 0.25), value: filled)
         }
         .padding(14)
         .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
@@ -2044,8 +2074,13 @@ struct ContentView: View {
             Text(item.title).font(.title3.bold()).fixedSize(horizontal: false, vertical: true)
             infoRow(item)
             if !item.description.isEmpty { ExpandableDescription(text: item.description, lineLimit: 7) }
-            if showIDs { IDChip(id: item.id) }
             workshopRow(item)
+            if showIDs {
+                Text("ID: \(item.id)")
+                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+            }
         }
         .padding(14).background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
     }
@@ -2143,7 +2178,7 @@ struct ContentView: View {
             }
             Spacer(minLength: 0)
             if showingHistory {
-                IconButton(symbol: "trash", size: 36) { confirmClearHistory = true }.disabled(store.history.isEmpty)
+                IconButton(symbol: "trash", size: 36) { if confirmDelete { confirmClearHistory = true } else { store.clearHistory() } }.disabled(store.history.isEmpty)
                 IconButton(symbol: "xmark", size: 36) { showingHistory = false }
             } else {
                 IconButton(symbol: "clock.arrow.circlepath", size: 36) { showingHistory = true }
@@ -2329,13 +2364,18 @@ struct ContentView: View {
 
             Button { Haptics.tap(); popupItem = item } label: {
                 VStack(alignment: .leading, spacing: 3) {
-                    HStack(alignment: .top, spacing: 5) {
-                        StatusGlyph(status: item.status, size: 13).padding(.top, 2)
-                        Text(item.displayTitle).font(.system(size: 14, weight: .semibold)).lineLimit(2).multilineTextAlignment(.leading)
+                    Text(item.displayTitle).font(.system(size: 14, weight: .semibold)).lineLimit(2).multilineTextAlignment(.leading)
+                    HStack(spacing: 6) {
+                        RatingLine(rating: item.rating, count: item.ratingCount, size: 12)
+                        if showIDs {
+                            Text(item.id).font(.system(size: 10, weight: .medium, design: .monospaced))
+                                .foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.6)
+                        }
                     }
-                    RatingLine(rating: item.rating, count: item.ratingCount, size: 12)
-                    Text(line.0).font(.system(size: 11, weight: .medium)).foregroundStyle(line.1)
-                    if showIDs { IDChip(id: item.id, small: true) }
+                    HStack(spacing: 4) {
+                        StatusGlyph(status: item.status, size: 11)
+                        Text(line.0).font(.system(size: 11, weight: .medium)).foregroundStyle(line.1)
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
@@ -2363,13 +2403,18 @@ struct ContentView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                     VStack(alignment: .leading, spacing: 4) {
                         Text(item.displayTitle).font(.system(size: 15, weight: .semibold)).lineLimit(2).multilineTextAlignment(.leading)
-                        RatingLine(rating: item.rating, count: item.ratingCount, size: 13)
+                        HStack(spacing: 6) {
+                            RatingLine(rating: item.rating, count: item.ratingCount, size: 13)
+                            if showIDs {
+                                Text(item.id).font(.system(size: 11, weight: .medium, design: .monospaced))
+                                    .foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.6)
+                            }
+                        }
                         if let game = item.gameName { Text(game).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1) }
                         HStack(spacing: 5) {
                             StatusGlyph(status: item.status, size: 12)
                             Text(line.0).font(.system(size: 12, weight: .medium)).foregroundStyle(line.1)
                         }
-                        if showIDs { IDChip(id: item.id, small: true) }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -2497,15 +2542,9 @@ struct ContentView: View {
                             } label: { menuChip(tabStyle == "bar" ? "Classic" : (tabStyle == "pill" ? "Pill" : "Pill full")) }
                         }
                         divider
-                        row("Workshop GIFs", symbol: "sparkles") {
-                            Menu {
-                                ForEach([("loop", "On (loops forever)"), ("repeat5", "Repeat 5 times"), ("off", "Off (still image)")], id: \.0) { mode in
-                                    Button { Haptics.select(); gifMode = mode.0 } label: {
-                                        if gifMode == mode.0 { Label(mode.1, systemImage: "checkmark") } else { Text(mode.1) }
-                                    }
-                                }
-                            } label: { menuChip(gifMode == "loop" ? "On" : (gifMode == "repeat5" ? "Repeat 5×" : "Off")) }
-                        }
+                        toggleRow("Workshop GIFs in Downloads", symbol: "sparkles", isOn: $gifDownloads)
+                        divider
+                        toggleRow("Workshop GIFs in Library and History", symbol: "sparkles", isOn: $gifLibrary)
                         divider
                         toggleRow("Compact library grid", symbol: "square.grid.2x2", isOn: $compactLibrary)
                         divider
@@ -2982,7 +3021,7 @@ struct MediaCarousel: View {
                     Group {
                         switch item {
                         case .image(let url):
-                            CachedImage(urlString: url, fill: false, maxPixel: 1000)
+                            CachedImage(urlString: url, fill: false, maxPixel: 1000, isDownloadPreview: true)
                                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                         case .video(let id):
                             YouTubeView(videoID: id)
