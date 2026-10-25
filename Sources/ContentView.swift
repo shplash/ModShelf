@@ -1565,6 +1565,7 @@ struct ContentView: View {
     @AppStorage("options.showIDs") private var showIDs = false
     @AppStorage("options.compactLibrary") private var compactLibrary = true
     @AppStorage("options.haptics") private var haptics = true
+    @AppStorage("browser.autoDownload") private var autoDownload = false
     @AppStorage("options.gifDownloads") private var gifDownloads = true
     @AppStorage("options.gifLibrary") private var gifLibrary = true
     @AppStorage("options.tabStyle") private var tabStyle = "bar"
@@ -1705,8 +1706,7 @@ struct ContentView: View {
     }
 
     private var browserTab: some View {
-        WorkshopBrowserView(library: store.library,
-                            onValidItem: { url in
+        WorkshopBrowserView(onValidItem: { url in
                                 store.browserURL = nil
                                 store.input = url.absoluteString
                                 inputWasSubmitted = false
@@ -1714,15 +1714,21 @@ struct ContentView: View {
                                 store.fetchPreview()
                             },
                             onOpenInApp: { id in
-                                store.input = id
                                 inputWasSubmitted = false
                                 selectedTab = 0
-                                store.fetchPreview()
+                                if autoDownload {
+                                    store.download(id)
+                                } else {
+                                    store.input = id
+                                    store.fetchPreview()
+                                }
                             },
                             requestedURL: $store.browserURL,
                             cleanPages: cleanBrowser,
                             zoom: browserZoom,
+                            bottomInset: tabBarReserve,
                             onScroll: { y in handleScroll(y) })
+            .ignoresSafeArea(edges: tabStyle == "bar" ? [] : .bottom)
     }
 
     @ViewBuilder private var overlays: some View {
@@ -2633,6 +2639,8 @@ struct ContentView: View {
                     settingsGroup("Browser") {
                         toggleRow("Workshop only (hide news, RSS and comments)", symbol: "newspaper", isOn: $cleanBrowser)
                         divider
+                        toggleRow("Auto download from browser", symbol: "arrow.down.circle", isOn: $autoDownload)
+                        divider
                         VStack(alignment: .leading, spacing: 8) {
                             HStack {
                                 Label("Text size", systemImage: "textformat.size").font(.system(size: 16))
@@ -3235,23 +3243,29 @@ enum GameSearch {
     }
 }
 
+enum GameListStore {
+    static func decode(_ text: String) -> [GameHit] {
+        (try? JSONDecoder().decode([GameHit].self, from: Data(text.utf8))) ?? []
+    }
+    static func encode(_ list: [GameHit]) -> String {
+        guard let data = try? JSONEncoder().encode(list), let text = String(data: data, encoding: .utf8) else { return "[]" }
+        return text
+    }
+}
+
 struct BrowserHome: View {
-    let library: [WorkshopItem]
     let lastPage: URL?
-    let signedIn: Bool
     let onOpenURL: (URL) -> Void
-    let onOpenMod: (WorkshopItem) -> Void
     let onScroll: (CGFloat) -> Void
 
     @State private var query = ""
     @State private var results: [GameHit] = []
     @State private var searching = false
     @AppStorage("browser.recentGames") private var recentJSON = "[]"
+    @AppStorage("browser.favGames") private var favJSON = "[]"
 
-    private var recent: [GameHit] {
-        (try? JSONDecoder().decode([GameHit].self, from: Data(recentJSON.utf8))) ?? []
-    }
-    private var favourites: [WorkshopItem] { library.filter { $0.isFavourite } }
+    private var recent: [GameHit] { GameListStore.decode(recentJSON) }
+    private var favourites: [GameHit] { GameListStore.decode(favJSON) }
 
     var body: some View {
         ScrollView {
@@ -3265,12 +3279,14 @@ struct BrowserHome: View {
                     resultsSection
                 } else {
                     if let lastPage { continueCard(lastPage) }
-                    signInCard
+                    if !favourites.isEmpty {
+                        sectionTitle("Favourites")
+                        favouritesGrid
+                    }
                     if !recent.isEmpty {
-                        sectionTitle("Recent games")
+                        sectionTitle("Recently opened")
                         ForEach(recent) { hit in gameRow(hit) }
                     }
-                    if !favourites.isEmpty { favouritesSection }
                     if recent.isEmpty && favourites.isEmpty {
                         Text("Search a game above to browse its Workshop.")
                             .font(.subheadline).foregroundStyle(.secondary).padding(.top, 4)
@@ -3325,6 +3341,27 @@ struct BrowserHome: View {
         }
     }
 
+    private var favouritesGrid: some View {
+        LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
+            ForEach(Array(favourites.prefix(4))) { hit in
+                Button { openGame(hit) } label: {
+                    VStack(alignment: .leading, spacing: 8) {
+                        CachedImage(urlString: hit.tiny_image, fill: true, maxPixel: 400)
+                            .frame(height: 86)
+                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        Text(hit.name)
+                            .font(.system(size: 13, weight: .semibold)).lineLimit(2)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .padding(8)
+                    .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+                }
+                .buttonStyle(.plain)
+                .contextMenu { favouriteButton(hit) }
+            }
+        }
+    }
+
     private func gameRow(_ hit: GameHit) -> some View {
         Button { openGame(hit) } label: {
             HStack(spacing: 12) {
@@ -3340,13 +3377,25 @@ struct BrowserHome: View {
             .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
         }
         .buttonStyle(.plain)
+        .contextMenu { favouriteButton(hit) }
+    }
+
+    private func favouriteButton(_ hit: GameHit) -> some View {
+        let isFavourite = favourites.contains(hit)
+        return Button {
+            Haptics.tap()
+            var list = favourites
+            if let index = list.firstIndex(of: hit) { list.remove(at: index) } else { list.insert(hit, at: 0) }
+            favJSON = GameListStore.encode(list)
+        } label: {
+            Label(isFavourite ? "Remove favourite" : "Favourite", systemImage: isFavourite ? "star.slash" : "star")
+        }
     }
 
     private func openGame(_ hit: GameHit) {
         var list = recent.filter { $0.id != hit.id }
         list.insert(hit, at: 0)
-        if let data = try? JSONEncoder().encode(Array(list.prefix(8))),
-           let text = String(data: data, encoding: .utf8) { recentJSON = text }
+        recentJSON = GameListStore.encode(Array(list.prefix(8)))
         query = ""
         Haptics.tap()
         onOpenURL(URL(string: "https://steamcommunity.com/app/\(hit.id)/workshop/")!)
@@ -3377,67 +3426,17 @@ struct BrowserHome: View {
         }
         .buttonStyle(.plain)
     }
-
-    private var signInCard: some View {
-        HStack(spacing: 12) {
-            Image(systemName: signedIn ? "checkmark.shield.fill" : "person.crop.circle.badge.key")
-                .font(.system(size: 24))
-                .foregroundStyle(signedIn ? Color.accentColor : Color.secondary)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(signedIn ? "Signed in to Steam" : "Sign in to Steam")
-                    .font(.system(size: 15, weight: .semibold))
-                Text(signedIn ? "Your browser session is saved on this iPhone." : "Lets Steam pages in the browser know it's you.")
-                    .font(.system(size: 12)).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 0)
-            if !signedIn {
-                Button { Haptics.tap(); onOpenURL(URL(string: "https://steamcommunity.com/login/home/")!) } label: {
-                    Text("Sign in")
-                        .font(.system(size: 14, weight: .semibold)).foregroundStyle(.white)
-                        .padding(.horizontal, 14).frame(height: 34)
-                        .background(Capsule().fill(Color.accentColor))
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(14)
-        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
-    }
-
-    private var favouritesSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            sectionTitle("Favourite mods")
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 12) {
-                    ForEach(favourites) { item in
-                        Button { Haptics.tap(); onOpenMod(item) } label: {
-                            VStack(alignment: .leading, spacing: 6) {
-                                CachedImage(urlString: item.imageURL, fill: true, maxPixel: 240)
-                                    .frame(width: 118, height: 118)
-                                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                                Text(item.displayTitle)
-                                    .font(.system(size: 13, weight: .semibold)).lineLimit(2)
-                                    .frame(width: 118, alignment: .leading)
-                            }
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-            }
-        }
-    }
 }
 
 // MARK: - Workshop browser
 
 struct WorkshopBrowserView: View {
-    let library: [WorkshopItem]
     let onValidItem: (URL) -> Void
     let onOpenInApp: (String) -> Void
     @Binding var requestedURL: URL?
     let cleanPages: Bool
     let zoom: Double
+    let bottomInset: CGFloat
     let onScroll: (CGFloat) -> Void
 
     @State private var webView: WKWebView?
@@ -3447,7 +3446,6 @@ struct WorkshopBrowserView: View {
     @State private var isLoading = false
     @State private var showUse = false
     @State private var showHome = true
-    @State private var signedIn = CookieVault.hasSteamLogin()
 
     static let home = URL(string: "https://steamcommunity.com/workshop/")!
     static let lastPageKey = "browser.lastURL"
@@ -3458,30 +3456,25 @@ struct WorkshopBrowserView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if !showHome { navBar }
+            if !showHome { topBar }
             ZStack {
                 WorkshopWebContainer(webView: $webView, currentURL: $currentURL, canGoBack: $canGoBack,
                                      canGoForward: $canGoForward, isLoading: $isLoading, showUse: $showUse,
                                      requestedURL: $requestedURL, cleanPages: cleanPages, zoom: zoom,
-                                     onScroll: onScroll, onOpenInApp: onOpenInApp)
+                                     bottomInset: bottomInset, onScroll: onScroll, onOpenInApp: onOpenInApp)
                     .opacity(showHome ? 0 : 1)
                     .allowsHitTesting(!showHome)
                 if showHome {
-                    BrowserHome(library: library,
-                                lastPage: savedLastPage,
-                                signedIn: signedIn,
+                    BrowserHome(lastPage: savedLastPage,
                                 onOpenURL: { open($0) },
-                                onOpenMod: { open(Self.modURL($0.id)) },
                                 onScroll: onScroll)
                 }
             }
         }
         .background(Color(uiColor: .systemBackground))
+        .overlay(alignment: .bottomLeading) { bottomControls }
         .onChange(of: requestedURL) { url in
             if url != nil { showHome = false }
-        }
-        .onChange(of: currentURL) { _ in
-            signedIn = CookieVault.hasSteamLogin()
         }
     }
 
@@ -3490,8 +3483,19 @@ struct WorkshopBrowserView: View {
         requestedURL = url
     }
 
-    static func modURL(_ id: String) -> URL {
-        URL(string: "https://steamcommunity.com/sharedfiles/filedetails/?id=\(id)")!
+    /// Home, Back and Forward sit at the bottom left, just above the tab bar.
+    private var bottomControls: some View {
+        HStack(spacing: 6) {
+            controlButton("house.fill", "Browse home", enabled: true) { showHome = true }
+            controlButton("chevron.left", "Back", enabled: canGoBack && !showHome) { webView?.goBack() }
+            controlButton("chevron.right", "Forward", enabled: canGoForward && !showHome) { webView?.goForward() }
+        }
+        .padding(6)
+        .background(Capsule().fill(Color(uiColor: .secondarySystemGroupedBackground)))
+        .overlay(Capsule().stroke(Color.primary.opacity(0.08), lineWidth: 1))
+        .shadow(color: .black.opacity(0.28), radius: 10, y: 3)
+        .padding(.leading, 12)
+        .padding(.bottom, bottomInset + 8)
     }
 
     private var addressText: String {
@@ -3499,12 +3503,9 @@ struct WorkshopBrowserView: View {
         return (u.host ?? "") + u.path
     }
 
-    private var navBar: some View {
+    private var topBar: some View {
         HStack(spacing: 8) {
-            navButton("chevron.left", "Back", enabled: canGoBack) { webView?.goBack() }
-            navButton("chevron.right", "Forward", enabled: canGoForward) { webView?.goForward() }
-            navButton("arrow.clockwise", "Reload", enabled: true) { webView?.reload() }
-            navButton("house.fill", "Browse home", enabled: true) { showHome = true }
+            controlButton("arrow.clockwise", "Reload", enabled: true) { webView?.reload() }
             Text(addressText)
                 .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -3524,12 +3525,12 @@ struct WorkshopBrowserView: View {
         .background(Color(uiColor: .systemGroupedBackground))
     }
 
-    private func navButton(_ symbol: String, _ label: String, enabled: Bool, action: @escaping () -> Void) -> some View {
+    private func controlButton(_ symbol: String, _ label: String, enabled: Bool, action: @escaping () -> Void) -> some View {
         Button { Haptics.tap(); action() } label: {
             Image(systemName: symbol).font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(enabled ? Color.accentColor : Color.secondary.opacity(0.4))
-                .frame(width: 34, height: 34)
-                .background(RoundedRectangle(cornerRadius: 10).fill(Color.accentColor.opacity(enabled ? 0.12 : 0.05)))
+                .frame(width: 36, height: 36)
+                .background(Circle().fill(Color.accentColor.opacity(enabled ? 0.14 : 0.06)))
         }
         .buttonStyle(.plain)
         .disabled(!enabled)
@@ -3547,6 +3548,7 @@ struct WorkshopWebContainer: UIViewRepresentable {
     @Binding var requestedURL: URL?
     let cleanPages: Bool
     let zoom: Double
+    let bottomInset: CGFloat
     let onScroll: (CGFloat) -> Void
     let onOpenInApp: (String) -> Void
 
@@ -3567,6 +3569,7 @@ struct WorkshopWebContainer: UIViewRepresentable {
         view.backgroundColor = UIColor.systemBackground
         view.scrollView.backgroundColor = UIColor.systemBackground
         view.scrollView.contentInsetAdjustmentBehavior = .never
+        view.scrollView.contentInset.bottom = bottomInset
         view.pageZoom = zoom
         context.coordinator.observe(view)
         webView = view
@@ -3582,6 +3585,7 @@ struct WorkshopWebContainer: UIViewRepresentable {
     func updateUIView(_ view: WKWebView, context: Context) {
         context.coordinator.parent = self
         if abs(view.pageZoom - zoom) > 0.001 { view.pageZoom = zoom }
+        if abs(view.scrollView.contentInset.bottom - bottomInset) > 0.5 { view.scrollView.contentInset.bottom = bottomInset }
         if let url = requestedURL {
             view.load(URLRequest(url: url))
             DispatchQueue.main.async { self.requestedURL = nil }
@@ -3596,30 +3600,37 @@ struct WorkshopWebContainer: UIViewRepresentable {
         UserDefaults.standard.string(forKey: WorkshopBrowserView.lastPageKey).flatMap { URL(string: $0) }
     }
 
-    /// Hides the Steam header, store link, news, RSS and About box so the page is just search and mods.
-    /// Hiding works by matching visible text, so it doesn't depend on Steam's class names.
+    /// Hides Steam's header, store link, the game tab row, news, RSS and the About box.
+    /// Most of this works by matching visible text, so it doesn't depend on Steam's class names.
     static let hideScript = """
     (function(){
       var markers = ['LATEST WORKSHOP NEWS','Subscribe to RSS feed','ABOUT - THE WORKSHOP','Workshop Home About Workshop','Read the full post on our Steam Blog',"Here's a quick look"];
-      var css = '#global_header,.global_header,#footer,.footer,.supernav_container,.store_header,#store_nav_area,.responsive_header,#workshop_header,.workshop_header,.workshopBanner,.workshop_banner{display:none!important}' +
+      var css = '#global_header,.global_header,[id*="global_header"],[class*="global_header"],header,#footer,.footer,.supernav_container,.store_header,#store_nav_area,.responsive_header,#workshop_header,.workshop_header,.workshopBanner,.workshop_banner{display:none!important}' +
                 ' body{padding-top:0!important;margin-top:0!important;margin-left:0!important;margin-right:0!important;background:#1b2838!important}' +
                 ' html,body{width:100%!important;min-width:0!important;max-width:100%!important}' +
                 ' .responsive_page_content{padding-top:0!important;max-width:100%!important}';
       if(!document.getElementById('ms-clean')){var s=document.createElement('style');s.id='ms-clean';s.innerHTML=css;document.head.appendChild(s);}
       function hide(){
-        var all=document.querySelectorAll('div,section,table,td,p,h1,h2,h3,h4,span,a');
+        var all=document.querySelectorAll('div,section,table,td,p,h1,h2,h3,h4,span,a,nav,ul');
         for(var i=0;i<all.length;i++){
           var el=all[i];
           if(el.dataset.msHidden) continue;
           var t=(el.innerText||'').trim();
           if(!t || t.length>6000) continue;
           var hit=markers.some(function(m){return t.indexOf(m)===0 || (t.indexOf(m)>=0 && t.length<600);});
+          // Steam's store link.
+          if(t==='Store Page') hit=true;
+          // Steam's row of game tabs (All, Discussions, Screenshots, Artwork, ...).
+          if(t.length<400 && t.indexOf('Screenshots')>=0 && t.indexOf('Artwork')>=0 && t.indexOf('Discussions')>=0) hit=true;
           if(hit && !el.querySelector('input[type=text],input[type=search]')){
             var box=el; var up=el.parentElement;
             if(up && (up.innerText||'').trim().length<=t.length+40 && !up.querySelector('input[type=text],input[type=search]')) box=up;
             box.style.setProperty('display','none','important'); box.dataset.msHidden='1';
           }
         }
+        // Steam's green Subscribe button is replaced by the ModShelf button.
+        var sub=document.getElementById('SubscribeItemBtn');
+        if(sub){ var holder=sub.closest('a,button')||sub; holder.style.setProperty('display','none','important'); }
       }
       hide(); setTimeout(hide,600); setTimeout(hide,1800);
     })();
@@ -3630,7 +3641,7 @@ struct WorkshopWebContainer: UIViewRepresentable {
       document.querySelectorAll('[data-ms-hidden]').forEach(function(e){e.style.removeProperty('display');e.removeAttribute('data-ms-hidden');});})();
     """
 
-    /// Adds an "Open in ModShelf" button beside Steam's Subscribe button on a mod's page.
+    /// Adds a blue "+ Download in / ModShelf" button where Steam's green Subscribe button was.
     static let openButtonScript = """
     (function(){
       function addOpenButton(){
@@ -3644,13 +3655,15 @@ struct WorkshopWebContainer: UIViewRepresentable {
           sub = els.find(function(e){ return /^\\s*subscribe\\s*$/i.test(e.textContent || ''); });
         }
         if (!sub) return;
+        var target = sub.closest('a,button') || sub;
+        target.style.setProperty('display','none','important');
         var b = document.createElement('a');
         b.id = 'ms-open';
-        b.textContent = 'Open in ModShelf';
         b.href = '#';
-        b.style.cssText = 'display:inline-block;margin-left:8px;padding:7px 14px;background:#0A84FF;color:#fff;border-radius:6px;font:600 13px -apple-system,sans-serif;text-decoration:none;vertical-align:middle';
+        b.innerHTML = '<span style="font-size:24px;font-weight:300;line-height:1;margin-right:12px">+</span><span style="line-height:1.15">Download in<br>ModShelf</span>';
+        b.style.cssText = 'display:flex;align-items:center;justify-content:flex-start;box-sizing:border-box;width:100%;padding:12px 16px;margin-top:6px;background:#0A84FF;color:#fff;border-radius:4px;font:600 15px -apple-system,sans-serif;text-decoration:none;cursor:pointer';
         b.addEventListener('click', function(e){ e.preventDefault(); window.webkit.messageHandlers.modshelf.postMessage(id); });
-        sub.insertAdjacentElement('afterend', b);
+        target.insertAdjacentElement('afterend', b);
       }
       addOpenButton(); setTimeout(addOpenButton, 800); setTimeout(addOpenButton, 2000);
       new MutationObserver(addOpenButton).observe(document.body, {childList: true, subtree: true});
