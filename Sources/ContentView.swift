@@ -289,6 +289,10 @@ struct AnimatedUIImageView: UIViewRepresentable {
         let view = UIImageView()
         view.contentMode = fill ? .scaleAspectFill : .scaleAspectFit
         view.clipsToBounds = true
+        view.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        view.setContentHuggingPriority(.defaultLow, for: .vertical)
+        view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        view.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
         view.animationRepeatCount = loops
         view.image = image
         view.startAnimating()
@@ -577,6 +581,7 @@ final class WorkshopStore: ObservableObject {
     @Published var libraryStorageBytes: Int64 = 0
     @Published var folderLabel = ""
     @Published var activeTitle = ""
+    @Published var phases: [String] = []
 
 
     private let engine = SteamengineNewEngine()!
@@ -874,6 +879,7 @@ final class WorkshopStore: ObservableObject {
         progress = 0
         currentFile = ""
         status = "Starting download…"
+        phases = []
         lastOutcome = ""
         record(id, title: meta.title, result: "Downloading", imageURL: meta.imageURL.isEmpty ? nil : meta.imageURL, game: meta.gameName)
         startPolling()
@@ -904,6 +910,8 @@ final class WorkshopStore: ObservableObject {
 
     func refreshState() {
         let nextStatus = engine.status()
+        // Each new step Steam reports becomes its own segment of the progress bar.
+        if isDownloading, !nextStatus.isEmpty, phases.last != nextStatus { phases.append(nextStatus) }
         let nextProgress = min(1, max(0, engine.progress()))
         let nextFile = engine.currentFile()
         let waitingForCode = nextStatus == "Steam Guard code required"
@@ -1307,6 +1315,46 @@ struct ScrollOffsetKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }
+/// Reads the scroll position from the UIScrollView that contains it, so folding works in every tab.
+struct ScrollSpy: UIViewRepresentable {
+    let onChange: (CGFloat) -> Void
+
+    func makeUIView(context: Context) -> SpyView {
+        let view = SpyView()
+        view.onChange = onChange
+        return view
+    }
+    func updateUIView(_ view: SpyView, context: Context) { view.onChange = onChange }
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: SpyView, context: Context) -> CGSize? {
+        CGSize(width: proposal.width ?? 0, height: 0)
+    }
+
+    final class SpyView: UIView {
+        var onChange: ((CGFloat) -> Void)?
+        private var observation: NSKeyValueObservation?
+        private weak var scroll: UIScrollView?
+
+        override func didMoveToWindow() { super.didMoveToWindow(); attach() }
+        override func layoutSubviews() { super.layoutSubviews(); attach() }
+
+        private func attach() {
+            guard scroll == nil else { return }
+            var view: UIView? = superview
+            while let v = view {
+                if let s = v as? UIScrollView {
+                    scroll = s
+                    // Scrolling down gives negative values, the same convention the browser uses.
+                    observation = s.observe(\.contentOffset, options: [.initial, .new]) { [weak self] sv, _ in
+                        self?.onChange?(-(sv.contentOffset.y + sv.adjustedContentInset.top))
+                    }
+                    return
+                }
+                view = v.superview
+            }
+        }
+    }
+}
+
 struct ScrollOffsetReader: View {
     var body: some View {
         GeometryReader { g in
@@ -1512,6 +1560,7 @@ struct ContentView: View {
     @State private var themeOpen = false
     @State private var tabStyleOpen = false
     @State private var sortOpen = false
+    @State private var confirmClearHistory = false
 
     /// Space reserved under every tab for the tab bar, so content can always scroll clear of it.
     private var tabBarReserve: CGFloat { tabStyle == "bar" ? 84 : 100 }
@@ -1576,6 +1625,12 @@ struct ContentView: View {
             guard !message.isEmpty else { return }
             DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
                 if store.errorMessage == message { withAnimation { store.errorMessage = "" } }
+            }
+        }
+        .onChange(of: store.operationMessage) { message in
+            guard !message.isEmpty else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+                if store.operationMessage == message { withAnimation { store.operationMessage = "" } }
             }
         }
         .onChange(of: store.library.count) { _ in
@@ -1657,6 +1712,16 @@ struct ContentView: View {
                                close: { contextHistory = nil })
                 .padding(28).transition(.scale(scale: 0.96).combined(with: .opacity)).zIndex(9)
         }
+        if confirmClearHistory {
+            Color.black.opacity(0.38).ignoresSafeArea().contentShape(Rectangle())
+                .onTapGesture { confirmClearHistory = false }.zIndex(12)
+            ConfirmPopup(heading: "Clear download history?",
+                         message: "This removes the list of attempts. Your downloaded mods are not affected.",
+                         actionTitle: "Clear",
+                         confirm: { store.clearHistory(); confirmClearHistory = false },
+                         cancel: { confirmClearHistory = false })
+                .padding(30).zIndex(13)
+        }
         if store.showDeleteConfirmation, let item = store.pendingDelete {
             Color.black.opacity(0.38).ignoresSafeArea().contentShape(Rectangle())
                 .onTapGesture { store.showDeleteConfirmation = false }.zIndex(10)
@@ -1716,27 +1781,50 @@ struct ContentView: View {
     }
 
     @ViewBuilder private var errorBanner: some View {
-        if !store.errorMessage.isEmpty {
+        if !store.errorMessage.isEmpty || !store.operationMessage.isEmpty {
+            let isError = !store.errorMessage.isEmpty
+            let text = isError ? friendlyError(store.errorMessage) : store.operationMessage
             HStack(alignment: .top, spacing: 10) {
-                Image(systemName: "xmark.octagon.fill").font(.system(size: 20)).foregroundStyle(.white)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Something went wrong").font(.system(size: 14, weight: .bold)).foregroundStyle(.white)
-                    Text(store.errorMessage).font(.system(size: 13)).foregroundStyle(.white.opacity(0.95))
+                Image(systemName: isError ? "exclamationmark.triangle.fill" : "info.circle.fill")
+                    .font(.system(size: 18)).foregroundStyle(.white)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(isError ? "Couldn't finish that" : "Update").font(.system(size: 14, weight: .bold)).foregroundStyle(.white)
+                    Text(text).font(.system(size: 13)).foregroundStyle(.white.opacity(0.95))
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 0)
-                Button { store.errorMessage = "" } label: {
+                Button {
+                    if isError { store.errorMessage = "" } else { store.operationMessage = "" }
+                } label: {
                     Image(systemName: "xmark").font(.system(size: 12, weight: .bold)).foregroundStyle(.white.opacity(0.9))
                         .frame(width: 28, height: 28)
                 }
-                .accessibilityLabel("Dismiss error")
+                .accessibilityLabel("Dismiss")
             }
             .padding(12)
-            .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.red))
-            .shadow(color: .red.opacity(0.35), radius: 10, y: 4)
+            .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(isError ? Color.red : Color.accentColor))
+            .shadow(color: (isError ? Color.red : Color.accentColor).opacity(0.35), radius: 10, y: 4)
             .padding(.horizontal, 14).padding(.top, 8).padding(.bottom, 4)
             .transition(.move(edge: .top).combined(with: .opacity))
         }
+    }
+
+    /// Turns raw engine text into something a person can act on.
+    private func friendlyError(_ raw: String) -> String {
+        let r = raw.lowercased()
+        if r.contains("steam guard") || r.contains("guard code") {
+            return "Steam wants a confirmation code. Enter the code from your Steam app and tap Submit code."
+        }
+        if r.contains("not entered in time") { return "The code wasn't entered in time. Tap Sign in to try again." }
+        if r.contains("password") && (r.contains("invalid") || r.contains("incorrect") || r.contains("wrong")) {
+            return "Steam didn't accept that username or password. Check them and try again."
+        }
+        if r.contains("rate limit") || r.contains("too many") { return "Steam is limiting requests right now. Wait a minute and try again." }
+        if r.contains("timeout") || r.contains("timed out") || r.contains("network") || r.contains("offline") {
+            return "No connection to Steam. Check your internet and try again."
+        }
+        if r.contains("cancel") { return "The download was cancelled." }
+        return raw
     }
 
     @ViewBuilder private var downloadBanner: some View {
@@ -1788,7 +1876,7 @@ struct ContentView: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 0) {
-                    ScrollOffsetReader()
+                    ScrollSpy(onChange: handleScroll)
                     VStack(alignment: .leading, spacing: 14) {
                         lookupCard
                         if store.isFetching {
@@ -1798,13 +1886,11 @@ struct ContentView: View {
                         if store.isDownloading { progressCard }
                         else if let item = store.preview { downloadButton(item) }
                         if store.preview == nil && !store.isDownloading { browseRow }
-                        if !store.operationMessage.isEmpty { operationBanner }
                     }
                     .padding(.horizontal, 15).padding(.top, 10).padding(.bottom, tabBarReserve)
                 }
             }
             .coordinateSpace(name: "scroll")
-            .onPreferenceChange(ScrollOffsetKey.self) { handleScroll($0) }
             .scrollDismissesKeyboard(.interactively)
             .background(Color(uiColor: .systemGroupedBackground))
             .toolbar(.hidden, for: .navigationBar)
@@ -1885,33 +1971,34 @@ struct ContentView: View {
     }
 
     private var progressCard: some View {
-        HStack(spacing: 14) {
-            ZStack {
-                Circle().stroke(Color.accentColor.opacity(0.18), lineWidth: 6)
-                Circle().trim(from: 0, to: max(0.02, store.progress))
-                    .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 6, lineCap: .round))
-                    .rotationEffect(.degrees(-90))
-                    .animation(.easeOut(duration: 0.25), value: store.progress)
-                Text("\(Int(store.progress * 100))%").font(.system(size: 13, weight: .bold).monospacedDigit())
+        let steps = store.phases.isEmpty ? [store.status] : store.phases
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                Text("Downloading…").font(.system(size: 15, weight: .semibold))
+                Spacer(minLength: 0)
+                Text("\(Int(store.progress * 100))%").font(.system(size: 14, weight: .bold).monospacedDigit())
+                    .foregroundStyle(Color.accentColor)
+                Button { Haptics.tap(); store.cancel() } label: {
+                    Image(systemName: "xmark").font(.system(size: 12, weight: .bold)).foregroundStyle(.red)
+                        .frame(width: 30, height: 30).background(Circle().fill(Color.red.opacity(0.12)))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Cancel download")
             }
-            .frame(width: 62, height: 62)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(store.activeTitle.isEmpty ? "Downloading" : store.activeTitle)
-                    .font(.system(size: 15, weight: .semibold)).lineLimit(1)
-                Text(store.status).font(.system(size: 13)).foregroundStyle(.secondary).lineLimit(1)
-                if !store.currentFile.isEmpty {
-                    Text(store.currentFile).font(.system(size: 11)).foregroundStyle(.tertiary)
-                        .lineLimit(1).truncationMode(.middle)
+            HStack(spacing: 4) {
+                ForEach(Array(steps.enumerated()), id: \.offset) { index, _ in
+                    let isLast = index == steps.count - 1
+                    Capsule()
+                        .fill(isLast ? Color.accentColor.opacity(0.55) : Color.accentColor)
+                        .frame(height: 8)
                 }
             }
-            Spacer(minLength: 0)
-            Button { Haptics.tap(); store.cancel() } label: {
-                Image(systemName: "xmark").font(.system(size: 13, weight: .bold)).foregroundStyle(.red)
-                    .frame(width: 34, height: 34)
-                    .background(Circle().fill(Color.red.opacity(0.12)))
+            .animation(.easeOut(duration: 0.25), value: steps.count)
+            Text(store.status).font(.system(size: 13)).foregroundStyle(.secondary).lineLimit(1)
+            if !store.currentFile.isEmpty {
+                Text(store.currentFile).font(.system(size: 11)).foregroundStyle(.tertiary)
+                    .lineLimit(1).truncationMode(.middle)
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Cancel download")
         }
         .padding(14)
         .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
@@ -2023,7 +2110,6 @@ struct ContentView: View {
         NavigationStack {
             VStack(spacing: 0) {
                 libraryHeader
-                if !store.operationMessage.isEmpty { operationBanner.padding(.horizontal, 14).padding(.bottom, 8) }
                 if showingHistory { historyContent } else { libraryBody }
             }
             .background(Color(uiColor: .systemGroupedBackground))
@@ -2057,7 +2143,7 @@ struct ContentView: View {
             }
             Spacer(minLength: 0)
             if showingHistory {
-                IconButton(symbol: "trash", size: 36) { store.clearHistory() }.disabled(store.history.isEmpty)
+                IconButton(symbol: "trash", size: 36) { confirmClearHistory = true }.disabled(store.history.isEmpty)
                 IconButton(symbol: "xmark", size: 36) { showingHistory = false }
             } else {
                 IconButton(symbol: "clock.arrow.circlepath", size: 36) { showingHistory = true }
@@ -2171,7 +2257,7 @@ struct ContentView: View {
     private func gridContent(_ items: [WorkshopItem]) -> some View {
         ScrollView {
             VStack(spacing: 0) {
-                ScrollOffsetReader()
+                ScrollSpy(onChange: handleScroll)
                 LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 16) {
                     ForEach(items) { item in gridCard(item) }
                 }
@@ -2179,14 +2265,13 @@ struct ContentView: View {
             }
         }
         .coordinateSpace(name: "scroll")
-        .onPreferenceChange(ScrollOffsetKey.self) { handleScroll($0) }
         .scrollDismissesKeyboard(.interactively)
     }
 
     private func listContent(_ items: [WorkshopItem]) -> some View {
         ScrollView {
             VStack(spacing: 0) {
-                ScrollOffsetReader()
+                ScrollSpy(onChange: handleScroll)
                 LazyVStack(spacing: 0) {
                     ForEach(items) { item in
                         listRow(item)
@@ -2197,7 +2282,6 @@ struct ContentView: View {
             }
         }
         .coordinateSpace(name: "scroll")
-        .onPreferenceChange(ScrollOffsetKey.self) { handleScroll($0) }
         .scrollDismissesKeyboard(.interactively)
     }
 
@@ -2211,9 +2295,8 @@ struct ContentView: View {
     private func favouriteStar(_ item: WorkshopItem, size: CGFloat) -> some View {
         Button { store.toggleFavourite(item) } label: {
             Image(systemName: item.isFavourite ? "star.fill" : "star")
-                .font(.system(size: size, weight: .bold)).foregroundStyle(.white)
-                .shadow(color: .black.opacity(0.7), radius: 2)
-                .frame(width: size + 14, height: size + 14)
+                .font(.system(size: 13, weight: .bold)).foregroundStyle(.white)
+                .frame(width: 29, height: 29)
                 .background(Circle().fill(Color.black.opacity(0.55)))
                 .contentShape(Circle())
         }
@@ -2224,9 +2307,9 @@ struct ContentView: View {
     private func dotsButton(_ item: WorkshopItem, circle: CGFloat) -> some View {
         Button { Haptics.tap(); contextItem = item } label: {
             Image(systemName: "ellipsis").font(.system(size: 13, weight: .heavy)).foregroundStyle(.white)
-                .frame(width: circle, height: circle)
+                .frame(width: 29, height: 29)
                 .background(Circle().fill(Color.black.opacity(0.55)))
-                .padding(6).contentShape(Rectangle())
+                .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Actions for \(item.displayTitle)")
@@ -2261,6 +2344,15 @@ struct ContentView: View {
         }
     }
 
+    private func navCircle(_ symbol: String, _ action: @escaping () -> Void) -> some View {
+        Button { Haptics.tap(); action() } label: {
+            Image(systemName: symbol).font(.system(size: 14, weight: .semibold)).foregroundStyle(Color.accentColor)
+                .frame(width: 34, height: 34)
+                .background(Circle().fill(Color.accentColor.opacity(0.16)))
+        }
+        .buttonStyle(.plain)
+    }
+
     private func listRow(_ item: WorkshopItem) -> some View {
         let line = dateLine(item)
         return HStack(spacing: 12) {
@@ -2269,15 +2361,14 @@ struct ContentView: View {
                     Color.clear.frame(width: 84, height: 84)
                         .overlay(CachedImage(urlString: item.imageURL, fill: true, maxPixel: 300))
                         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        .overlay(alignment: .topLeading) { favouriteStar(item, size: 12).offset(x: -6, y: -6) }
                     VStack(alignment: .leading, spacing: 4) {
-                        HStack(alignment: .top, spacing: 5) {
-                            StatusGlyph(status: item.status, size: 14).padding(.top, 2)
-                            Text(item.displayTitle).font(.system(size: 15, weight: .semibold)).lineLimit(2).multilineTextAlignment(.leading)
-                        }
+                        Text(item.displayTitle).font(.system(size: 15, weight: .semibold)).lineLimit(2).multilineTextAlignment(.leading)
                         RatingLine(rating: item.rating, count: item.ratingCount, size: 13)
                         if let game = item.gameName { Text(game).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1) }
-                        Text(line.0).font(.system(size: 12, weight: .medium)).foregroundStyle(line.1)
+                        HStack(spacing: 5) {
+                            StatusGlyph(status: item.status, size: 12)
+                            Text(line.0).font(.system(size: 12, weight: .medium)).foregroundStyle(line.1)
+                        }
                         if showIDs { IDChip(id: item.id, small: true) }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -2285,7 +2376,10 @@ struct ContentView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            dotsButton(item, circle: 26)
+            VStack(spacing: 8) {
+                navCircle(item.isFavourite ? "star.fill" : "star") { store.toggleFavourite(item) }
+                navCircle("ellipsis") { contextItem = item }
+            }
         }
         .padding(.horizontal, 15).padding(.vertical, 10)
     }
@@ -2299,7 +2393,7 @@ struct ContentView: View {
             } else {
                 ScrollView {
                     VStack(spacing: 0) {
-                        ScrollOffsetReader()
+                        ScrollSpy(onChange: handleScroll)
                         LazyVStack(spacing: 0) {
                             ForEach(store.history) { record in
                                 historyRow(record)
@@ -2310,8 +2404,7 @@ struct ContentView: View {
                     }
                 }
                 .coordinateSpace(name: "scroll")
-                .onPreferenceChange(ScrollOffsetKey.self) { handleScroll($0) }
-            }
+                }
         }
     }
 
@@ -2382,7 +2475,7 @@ struct ContentView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
-                    ScrollOffsetReader()
+                    ScrollSpy(onChange: handleScroll)
                     Text("Options").font(.system(size: 27, weight: .bold, design: .rounded)).padding(.top, 10)
 
                     settingsGroup("Appearance") {
@@ -2398,17 +2491,11 @@ struct ContentView: View {
                         divider
                         row("Tab bar style", symbol: "rectangle.bottomhalf.filled") {
                             Menu {
-                                Button { tabStyle = "pill" } label: { Label("Pill (shrinks on scroll)", systemImage: tabStyle == "pill" ? "checkmark" : "circle") }
-                                Button { tabStyle = "pillFull" } label: { Label("Pill (always full)", systemImage: tabStyle == "pillFull" ? "checkmark" : "circle") }
-                                Button { tabStyle = "bar" } label: { Label("Classic bar", systemImage: tabStyle == "bar" ? "checkmark" : "circle") }
-                            } label: { menuChip(tabStyle == "pill" ? "Pill" : (tabStyle == "pillFull" ? "Pill full" : "Classic")) }
+                                Button { Haptics.select(); tabStyle = "bar" } label: { Label("Classic bar", systemImage: tabStyle == "bar" ? "checkmark" : "circle") }
+                                Button { Haptics.select(); tabStyle = "pill" } label: { Label("Pill (shrinks on scroll)", systemImage: tabStyle == "pill" ? "checkmark" : "circle") }
+                                Button { Haptics.select(); tabStyle = "pillFull" } label: { Label("Pill (always full)", systemImage: tabStyle == "pillFull" ? "checkmark" : "circle") }
+                            } label: { menuChip(tabStyle == "bar" ? "Classic" : (tabStyle == "pill" ? "Pill" : "Pill full")) }
                         }
-                        divider
-                        toggleRow("Compact library grid", symbol: "square.grid.2x2", isOn: $compactLibrary)
-                        divider
-                        toggleRow("Show Workshop IDs", symbol: "number", isOn: $showIDs)
-                        divider
-                        toggleRow("Haptic feedback", symbol: "iphone.radiowaves.left.and.right", isOn: $haptics)
                         divider
                         row("Workshop GIFs", symbol: "sparkles") {
                             Menu {
@@ -2420,19 +2507,25 @@ struct ContentView: View {
                             } label: { menuChip(gifMode == "loop" ? "On" : (gifMode == "repeat5" ? "Repeat 5×" : "Off")) }
                         }
                         divider
+                        toggleRow("Compact library grid", symbol: "square.grid.2x2", isOn: $compactLibrary)
+                        divider
+                        toggleRow("Show Workshop IDs", symbol: "number", isOn: $showIDs)
+                        divider
+                        toggleRow("Haptic feedback", symbol: "iphone.radiowaves.left.and.right", isOn: $haptics)
+                    }
+
+                    settingsGroup("Browser") {
+                        toggleRow("Workshop only (hide news, RSS and comments)", symbol: "newspaper", isOn: $cleanBrowser)
+                        divider
                         VStack(alignment: .leading, spacing: 8) {
                             HStack {
-                                Label("Browser text size", systemImage: "textformat.size").font(.system(size: 16))
+                                Label("Text size", systemImage: "textformat.size").font(.system(size: 16))
                                 Spacer()
                                 Text("\(Int(browserZoom * 100))%").font(.system(size: 14, weight: .semibold)).foregroundStyle(.secondary).monospacedDigit()
                             }
                             Slider(value: $browserZoom, in: 0.8...1.4, step: 0.05).tint(.accentColor)
                         }
                         .padding(.horizontal, 15).padding(.vertical, 12)
-                    }
-
-                    settingsGroup("Browser") {
-                        toggleRow("Hide news, RSS and comments", symbol: "newspaper", isOn: $cleanBrowser)
                     }
 
                     settingsGroup("Downloads") {
@@ -2479,7 +2572,7 @@ struct ContentView: View {
                     }
 
                     settingsGroup("Credits") {
-                        creditRow("ModShelf", "Created by Splash (@shplash) · Version \(modShelfVersion) beta")
+                        creditRow("ModShelf", "Created by Splash (@shplash)")
                         divider
                         creditLicenseRow("go-steam", "Engine by Alexander Birkner (@BirknerAlex)", license: "MIT License")
                         divider
@@ -2493,7 +2586,6 @@ struct ContentView: View {
                 .padding(.horizontal, 15).padding(.bottom, tabBarReserve)
             }
             .coordinateSpace(name: "scroll")
-            .onPreferenceChange(ScrollOffsetKey.self) { handleScroll($0) }
             .background(Color(uiColor: .systemGroupedBackground))
             .toolbar(.hidden, for: .navigationBar)
         }
@@ -2780,6 +2872,35 @@ struct HistoryActionPopup: View {
             }
             .padding(.horizontal, 16).frame(height: 46).contentShape(Rectangle())
         }.buttonStyle(.plain)
+    }
+}
+
+struct ConfirmPopup: View {
+    let heading: String
+    let message: String
+    let actionTitle: String
+    let confirm: () -> Void
+    let cancel: () -> Void
+    var body: some View {
+        VStack(spacing: 14) {
+            Text(heading).font(.headline).multilineTextAlignment(.center)
+            Text(message).font(.footnote).foregroundStyle(.secondary)
+                .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 10) {
+                Button(action: cancel) {
+                    Text("Cancel").font(.system(size: 16, weight: .semibold)).frame(maxWidth: .infinity).frame(height: 44)
+                        .background(RoundedRectangle(cornerRadius: 12).fill(Color(uiColor: .tertiarySystemFill)))
+                }.buttonStyle(.plain)
+                Button { Haptics.medium(); confirm() } label: {
+                    Text(actionTitle).font(.system(size: 16, weight: .semibold)).foregroundStyle(.white)
+                        .frame(maxWidth: .infinity).frame(height: 44)
+                        .background(RoundedRectangle(cornerRadius: 12).fill(Color.red))
+                }.buttonStyle(.plain)
+            }
+        }
+        .padding(20).frame(maxWidth: 320)
+        .background(RoundedRectangle(cornerRadius: 20, style: .continuous).fill(Color(uiColor: .secondarySystemGroupedBackground)))
+        .shadow(color: .black.opacity(0.3), radius: 20, y: 8)
     }
 }
 
