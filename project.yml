@@ -1,13 +1,17 @@
 name: ModShelf
+
 options:
   bundleIdPrefix: com.shplash
-  deploymentTarget:
-    iOS: "16.0"
+
+deploymentTarget:
+  iOS: "16.0"
+
 settings:
   base:
     SWIFT_VERSION: "5.0"
     IPHONEOS_DEPLOYMENT_TARGET: "16.0"
     TARGETED_DEVICE_FAMILY: "1"
+
 targets:
   WorkshopDownloader:
     type: application
@@ -23,8 +27,11 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.shplash.modshelf
         PRODUCT_NAME: ModShelf
         INFOPLIST_KEY_CFBundleDisplayName: ModShelf
+        INFOPLIST_KEY_UIFileSharingEnabled: YES
+        INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace: YES
         GENERATE_INFOPLIST_FILE: YES
         CODE_SIGNING_ALLOWED: NO
+
 packages:
   ZIPFoundation:
     url: https://github.com/weichsel/ZIPFoundation.git
