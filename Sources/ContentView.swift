@@ -3161,7 +3161,24 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 18) {
                     ScrollSpy(onChange: handleScroll)
                     Text("Options").font(.system(size: 27, weight: .bold, design: .rounded)).padding(.top, 10)
+                    appearanceSettings
+                    browserSettings
+                    downloadsSettings
+                    gameFoldersSettings
+                    steamAccountSettings
+                    creditsSettings
+                }
+                .padding(.horizontal, 15)
+                .padding(.bottom, tabBarReserve)
+            }
+            .coordinateSpace(name: "scroll")
+            .background(Color(uiColor: .systemGroupedBackground))
+            .toolbar(.hidden, for: .navigationBar)
+        }
+    }
 
+    private var appearanceSettings: AnyView {
+        AnyView(
                     settingsGroup("Appearance") {
                         row("Theme", symbol: "circle.lefthalf.filled") {
                             Menu {
@@ -3210,7 +3227,11 @@ struct ContentView: View {
                         divider
                         toggleRow("Haptic feedback", symbol: "iphone.radiowaves.left.and.right", isOn: $haptics)
                     }
+        )
+    }
 
+    private var browserSettings: AnyView {
+        AnyView(
                     settingsGroup("Browser") {
                         toggleRow("Workshop only (hide news, RSS and comments)", symbol: "newspaper", isOn: $cleanBrowser)
                         divider
@@ -3226,7 +3247,11 @@ struct ContentView: View {
                         }
                         .padding(.horizontal, 15).padding(.vertical, 12)
                     }
+        )
+    }
 
+    private var downloadsSettings: AnyView {
+        AnyView(
                     settingsGroup("Downloads") {
                         toggleRow("Confirm before deleting", symbol: "trash", isOn: $confirmDelete)
                         divider
@@ -3250,9 +3275,11 @@ struct ContentView: View {
                             rowContent("Clear temporary files", symbol: "trash.slash", detail: nil)
                         }.buttonStyle(.plain)
                     }
+        )
+    }
 
-                    gameFoldersSettings
-
+    private var steamAccountSettings: AnyView {
+        AnyView(
                     settingsGroup("Steam account") {
                         HStack(spacing: 12) {
                             Image(systemName: store.isAuthenticated ? "checkmark.shield.fill" : "exclamationmark.shield")
@@ -3271,7 +3298,11 @@ struct ContentView: View {
                             Button { Haptics.tap(); store.showLogin = true } label: { rowContent("Sign in to Steam", symbol: "person.crop.circle", detail: nil) }.buttonStyle(.plain)
                         }
                     }
+        )
+    }
 
+    private var creditsSettings: AnyView {
+        AnyView(
                     settingsGroup("Credits") {
                         creditRow("ModShelf", "Created by Splash (@shplash)")
                         divider
@@ -3283,13 +3314,7 @@ struct ContentView: View {
                         }
                         .padding(.horizontal, 15).padding(.vertical, 12)
                     }
-                }
-                .padding(.horizontal, 15).padding(.bottom, tabBarReserve)
-            }
-            .coordinateSpace(name: "scroll")
-            .background(Color(uiColor: .systemGroupedBackground))
-            .toolbar(.hidden, for: .navigationBar)
-        }
+        )
     }
 
     private func creditRow(_ title: String, _ detail: String) -> some View {
