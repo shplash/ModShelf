@@ -1562,7 +1562,7 @@ final class WorkshopStore: ObservableObject {
     func verify(_ item: WorkshopItem) {
         guard !isVerifyingAll else { return }
         let folder = item.folder
-        operationMessage = "Checking \(item.displayTitle)…"
+        operationMessage = "Validating \(item.displayTitle)…"
         Task { @MainActor in
             let scan = await Task.detached(priority: .utility) { Self.scan(folder: folder) }.value
             guard scan.exists, scan.count > 0 else {
@@ -1595,7 +1595,7 @@ final class WorkshopStore: ObservableObject {
             var mismatches: [String] = []
             var checked = 0
             for (index, entry) in entries.enumerated() {
-                operationMessage = "Checking \(index + 1) of \(entries.count)…"
+                operationMessage = "Validating \(index + 1) of \(entries.count)…"
                 let folder = entry.2
                 let scan = await Task.detached(priority: .utility) { Self.scan(folder: folder) }.value
                 guard scan.exists, scan.count > 0 else {
@@ -2020,8 +2020,10 @@ struct MarqueeText: View {
         boxWidth = width
     }
 
+    @MainActor
     private func run() async {
-        offset = 0
+        // Always begin on the first letter, with no animation carrying over.
+        withTransaction(Transaction(animation: nil)) { offset = 0 }
         guard active, overflow > 0.5 else { return }
         while !Task.isCancelled {
             // A second at rest before setting off.
@@ -2035,8 +2037,8 @@ struct MarqueeText: View {
             try? await Task.sleep(nanoseconds: UInt64((travel + 1.0) * 1_000_000_000))
             if Task.isCancelled { return }
 
-            // Slide back quickly and rest, so it reads as a name scrolling and not a carousel.
-            withAnimation(.easeOut(duration: 0.25)) { offset = 0 }
+            // Snap back to the start, then rest before the next pass.
+            withTransaction(Transaction(animation: nil)) { offset = 0 }
             try? await Task.sleep(nanoseconds: 1_250_000_000)
         }
     }
@@ -2092,7 +2094,6 @@ struct ContentView: View {
     @AppStorage("options.autoCheck") private var autoCheck = true
     @AppStorage("options.wifiOnly") private var wifiOnly = false
     @AppStorage("options.infoFile") private var infoFile = true
-    @AppStorage("options.cleanBrowser") private var cleanBrowser = true
     @State private var selectedTab = 0
     @State private var showShare = false
     @State private var popupItem: WorkshopItem?
@@ -2111,7 +2112,11 @@ struct ContentView: View {
     @State private var confirmBulkDelete = false
     @State private var pendingRelocate: RelocateRequest?
     @State private var mediaViewer: MediaViewer?
+    @State private var mediaIndex = 0
     @State private var marqueeToken = 0
+    @State private var showFolderTip = false
+    @State private var scrollToGameFolders = 0
+    @AppStorage("options.folderTipShown") private var folderTipShown = false
     @State private var selectedGame: String? = nil
     @State private var selectedTag: String? = nil
     @State private var favouritesOnly = false
@@ -2305,7 +2310,7 @@ struct ContentView: View {
                 if store.operationMessage == message { withAnimation { store.operationMessage = "" } }
             }
         }
-        .onChange(of: store.library.count) { _ in
+        .onChange(of: store.library.count) { count in
             if let g = selectedGame, !installedGames.contains(where: { $0.id == g }) { selectedGame = nil }
             if let t = selectedTag, !installedTags.contains(t) { selectedTag = nil }
             // A selection can never keep mods that are no longer in the library.
@@ -2318,6 +2323,12 @@ struct ContentView: View {
                     : RelocateRequest(gameName: request.gameName, root: request.root,
                                       folderName: request.folderName, ids: remaining)
             }
+            // The first mod that lands is the moment to mention per-game folders.
+            if count == 1, !folderTipShown { withAnimation(.easeOut(duration: 0.2)) { showFolderTip = true } }
+        }
+        .onChange(of: store.preview) { _ in
+            mediaIndex = 0
+            mediaViewer = nil
         }
         .task { store.runLaunchChecks() }
     }
@@ -2369,7 +2380,7 @@ struct ContentView: View {
                                 }
                             },
                             requestedURL: $store.browserURL,
-                            cleanPages: cleanBrowser,
+                            cleanPages: true,
                             bottomInset: tabBarReserve,
                             homeToken: browserHomeToken,
                             onScroll: { y in handleScroll(y) })
@@ -2459,17 +2470,33 @@ struct ContentView: View {
                 .padding(30).zIndex(17)
         }
         if let viewer = mediaViewer {
-            ExpandedMediaView(media: viewer.media, startIndex: viewer.index) {
+            ExpandedMediaView(media: viewer.media, startIndex: viewer.index,
+                              onIndexChange: { mediaIndex = $0 }) {
                 withAnimation(.easeOut(duration: 0.18)) { mediaViewer = nil }
             }
             .transition(.opacity)
             .zIndex(20)
+        }
+        if showFolderTip {
+            Color.black.opacity(0.34).ignoresSafeArea().contentShape(Rectangle())
+                .onTapGesture { dismissFolderTip() }.zIndex(21)
+            FolderTipPopup(onDetails: {
+                dismissFolderTip()
+                selectedTab = 3
+                scrollToGameFolders += 1
+            }, onClose: { dismissFolderTip() })
+                .padding(30).zIndex(22)
         }
     }
 
     /// Popups hold a snapshot; this returns the freshest copy so favourite/status changes show immediately.
     private func currentItem(_ item: WorkshopItem) -> WorkshopItem {
         store.library.first(where: { $0.id == item.id }) ?? item
+    }
+
+    private func dismissFolderTip() {
+        withAnimation(.easeOut(duration: 0.16)) { showFolderTip = false }
+        folderTipShown = true
     }
 
     // MARK: header
@@ -2523,7 +2550,7 @@ struct ContentView: View {
                 Image(systemName: isError ? "exclamationmark.triangle.fill" : "info.circle.fill")
                     .font(.system(size: 18)).foregroundStyle(.white)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(isError ? "Couldn't finish that" : "Update").font(.system(size: 14, weight: .bold)).foregroundStyle(.white)
+                    Text(isError ? "Couldn't finish that" : bannerTitle).font(.system(size: 14, weight: .bold)).foregroundStyle(.white)
                     Text(text).font(.system(size: 13)).foregroundStyle(.white.opacity(0.95))
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -2547,6 +2574,15 @@ struct ContentView: View {
     /// Turns raw engine text into one short line a person can act on.
     private func friendlyError(_ raw: String) -> String {
         ErrorText.friendly(raw)
+    }
+
+    /// The heading of the info banner, so it names what is actually running.
+    private var bannerTitle: String {
+        if store.isVerifyingAll { return "Validating files" }
+        if store.isCheckingUpdates { return "Checking for updates" }
+        if store.isDownloading { return "Downloading" }
+        if store.isBusy { return "Please wait" }
+        return "Status"
     }
 
     /// How far the download has gone, shown in the three steps Steam reports: the manifest, the
@@ -2814,7 +2850,7 @@ struct ContentView: View {
         let media = mediaList(for: item)
         return VStack(alignment: .leading, spacing: 11) {
             if !media.isEmpty {
-                MediaCarousel(media: media, onExpand: { item, index in
+                MediaCarousel(media: media, index: $mediaIndex, onExpand: { item, index in
                     withAnimation(.easeOut(duration: 0.18)) { mediaViewer = MediaViewer(media: media, index: index) }
                 })
                 .id(media.map { $0.id }.joined(separator: "|"))
@@ -3390,19 +3426,27 @@ struct ContentView: View {
 
     private var optionsView: some View {
         NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    ScrollSpy(onChange: handleScroll)
-                    Text("Options").font(.system(size: 27, weight: .bold, design: .rounded)).padding(.top, 10)
-                    appearanceSettings
-                    browserSettings
-                    downloadsSettings
-                    gameFoldersSettings
-                    steamAccountSettings
-                    creditsSettings
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        ScrollSpy(onChange: handleScroll)
+                        Text("Options").font(.system(size: 27, weight: .bold, design: .rounded)).padding(.top, 10)
+                        appearanceSettings
+                        downloadsSettings
+                        browserSettings
+                        gameFoldersSettings
+                            .id("gameFolders")
+                        steamAccountSettings
+                        creditsSettings
+                    }
+                    .padding(.horizontal, 15)
+                    .padding(.bottom, tabBarReserve)
                 }
-                .padding(.horizontal, 15)
-                .padding(.bottom, tabBarReserve)
+                .onChange(of: scrollToGameFolders) { _ in
+                    withAnimation(.easeInOut(duration: 0.3)) {
+                        proxy.scrollTo("gameFolders", anchor: .top)
+                    }
+                }
             }
             .coordinateSpace(name: "scroll")
             .background(Color(uiColor: .systemGroupedBackground))
@@ -3469,8 +3513,6 @@ struct ContentView: View {
     private var browserSettings: AnyView {
         AnyView(
             settingsGroup("Browser") {
-                toggleRow("Workshop only (hide news, RSS and comments)", symbol: "newspaper", isOn: $cleanBrowser)
-                divider
                 toggleRow("Auto download from browser", symbol: "arrow.down.circle", isOn: $autoDownload)
             }
         )
@@ -3507,8 +3549,10 @@ struct ContentView: View {
     private var gameFoldersSettings: AnyView {
         AnyView(
             settingsGroup("Game folders") {
-                VStack(alignment: .leading, spacing: 3) {
+                VStack(alignment: .leading, spacing: 4) {
                     Text("Each game can keep its mods in its own folder. New downloads for a game go there; mods you already have stay where they are until you move them.")
+                        .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    Text("This is useful for installing mods directly to the games specified mod folder, ensure you select the correct folder if you are going to do so.")
                         .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -3876,6 +3920,43 @@ struct HistoryActionPopup: View {
     }
 }
 
+/// A one-time tip after the first successful download, pointing at per-game folders.
+struct FolderTipPopup: View {
+    let onDetails: () -> Void
+    let onClose: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                Image(systemName: "folder.badge.gearshape")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                Text("First mod installed").font(.headline)
+            }
+            Text("You can give each game its own mod folder.")
+                .font(.footnote).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 10) {
+                Button(action: onDetails) {
+                    Text("Details").font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
+                        .frame(maxWidth: .infinity).frame(height: 40)
+                        .background(RoundedRectangle(cornerRadius: 11).fill(Color.accentColor))
+                }
+                .buttonStyle(.plain)
+                Button(action: onClose) {
+                    Text("Got it").font(.system(size: 15, weight: .semibold)).foregroundStyle(.primary)
+                        .frame(maxWidth: .infinity).frame(height: 40)
+                        .background(RoundedRectangle(cornerRadius: 11).fill(Color(uiColor: .tertiarySystemFill)))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(16).frame(maxWidth: 320)
+        .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(Color(uiColor: .secondarySystemGroupedBackground)))
+        .shadow(color: .black.opacity(0.3), radius: 20, y: 8)
+    }
+}
+
 struct ConfirmPopup: View {
     let heading: String
     let message: String
@@ -3976,8 +4057,8 @@ struct IDChip: View {
 
 struct MediaCarousel: View {
     let media: [MediaItem]
+    @Binding var index: Int
     var onExpand: (MediaItem, Int) -> Void = { _, _ in }
-    @State private var index = 0
 
     var body: some View {
         VStack(spacing: 6) {
@@ -4021,11 +4102,13 @@ struct MediaCarousel: View {
 struct ExpandedMediaView: View {
     let media: [MediaItem]
     let startIndex: Int
+    let onIndexChange: (Int) -> Void
     let onClose: () -> Void
     @State private var index: Int
 
-    init(media: [MediaItem], startIndex: Int, onClose: @escaping () -> Void) {
+    init(media: [MediaItem], startIndex: Int, onIndexChange: @escaping (Int) -> Void, onClose: @escaping () -> Void) {
         self.media = media
+        self.onIndexChange = onIndexChange
         self.onClose = onClose
         self.startIndex = startIndex
         _index = State(initialValue: max(0, min(startIndex, max(0, media.count - 1))))
@@ -4050,6 +4133,8 @@ struct ExpandedMediaView: View {
             .frame(width: geo.size.width, height: geo.size.height)
         }
         .ignoresSafeArea()
+        .onAppear { onIndexChange(index) }
+        .onChange(of: index) { onIndexChange($0) }
     }
 }
 
@@ -4831,6 +4916,12 @@ struct BrowserHome: View {
 
 // MARK: - Workshop browser
 
+/// Holds the browser's one WKWebView, so the toolbar can drive it without the
+/// representable having to push a view back into SwiftUI state.
+final class BrowserWebViewHandle {
+    weak var webView: WKWebView?
+}
+
 struct WorkshopBrowserView: View {
     let onOpenInApp: (String) -> Void
     @Binding var requestedURL: URL?
@@ -4839,7 +4930,7 @@ struct WorkshopBrowserView: View {
     let homeToken: Int
     let onScroll: (CGFloat) -> Void
 
-    @State private var webView: WKWebView?
+    @State private var handle = BrowserWebViewHandle()
     @State private var currentURL: URL?
     @State private var canGoBack = false
     @State private var canGoForward = false
@@ -4858,7 +4949,7 @@ struct WorkshopBrowserView: View {
         VStack(spacing: 0) {
             topBar
             ZStack {
-                WorkshopWebContainer(webView: $webView, currentURL: $currentURL, canGoBack: $canGoBack,
+                WorkshopWebContainer(handle: handle, currentURL: $currentURL, canGoBack: $canGoBack,
                                      canGoForward: $canGoForward, isLoading: $isLoading, showUse: $showUse,
                                      requestedURL: $requestedURL, cleanPages: cleanPages,
                                      bottomInset: bottomInset, onScroll: onScroll, onOpenInApp: onOpenInApp)
@@ -4887,8 +4978,8 @@ struct WorkshopBrowserView: View {
     /// Back, Forward, the address (tap to copy) and Home, all across the top.
     private var topBar: some View {
         HStack(spacing: 8) {
-            navButton("chevron.left", "Back", enabled: canGoBack && !showHome) { webView?.goBack() }
-            navButton("chevron.right", "Forward", enabled: canGoForward && !showHome) { webView?.goForward() }
+            navButton("chevron.left", "Back", enabled: canGoBack && !showHome) { handle.webView?.goBack() }
+            navButton("chevron.right", "Forward", enabled: canGoForward && !showHome) { handle.webView?.goForward() }
             addressField
             navButton("house.fill", "Browse home", enabled: true) { showHome = true }
         }
@@ -4945,7 +5036,7 @@ struct WorkshopBrowserView: View {
 }
 
 struct WorkshopWebContainer: UIViewRepresentable {
-    @Binding var webView: WKWebView?
+    let handle: BrowserWebViewHandle
     @Binding var currentURL: URL?
     @Binding var canGoBack: Bool
     @Binding var canGoForward: Bool
@@ -4977,7 +5068,7 @@ struct WorkshopWebContainer: UIViewRepresentable {
         view.scrollView.contentInsetAdjustmentBehavior = .never
         view.scrollView.contentInset.bottom = bottomInset
         context.coordinator.observe(view)
-        webView = view
+        handle.webView = view
 
         // Only a page the user actually asked for is loaded: never a generic Workshop page, which
         // would show up as a surprise destination when the history runs out.
