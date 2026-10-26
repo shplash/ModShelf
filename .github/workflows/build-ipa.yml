@@ -174,10 +174,19 @@ jobs:
           if-no-files-found: error
           compression-level: 0
 
-      # The IPA is only kept as a workflow artifact now, so the old public
-      # release and its asset are removed. Missing releases are fine.
-      - name: Remove the old public release
-        continue-on-error: true
+      # Also publish the IPA as a direct download, so there is a link that hands
+      # over the .ipa itself instead of a zip that wraps it.
+      - name: Publish the direct IPA download
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ios-build
+          name: ModShelf iOS Build
+          body: |
+            Direct download of the latest ModShelf IPA (ad-hoc signed).
+            The same file is attached to the workflow run as the ModShelf-IPA artifact.
+          prerelease: true
+          files: ModShelf.ipa
+          overwrite_files: true
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release delete ios-build --yes --cleanup-tag || true
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
