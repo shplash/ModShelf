@@ -3251,41 +3251,7 @@ struct ContentView: View {
                         }.buttonStyle(.plain)
                     }
 
-                    settingsGroup("Game folders") {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text("Each game can keep its mods in its own folder. New downloads for a game go there; mods you already have stay where they are until you move them.")
-                                .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 15).padding(.vertical, 11)
-                        ForEach(gamesForFolders, id: \.id) { game in
-                            divider
-                            HStack(spacing: 8) {
-                                Button { Haptics.tap(); folderSheet = .game(game.id) } label: {
-                                    rowContent(game.name, symbol: "folder",
-                                               detail: store.customGameFolders[game.id] ?? "Shared folder")
-                                }.buttonStyle(.plain)
-                                if store.customGameFolders[game.id] != nil {
-                                    Button { Haptics.tap(); store.resetFolder(for: game.id) } label: {
-                                        Image(systemName: "arrow.uturn.backward")
-                                            .font(.system(size: 13, weight: .semibold)).foregroundStyle(.secondary)
-                                            .frame(width: 30, height: 30)
-                                            .background(Circle().fill(Color.secondary.opacity(0.12)))
-                                    }
-                                    .buttonStyle(.plain)
-                                    .accessibilityLabel("Reset \(game.name)'s folder")
-                                    .padding(.trailing, 12)
-                                }
-                            }
-                        }
-                        if gamesForFolders.isEmpty {
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text("Games appear here once you have downloaded a mod for them.").font(.system(size: 13)).foregroundStyle(.secondary)
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 15).padding(.vertical, 11)
-                        }
-                    }
+                    gameFoldersSettings
 
                     settingsGroup("Steam account") {
                         HStack(spacing: 12) {
@@ -3395,6 +3361,49 @@ struct ContentView: View {
             if tint == .primary { Image(systemName: "chevron.right").font(.caption.bold()).foregroundStyle(.tertiary) }
         }
         .padding(.horizontal, 15).padding(.vertical, 11).contentShape(Rectangle())
+    }
+
+    private var gameFoldersSettings: some View {
+        settingsGroup("Game folders") {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Each game can keep its mods in its own folder. New downloads for a game go there; mods you already have stay where they are until you move them.")
+                    .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 15).padding(.vertical, 11)
+
+            ForEach(gamesForFolders, id: \.id) { game in
+                divider
+                HStack(spacing: 8) {
+                    Button { Haptics.tap(); folderSheet = .game(game.id) } label: {
+                        rowContent(game.name, symbol: "folder",
+                                   detail: store.customGameFolders[game.id] ?? "Shared folder")
+                    }
+                    .buttonStyle(.plain)
+
+                    if store.customGameFolders[game.id] != nil {
+                        Button { Haptics.tap(); store.resetFolder(for: game.id) } label: {
+                            Image(systemName: "arrow.uturn.backward")
+                                .font(.system(size: 13, weight: .semibold)).foregroundStyle(.secondary)
+                                .frame(width: 30, height: 30)
+                                .background(Circle().fill(Color.secondary.opacity(0.12)))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Reset \(game.name)'s folder")
+                        .padding(.trailing, 12)
+                    }
+                }
+            }
+
+            if gamesForFolders.isEmpty {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Games appear here once you have downloaded a mod for them.")
+                        .font(.system(size: 13)).foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 15).padding(.vertical, 11)
+            }
+        }
     }
 
     // MARK: - Login sheet
