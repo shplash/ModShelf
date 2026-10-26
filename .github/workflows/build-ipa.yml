@@ -1,48 +1,114 @@
 name: Build ModShelf IPA
+
 on:
   workflow_dispatch:
+
 permissions:
   contents: write
+
+# One build at a time: a second dispatch replaces the queued one instead of
+# waiting behind it for a macOS runner.
+concurrency:
+  group: modshelf-ipa
+  cancel-in-progress: true
+
+env:
+  HOMEBREW_NO_AUTO_UPDATE: "1"
+  HOMEBREW_NO_INSTALL_CLEANUP: "1"
+  HOMEBREW_NO_ENV_HINTS: "1"
+  HOMEBREW_NO_ANALYTICS: "1"
+
 jobs:
   build:
+    name: Build and package the IPA
     runs-on: macos-15
-    timeout-minutes: 45
+    timeout-minutes: 35
     steps:
-      - name: Checkout repository
+      - name: Check out the repository
         uses: actions/checkout@v4
-      - name: Install Go
+
+      # The Go bind is the slowest part of this job, so the framework it
+      # produces is reused until ios-engine changes.
+      - name: Restore SteamEngine.xcframework
+        id: engine-cache
+        uses: actions/cache@v4
+        with:
+          path: SteamEngine.xcframework
+          key: steamengine-${{ runner.os }}-${{ hashFiles('ios-engine/**') }}
+
+      - name: Set up Go
+        if: steps.engine-cache.outputs.cache-hit != 'true'
         uses: actions/setup-go@v5
         with:
           go-version: '1.25.x'
-          cache: false
+          cache: true
+          cache-dependency-path: ios-engine/go.sum
+
       - name: Install gomobile
+        if: steps.engine-cache.outputs.cache-hit != 'true'
         run: |
           go install golang.org/x/mobile/cmd/gomobile@latest
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
-      - name: Prepare Go dependencies and tools
+
+      - name: Build the Steam engine
+        if: steps.engine-cache.outputs.cache-hit != 'true'
         working-directory: ios-engine
         run: |
           go get github.com/BirknerAlex/go-steam@latest
           go get -tool golang.org/x/mobile/cmd/gobind@latest
           go mod tidy
-      - name: Build Steam engine XCFramework
-        working-directory: ios-engine
-        run: |
-          gomobile init
           gomobile bind -v -target=ios -o ../SteamEngine.xcframework .
+
+      # Runs even on a cache hit: gomobile writes MinimumOSVersion 100.0 into
+      # the framework, and iOS refuses to install or launch an app that ships it.
+      - name: Fix the engine framework's minimum OS version
+        run: |
+          set -euo pipefail
+          test -d SteamEngine.xcframework
+          for slice in ios-arm64 ios-arm64_x86_64-simulator; do
+            framework="SteamEngine.xcframework/$slice/SteamEngine.framework"
+            plist="$framework/Info.plist"
+            if [ -f "$plist" ]; then
+              /usr/bin/plutil -replace MinimumOSVersion -string "16.0" "$plist"
+              # The plist is part of the signature, so sign the slice again.
+              /usr/bin/codesign --force --sign - --timestamp=none "$framework"
+            fi
+          done
+
+      - name: Restore the Homebrew cache
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/Homebrew
+          key: homebrew-${{ runner.os }}-xcodegen
+          restore-keys: homebrew-${{ runner.os }}-
+
       - name: Install XcodeGen
         run: brew install xcodegen
-      - name: Verify source files
+
+      - name: Verify the source files
         run: |
           test -f project.yml
           test -f Sources/ContentView.swift
           test -f ios-engine/go.mod
           test -f ios-engine/bridge.go
-      - name: Generate Xcode project
+
+      - name: Generate the Xcode project
         run: xcodegen generate
-      - name: Build unsigned iOS app
+
+      # Swift packages and the previous build are keyed on the sources, so a
+      # rebuild after an app change still gets the warm DerivedData.
+      - name: Restore Swift packages and build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/SourcePackages
+            build/Build
+          key: xcodebuild-${{ runner.os }}-${{ hashFiles('project.yml', 'Sources/**') }}
+          restore-keys: xcodebuild-${{ runner.os }}-
+
+      - name: Build the app
         run: |
-          test -d SteamEngine.xcframework
+          set -euo pipefail
           xcodebuild \
             -project ModShelf.xcodeproj \
             -scheme WorkshopDownloader \
@@ -50,46 +116,61 @@ jobs:
             -configuration Release \
             -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO \
+            COMPILER_INDEX_STORE_ENABLE=NO \
             build
-      - name: Package IPA
+
+      - name: Package and sign the IPA
         run: |
           set -euo pipefail
           APP_PATH="build/Build/Products/Release-iphoneos/ModShelf.app"
           if [ ! -d "$APP_PATH" ]; then
             echo "ERROR: App bundle not found: $APP_PATH"
-            echo "Available app bundles:"
             find build/Build/Products -maxdepth 3 -name '*.app' -print || true
             exit 1
           fi
+
           rm -rf Payload ModShelf.ipa
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/ModShelf.app
-          /usr/bin/ditto -c -k --sequesterRsrc --keepParent \
-            Payload ModShelf.ipa
-          echo "Checking IPA archive..."
+          rm -rf Payload/ModShelf.app/_CodeSignature
+
+          # Ad-hoc signing: installers such as Feather and LiveContainer accept
+          # the archive and re-sign it for their own device.
+          /usr/bin/codesign --force --deep --sign - --timestamp=none Payload/ModShelf.app
+          /usr/bin/codesign --verify --deep --strict Payload/ModShelf.app
+
+          # An IPA is a zip with Payload/ at its root; zip keeps it readable by
+          # every installer and by the Finder.
+          /usr/bin/zip -qry ModShelf.ipa Payload
+
+          echo "Checking the IPA archive..."
           /usr/bin/unzip -t ModShelf.ipa
-          /usr/bin/unzip -l ModShelf.ipa
-          if ! /usr/bin/unzip -Z1 ModShelf.ipa | grep -q '^Payload/ModShelf.app/'; then
-            echo "ERROR: IPA does not contain the expected app bundle."
+          /usr/bin/unzip -Z1 ModShelf.ipa | head -20
+          /usr/bin/unzip -Z1 ModShelf.ipa | grep -qx 'Payload/ModShelf.app/Info.plist'
+          /usr/bin/unzip -Z1 ModShelf.ipa | grep -qx 'Payload/ModShelf.app/ModShelf'
+          /usr/bin/unzip -Z1 ModShelf.ipa | grep -q '^Payload/ModShelf.app/_CodeSignature/'
+
+          /usr/bin/plutil -p Payload/ModShelf.app/Info.plist | head -30
+          SIZE=$(stat -f%z ModShelf.ipa)
+          if [ "$SIZE" -lt 1000000 ]; then
+            echo "ERROR: IPA is only $SIZE bytes; it would not be installable."
             exit 1
           fi
           shasum -a 256 ModShelf.ipa
           ls -lh ModShelf.ipa
-      - name: Upload IPA artifact
+
+      - name: Upload the IPA
         uses: actions/upload-artifact@v4
         with:
           name: ModShelf-IPA
           path: ModShelf.ipa
           if-no-files-found: error
           compression-level: 0
-      - name: Publish direct IPA download
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ios-build
-          name: ModShelf iOS Build
-          body: Latest unsigned ModShelf IPA.
-          prerelease: true
-          files: ModShelf.ipa
-          overwrite_files: true
+
+      # The IPA is only kept as a workflow artifact now, so the old public
+      # release and its asset are removed. Missing releases are fine.
+      - name: Remove the old public release
+        continue-on-error: true
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release delete ios-build --yes --cleanup-tag || true
