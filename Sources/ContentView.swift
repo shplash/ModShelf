@@ -153,6 +153,8 @@ struct RelocateRequest: Identifiable {
     let gameName: String
     let root: URL
     let folderName: String
+    /// Where the mods live now, shown as "Before" beside the new folder.
+    let previousFolder: String
     let ids: [String]
 }
 
@@ -870,7 +872,6 @@ final class WorkshopStore: ObservableObject {
             stored[game] = data
             UserDefaults.standard.set(stored, forKey: Self.gameFoldersKey)
             rebuildGameFolderLabels()
-            operationMessage = "New downloads for this game go to \(Self.displayName(url)). Mods already installed elsewhere stay where they are until you move them."
         } else {
             if let previous = scopedURL, previous.path != url.path { previous.stopAccessingSecurityScopedResource() }
             if let previous = scopedURL, previous.path == url.path {
@@ -934,6 +935,20 @@ final class WorkshopStore: ObservableObject {
             revealFolderURL = URL(fileURLWithPath: path, isDirectory: true)
         } else {
             operationMessage = "That mod's folder is missing. Download it again."
+        }
+    }
+
+    /// Opens any folder in Files: ModShelf's own folders directly, a picked one through the browser.
+    func revealFolder(_ url: URL) {
+        let path = url.path
+        if path.hasPrefix(documents.path + "/") {
+            let encoded = path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? path
+            guard let shared = URL(string: "shareddocuments://" + encoded) else { return }
+            UIApplication.shared.open(shared)
+        } else if FileManager.default.fileExists(atPath: path) {
+            revealFolderURL = URL(fileURLWithPath: path, isDirectory: true)
+        } else {
+            operationMessage = "That folder doesn't exist any more."
         }
     }
 
@@ -2003,7 +2018,17 @@ struct MarqueeText: View {
         }
         .frame(height: height)
         .accessibilityLabel(text)
+        .onChange(of: restartToken) { _ in snapToStart() }
+        .onChange(of: active) { isActive in
+            if !isActive { snapToStart() }
+        }
+        .onDisappear { snapToStart() }
         .task(id: cycleKey) { await run() }
+    }
+
+    /// Puts the name back at its first letter without animating the change.
+    private func snapToStart() {
+        withTransaction(Transaction(animation: nil)) { offset = 0 }
     }
 
     private var label: some View {
@@ -2023,7 +2048,7 @@ struct MarqueeText: View {
     @MainActor
     private func run() async {
         // Always begin on the first letter, with no animation carrying over.
-        withTransaction(Transaction(animation: nil)) { offset = 0 }
+        snapToStart()
         guard active, overflow > 0.5 else { return }
         while !Task.isCancelled {
             // A second at rest before setting off.
@@ -2038,7 +2063,7 @@ struct MarqueeText: View {
             if Task.isCancelled { return }
 
             // Snap back to the start, then rest before the next pass.
-            withTransaction(Transaction(animation: nil)) { offset = 0 }
+            snapToStart()
             try? await Task.sleep(nanoseconds: 1_250_000_000)
         }
     }
@@ -2087,6 +2112,7 @@ struct ContentView: View {
     @AppStorage("options.compactLibrary") private var compactLibrary = true
     @AppStorage("options.haptics") private var haptics = true
     @AppStorage("browser.autoDownload") private var autoDownload = false
+    @AppStorage("browser.confirmAutoDownload") private var confirmAutoDownload = false
     @AppStorage("options.gifDownloads") private var gifDownloads = true
     @AppStorage("options.gifLibrary") private var gifLibrary = true
     @AppStorage("options.tabStyle") private var tabStyle = "bar"
@@ -2116,6 +2142,7 @@ struct ContentView: View {
     @State private var marqueeToken = 0
     @State private var showFolderTip = false
     @State private var scrollToGameFolders = 0
+    @State private var pendingAutoDownload: String?
     @AppStorage("options.folderTipShown") private var folderTipShown = false
     @State private var selectedGame: String? = nil
     @State private var selectedTag: String? = nil
@@ -2227,9 +2254,14 @@ struct ContentView: View {
         let root = store.root(forGame: appID)
         let items = store.modsOutside(root, forGame: appID)
         guard !items.isEmpty else { return }
+        // The folder the mods are in now becomes the "Before" side of the offer.
+        let previous = items.first.map {
+            WorkshopStore.displayName(URL(fileURLWithPath: $0.folder, isDirectory: true).deletingLastPathComponent())
+        } ?? "the old folder"
         pendingRelocate = RelocateRequest(gameName: store.gameDisplayName(appID),
                                           root: root,
                                           folderName: WorkshopStore.displayName(root),
+                                          previousFolder: previous,
                                           ids: items.map(\.id))
     }
 
@@ -2321,10 +2353,16 @@ struct ContentView: View {
                 let remaining = request.ids.filter { liveIDs.contains($0) }
                 pendingRelocate = remaining.isEmpty ? nil
                     : RelocateRequest(gameName: request.gameName, root: request.root,
-                                      folderName: request.folderName, ids: remaining)
+                                      folderName: request.folderName,
+                                      previousFolder: request.previousFolder,
+                                      ids: remaining)
             }
             // The first mod that lands is the moment to mention per-game folders.
             if count == 1, !folderTipShown { withAnimation(.easeOut(duration: 0.2)) { showFolderTip = true } }
+        }
+        .onChange(of: autoDownload) { on in
+            // Auto download starts with its confirmation armed, and off with it off.
+            confirmAutoDownload = on
         }
         .onChange(of: store.preview) { _ in
             mediaIndex = 0
@@ -2373,7 +2411,11 @@ struct ContentView: View {
                                 inputWasSubmitted = false
                                 selectedTab = 0
                                 if autoDownload {
-                                    store.download(id)
+                                    if confirmAutoDownload {
+                                        pendingAutoDownload = id
+                                    } else {
+                                        store.download(id)
+                                    }
                                 } else {
                                     store.input = id
                                     store.fetchPreview()
@@ -2457,7 +2499,7 @@ struct ContentView: View {
             Color.black.opacity(0.38).ignoresSafeArea().contentShape(Rectangle())
                 .onTapGesture { pendingRelocate = nil }.zIndex(16)
             ConfirmPopup(heading: "Move \(request.ids.count) mod\(request.ids.count == 1 ? "" : "s")?",
-                         message: "Your \(request.gameName) mods are still in the old folder. New downloads now go to \(request.folderName). ModShelf can move the existing mods there now, or leave them where they are.",
+                         message: "Before: \(request.previousFolder)\nNow: \(request.folderName)\n\nModShelf can move the existing \(request.gameName) mods to the new folder now, or leave them where they are.",
                          actionTitle: "Move them",
                          tint: .accentColor,
                          confirm: {
@@ -2487,6 +2529,26 @@ struct ContentView: View {
             }, onClose: { dismissFolderTip() })
                 .padding(30).zIndex(22)
         }
+        if let id = pendingAutoDownload {
+            Color.black.opacity(0.34).ignoresSafeArea().contentShape(Rectangle())
+                .onTapGesture { pendingAutoDownload = nil }.zIndex(23)
+            ConfirmPopup(heading: "Download this mod?",
+                         message: "Start downloading \(downloadName(for: id)) now?",
+                         actionTitle: "Download",
+                         tint: .accentColor,
+                         confirm: {
+                             pendingAutoDownload = nil
+                             store.download(id)
+                         },
+                         cancel: { pendingAutoDownload = nil })
+                .padding(30).zIndex(24)
+        }
+    }
+
+    private func downloadName(for id: String) -> String {
+        if let preview = store.preview, preview.id == id { return preview.title }
+        if let item = store.library.first(where: { $0.id == id }) { return item.displayTitle }
+        return "Workshop item \(id)"
     }
 
     /// Popups hold a snapshot; this returns the freshest copy so favourite/status changes show immediately.
@@ -3514,6 +3576,8 @@ struct ContentView: View {
         AnyView(
             settingsGroup("Browser") {
                 toggleRow("Auto download from browser", symbol: "arrow.down.circle", isOn: $autoDownload)
+                divider
+                toggleRow("Confirm auto download", symbol: "checkmark.circle", isOn: $confirmAutoDownload)
             }
         )
     }
@@ -3550,7 +3614,9 @@ struct ContentView: View {
         AnyView(
             settingsGroup("Game folders") {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Each game can keep its mods in its own folder. New downloads for a game go there; mods you already have stay where they are until you move them.")
+                    Text("Each game can keep its mods in its own folder.")
+                        .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    Text("New downloads for a game go there; mods you already have stay where they are until you move them.")
                         .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     Text("This is useful for installing mods directly to the games specified mod folder, ensure you select the correct folder if you are going to do so.")
                         .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
@@ -3559,12 +3625,20 @@ struct ContentView: View {
                 .padding(.horizontal, 15).padding(.vertical, 11)
                 ForEach(gamesForFolders, id: \.id) { game in
                     divider
-                    HStack(spacing: 8) {
+                    HStack(spacing: 6) {
                         Button { Haptics.tap(); folderSheet = .game(game.id) } label: {
                             rowContent(game.name, symbol: "folder",
                                        detail: store.customGameFolders[game.id] ?? "Shared folder")
                         }
                         .buttonStyle(.plain)
+                        Button { Haptics.tap(); store.revealFolder(store.root(forGame: game.id)) } label: {
+                            Image(systemName: "folder")
+                                .font(.system(size: 13, weight: .semibold)).foregroundStyle(Color.accentColor)
+                                .frame(width: 30, height: 30)
+                                .background(Circle().fill(Color.accentColor.opacity(0.12)))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Open \(game.name)'s folder")
                         if store.customGameFolders[game.id] != nil {
                             Button { Haptics.tap(); store.resetFolder(for: game.id) } label: {
                                 Image(systemName: "arrow.uturn.backward")
@@ -3574,9 +3648,9 @@ struct ContentView: View {
                             }
                             .buttonStyle(.plain)
                             .accessibilityLabel("Reset \(game.name)'s folder")
-                            .padding(.trailing, 12)
                         }
                     }
+                    .padding(.trailing, 12)
                 }
                 if gamesForFolders.isEmpty {
                     VStack(alignment: .leading, spacing: 3) {
@@ -4059,6 +4133,15 @@ struct MediaCarousel: View {
     let media: [MediaItem]
     @Binding var index: Int
     var onExpand: (MediaItem, Int) -> Void = { _, _ in }
+    /// The page that was showing before the swipe, so only a video being left is paused.
+    @State private var lastIndex = 0
+
+    init(media: [MediaItem], index: Binding<Int>, onExpand: @escaping (MediaItem, Int) -> Void = { _, _ in }) {
+        self.media = media
+        self._index = index
+        self.onExpand = onExpand
+        _lastIndex = State(initialValue: index.wrappedValue)
+    }
 
     var body: some View {
         VStack(spacing: 6) {
@@ -4086,6 +4169,12 @@ struct MediaCarousel: View {
             .tabViewStyle(.page(indexDisplayMode: .never))
             .aspectRatio(16.0 / 9.0, contentMode: .fit)
             .frame(maxWidth: .infinity)
+            .onChange(of: index) { newIndex in
+                if media.indices.contains(lastIndex), case .video = media[lastIndex] {
+                    YouTubePlayers.shared.pause()
+                }
+                lastIndex = newIndex
+            }
             if media.count > 1 {
                 HStack(spacing: 5) {
                     ForEach(0..<media.count, id: \.self) { i in
@@ -4105,13 +4194,16 @@ struct ExpandedMediaView: View {
     let onIndexChange: (Int) -> Void
     let onClose: () -> Void
     @State private var index: Int
+    @State private var lastIndex: Int
 
     init(media: [MediaItem], startIndex: Int, onIndexChange: @escaping (Int) -> Void, onClose: @escaping () -> Void) {
         self.media = media
         self.onIndexChange = onIndexChange
         self.onClose = onClose
         self.startIndex = startIndex
-        _index = State(initialValue: max(0, min(startIndex, max(0, media.count - 1))))
+        let start = max(0, min(startIndex, max(0, media.count - 1)))
+        _index = State(initialValue: start)
+        _lastIndex = State(initialValue: start)
     }
 
     var body: some View {
@@ -4134,7 +4226,14 @@ struct ExpandedMediaView: View {
         }
         .ignoresSafeArea()
         .onAppear { onIndexChange(index) }
-        .onChange(of: index) { onIndexChange($0) }
+        .onChange(of: index) { newIndex in
+            onIndexChange(newIndex)
+            // Only a video that has been left behind is paused; a video being opened keeps playing.
+            if media.indices.contains(lastIndex), case .video = media[lastIndex] {
+                YouTubePlayers.shared.pause()
+            }
+            lastIndex = newIndex
+        }
     }
 }
 
@@ -4371,6 +4470,20 @@ final class YouTubePlayers {
         }
     }
 
+    /// Pauses the live player, used when its page is swiped away in a carousel.
+    func pause() {
+        guard let webView else { return }
+        let script = """
+        (function(){
+          var f = document.querySelector('iframe');
+          if (f && f.contentWindow) {
+            f.contentWindow.postMessage('{"event":"command","func":"pauseVideo","args":[]}', '*');
+          }
+        })();
+        """
+        webView.evaluateJavaScript(script, completionHandler: nil)
+    }
+
     private func view(for id: String) -> WKWebView {
         if let webView, loadedID == id { return webView }
         let cfg = WKWebViewConfiguration()
@@ -4393,7 +4506,7 @@ final class YouTubePlayers {
         <meta name="referrer" content="strict-origin-when-cross-origin">
         <style>html,body{margin:0;height:100%;background:#000;overflow:hidden}iframe{position:absolute;inset:0;width:100%;height:100%;border:0}</style>
         </head><body>
-        <iframe src="https://www.youtube-nocookie.com/embed/\(videoID)?playsinline=1&rel=0&modestbranding=1&origin=\(Self.origin)"
+        <iframe src="https://www.youtube-nocookie.com/embed/\(videoID)?playsinline=1&rel=0&modestbranding=1&enablejsapi=1&origin=\(Self.origin)"
           referrerpolicy="strict-origin-when-cross-origin" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen></iframe>
         </body></html>
         """
