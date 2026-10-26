@@ -738,7 +738,10 @@ final class WorkshopStore: ObservableObject {
     private func resolveCustomRoot() {
         guard let data = UserDefaults.standard.data(forKey: "options.folderBookmark") else { return }
         var stale = false
-        guard let url = try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &stale) else { return }
+        guard let url = try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &stale) else {
+            UserDefaults.standard.removeObject(forKey: "options.folderBookmark")
+            return
+        }
         if url.startAccessingSecurityScopedResource() { scopedURL = url }
         customRoot = url
         if stale, let fresh = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) {
@@ -753,10 +756,14 @@ final class WorkshopStore: ObservableObject {
         guard let stored = UserDefaults.standard.dictionary(forKey: Self.gameFoldersKey), !stored.isEmpty else { return }
         var refreshed = stored
         for (app, value) in stored {
-            guard let data = value as? Data else { continue }
+            guard let data = value as? Data else { refreshed.removeValue(forKey: app); continue }
             var stale = false
-            guard let url = try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &stale) else { continue }
-            if url.startAccessingSecurityScopedResource() { gameScopes[app] = url }
+            guard let url = try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &stale) else {
+                refreshed.removeValue(forKey: app)
+                continue
+            }
+            let started = url.startAccessingSecurityScopedResource()
+            if started { gameScopes[app] = url }
             gameRoots[app] = url
             if stale, let fresh = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) {
                 refreshed[app] = fresh
@@ -808,7 +815,11 @@ final class WorkshopStore: ObservableObject {
         if let game {
             loadGameFolders()
             if let previous = gameScopes[game], previous.path != url.path { previous.stopAccessingSecurityScopedResource() }
-            gameScopes[game] = started ? url : nil
+            if let previous = gameScopes[game], previous.path == url.path {
+                if started { url.stopAccessingSecurityScopedResource() }
+            } else {
+                gameScopes[game] = started ? url : nil
+            }
             gameRoots[game] = url
             var stored = UserDefaults.standard.dictionary(forKey: Self.gameFoldersKey) ?? [:]
             stored[game] = data
@@ -817,7 +828,11 @@ final class WorkshopStore: ObservableObject {
             operationMessage = "New downloads for this game go to \(Self.displayName(url)). Mods already installed elsewhere stay where they are until you move them."
         } else {
             if let previous = scopedURL, previous.path != url.path { previous.stopAccessingSecurityScopedResource() }
-            scopedURL = started ? url : nil
+            if let previous = scopedURL, previous.path == url.path {
+                if started { url.stopAccessingSecurityScopedResource() }
+            } else {
+                scopedURL = started ? url : nil
+            }
             customRoot = url
             UserDefaults.standard.set(data, forKey: "options.folderBookmark")
             updateFolderLabel()
@@ -1915,6 +1930,7 @@ struct ContentView: View {
     @State private var upwardRun: CGFloat = 0
     @State private var browserHomeToken = 0
     @State private var lastWorkshopTap = Date.distantPast
+    @State private var showTechnicalLoginError = false
 
     /// Space reserved under every tab for the tab bar, so content can always scroll clear of it.
     private var tabBarReserve: CGFloat { tabStyle == "bar" ? 84 : 100 }
@@ -2081,9 +2097,9 @@ struct ContentView: View {
         .onChange(of: store.shareURL) { showShare = $0 != nil }
         .onChange(of: confirmDelete) { UserDefaults.standard.set($0, forKey: "options.confirmDelete") }
         .onChange(of: store.errorMessage) { message in
-            guard !message.isEmpty else { return }
+            guard !message.isEmpty, !store.showLogin else { return }
             DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
-                if store.errorMessage == message { withAnimation { store.errorMessage = "" } }
+                if store.errorMessage == message && !store.showLogin { withAnimation { store.errorMessage = "" } }
             }
         }
         .onChange(of: store.operationMessage) { message in
@@ -2112,10 +2128,12 @@ struct ContentView: View {
     private var mainStack: some View {
         VStack(spacing: 0) {
             accountHeader
-            errorBanner
+            if !store.showLogin { errorBanner }
             downloadBanner
             tabContent
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Color(uiColor: .systemGroupedBackground))
         .safeAreaInset(edge: .bottom, spacing: 0) {
             AppTabBar(selected: $selectedTab, style: tabStyle, collapsed: tabCollapsed,
@@ -2129,12 +2147,13 @@ struct ContentView: View {
     }
 
     private var tabContent: some View {
-        ZStack {
+        ZStack(alignment: .top) {
             downloadView.tabLayer(0, selected: selectedTab)
             browserTab.tabLayer(1, selected: selectedTab)
             libraryView.tabLayer(2, selected: selectedTab)
             optionsView.tabLayer(3, selected: selectedTab)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
     private var browserTab: some View {
@@ -2297,8 +2316,8 @@ struct ContentView: View {
     }
 
     @ViewBuilder private var errorBanner: some View {
-        if !store.errorMessage.isEmpty || !store.operationMessage.isEmpty {
-            let isError = !store.errorMessage.isEmpty
+        if (!store.errorMessage.isEmpty && !store.showLogin) || !store.operationMessage.isEmpty {
+            let isError = !store.errorMessage.isEmpty && !store.showLogin
             let text = isError ? friendlyError(store.errorMessage) : store.operationMessage
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: isError ? "exclamationmark.triangle.fill" : "info.circle.fill")
@@ -2437,7 +2456,7 @@ struct ContentView: View {
         VStack(spacing: 8) {
             HStack(spacing: 10) {
                 Image(systemName: "link").foregroundStyle(.secondary)
-                TextField("", text: $store.input)
+                TextField("Workshop URL or ID", text: $store.input)
                     .accessibilityLabel("Workshop URL or ID")
                     .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL).submitLabel(.go)
                     .onSubmit { submitLookup() }
@@ -2843,11 +2862,11 @@ struct ContentView: View {
         } label: {
             HStack(spacing: 5) {
                 Image(systemName: selecting ? "checkmark.circle.fill" : "checkmark.circle")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 13, weight: .semibold))
                 Text(selecting ? "Done" : "Select").font(.system(size: 13, weight: .semibold)).lineLimit(1)
             }
             .foregroundStyle(selecting ? Color.white : Color.primary)
-            .padding(.horizontal, 11).padding(.vertical, 7)
+            .padding(.horizontal, 12).padding(.vertical, 7)
             .background(Capsule().fill(selecting ? Color.accentColor : Color(uiColor: .secondarySystemGroupedBackground)))
         }
         .buttonStyle(.plain)
@@ -2953,10 +2972,15 @@ struct ContentView: View {
         }
         return VStack(alignment: .leading, spacing: 7) {
             Button(action: tap) {
-                Color.clear.aspectRatio(1, contentMode: .fit)
-                    .overlay { CachedImage(urlString: item.imageURL, fill: true, maxPixel: 520).allowsHitTesting(false) }
+                GeometryReader { proxy in
+                    CachedImage(urlString: item.imageURL, fill: true, maxPixel: 520)
+                        .frame(width: proxy.size.width, height: proxy.size.height)
+                        .allowsHitTesting(false)
+                }
+                .aspectRatio(1, contentMode: .fit)
+                .frame(maxWidth: .infinity)
                     .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .contentShape(Rectangle())
                     .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
                         .stroke(Color.accentColor, lineWidth: picked ? 3 : 0))
             }
@@ -2969,9 +2993,9 @@ struct ContentView: View {
             }
 
             Button(action: tap) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(item.displayTitle).font(.system(size: 14, weight: .semibold)).lineLimit(2).multilineTextAlignment(.leading)
-                        .frame(height: 34, alignment: .topLeading)
+                VStack(alignment: .leading, spacing: 2) {
+                    MarqueeTitle(text: item.displayTitle, fontSize: 14)
+                        .frame(height: 18, alignment: .leading)
                     HStack(spacing: 6) {
                         RatingLine(rating: item.rating, count: item.ratingCount, size: 12)
                         if showIDs {
@@ -3384,13 +3408,11 @@ struct ContentView: View {
                             .font(.system(size: 26)).foregroundStyle(store.isAuthenticated ? Color.green : Color.accentColor)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(store.isAuthenticated ? "Connected to Steam" : "Sign in to Steam").font(.title3.bold())
-                            Text(store.isAuthenticated ? "Your Steam session is active." : "Your password is stored in the Keychain on this device only.")
+                            Text(store.isAuthenticated
+                                 ? "Your Steam session is active."
+                                 : "Your password is stored in the keychain on this device only, ModShelf signs in so Steam will serve workshop mods to your own account.")
                                 .font(.footnote).foregroundStyle(.secondary)
-                            if !store.isAuthenticated {
-                                Text("ModShelf signs in so Steam will serve Workshop downloads to your own account. Your details go to Steam and nowhere else.")
-                                    .font(.footnote).foregroundStyle(.secondary)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                     }
                     if !store.isAuthenticated {
@@ -3425,16 +3447,51 @@ struct ContentView: View {
                         }.buttonStyle(.plain)
                     }
                     if !store.errorMessage.isEmpty {
-                        Text(store.errorMessage).font(.footnote).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
+                        Button { showTechnicalLoginError = true } label: {
+                            HStack(alignment: .top, spacing: 8) {
+                                Image(systemName: "exclamationmark.circle.fill")
+                                Text(loginFriendlyError(store.errorMessage))
+                                    .multilineTextAlignment(.leading)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                Spacer(minLength: 0)
+                                Image(systemName: "info.circle").font(.caption)
+                            }
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(11)
+                            .background(Color.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityHint("Tap to view the detailed Steam error")
                     }
                 }
                 .padding(20)
             }
             .background(Color(uiColor: .systemGroupedBackground))
+            .alert("Steam sign-in details", isPresented: $showTechnicalLoginError) {
+                Button("OK", role: .cancel) { }
+            } message: {
+                Text(store.errorMessage.isEmpty ? "Steam sign-in failed." : store.errorMessage)
+            }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Close") { store.showLogin = false } }
             }
         }
+    }
+
+    private func loginFriendlyError(_ raw: String) -> String {
+        let value = raw.lowercased()
+        if value.contains("guard") || value.contains("two-factor") || value.contains("2fa") || value.contains("code") {
+            return "Steam needs a confirmation code. Check your Steam app and try again. Tap for details."
+        }
+        if value.contains("password") || value.contains("credential") || value.contains("account name") || value.contains("invalid") {
+            return "Steam couldn't sign you in. Check your details and try again. Tap for details."
+        }
+        if value.contains("network") || value.contains("timeout") || value.contains("offline") {
+            return "Couldn't reach Steam. Check your connection and try again. Tap for details."
+        }
+        return "Steam sign-in failed. Try again, or tap for details."
     }
 
     private func loginField(_ title: String, text: Binding<String>, secure: Bool) -> some View {
@@ -3444,6 +3501,64 @@ struct ContentView: View {
         .textInputAutocapitalization(.never).autocorrectionDisabled()
         .padding(.horizontal, 13).frame(height: 46)
         .background(RoundedRectangle(cornerRadius: 11).fill(Color(uiColor: .secondarySystemGroupedBackground)))
+    }
+}
+
+/// Single-line title that scrolls continuously only when its full text does not fit.
+struct MarqueeTitle: View {
+    let text: String
+    var fontSize: CGFloat = 14
+    @State private var shouldScroll = false
+    @State private var textWidth: CGFloat = 0
+    @State private var offset: CGFloat = 0
+    private let gap: CGFloat = 34
+    private var font: UIFont { .systemFont(ofSize: fontSize, weight: .semibold) }
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                if shouldScroll {
+                    HStack(spacing: gap) {
+                        titleText
+                        titleText
+                    }
+                    .fixedSize(horizontal: true, vertical: false)
+                    .offset(x: offset)
+                    .onAppear { startIfNeeded(containerWidth: geo.size.width) }
+                } else {
+                    titleText
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .frame(width: geo.size.width, height: geo.size.height, alignment: .leading)
+            .clipped()
+            .onAppear { update(containerWidth: geo.size.width) }
+            .onChange(of: geo.size.width) { update(containerWidth: $0) }
+            .onChange(of: text) { _ in update(containerWidth: geo.size.width) }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(text)
+    }
+
+    private var titleText: some View {
+        Text(text).font(.system(size: fontSize, weight: .semibold)).lineLimit(1).fixedSize(horizontal: true, vertical: false)
+    }
+
+    private func update(containerWidth: CGFloat) {
+        let measured = (text as NSString).size(withAttributes: [.font: font]).width
+        textWidth = measured
+        shouldScroll = measured > containerWidth + 1
+        if !shouldScroll { offset = 0 }
+        else { startIfNeeded(containerWidth: containerWidth) }
+    }
+
+    private func startIfNeeded(containerWidth: CGFloat) {
+        guard shouldScroll, textWidth > containerWidth else { return }
+        offset = 0
+        let distance = textWidth + gap
+        withAnimation(.linear(duration: max(5, Double(distance / 22))).repeatForever(autoreverses: false)) {
+            offset = -distance
+        }
     }
 }
 
