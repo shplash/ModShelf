@@ -234,29 +234,32 @@ enum Fmt {
 /// One place that turns Steam's raw wording into a short line someone can act on.
 enum ErrorText {
     static func friendly(_ raw: String) -> String {
-        let text = raw.lowercased()
-        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "Something went wrong. Try again." }
-        if text.contains("not own") || text.contains("own this game") || text.contains("licen")
-            || text.contains("purchase") || text.contains("subscription") {
-            return "You don't own this game, so its Workshop items can't be downloaded."
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return "Something went wrong. Try again." }
+        let r = text.lowercased()
+        if r.contains("not own") || r.contains("own this game") || r.contains("don't own")
+            || r.contains("no license") || r.contains("licen") || r.contains("not purchased") {
+            return "You don't own this game on Steam, so Steam won't give you its Workshop items."
         }
-        if text.contains("private") { return "That Workshop item is private." }
-        if text.contains("not found") || text.contains("does not exist") || text.contains("invalid item")
-            || text.contains("no such") {
-            return "Steam couldn't find that item."
+        if r.contains("private") { return "That Workshop item is private, so it can't be downloaded." }
+        if r.contains("not found") || r.contains("doesn't exist") || r.contains("does not exist")
+            || r.contains("invalid item") || r.contains("no such item") {
+            return "Steam couldn't find that item. It may have been deleted."
         }
-        if text.contains("window") && text.contains("item") { return "That item can't be downloaded." }
-        if text.contains("rate limit") || text.contains("too many") { return "Steam is busy. Try again in a minute." }
-        if text.contains("timeout") || text.contains("timed out") || text.contains("network")
-            || text.contains("offline") || text.contains("connection") || text.contains("reach") {
-            return "Couldn't reach Steam. Check your connection."
+        if r.contains("window") && r.contains("item") { return "Steam doesn't allow this item to be downloaded." }
+        if r.contains("rate limit") || r.contains("too many") {
+            return "Steam is limiting requests. Wait a minute and try again."
         }
-        if text.contains("no space") || text.contains("disk full") || text.contains("not enough space") {
-            return "There isn't enough space on this iPhone."
+        if r.contains("without a completion event") { return "The download stopped before it finished. Try again." }
+        if r.contains("timeout") || r.contains("timed out") || r.contains("network")
+            || r.contains("offline") || r.contains("connection") || r.contains("reach") {
+            return "Couldn't reach Steam. Check your internet connection."
         }
-        if text.contains("without a completion event") { return "The download didn't finish. Try again." }
-        if text.contains("cancel") { return "The download was cancelled." }
-        return raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if r.contains("no space") || r.contains("disk full") || r.contains("not enough space") {
+            return "There isn't enough free space on this iPhone."
+        }
+        if r.contains("cancel") { return "The download was cancelled." }
+        return text
     }
 }
 
@@ -1035,23 +1038,36 @@ final class WorkshopStore: ObservableObject {
         }
     }
 
-    /// Steam's own sign-in wording, cut down to a line the login sheet can show.
+    /// Steam's own sign-in wording, keeping what went wrong so the login sheet can say it clearly.
     nonisolated static func signInMessage(_ raw: String) -> String {
-        let r = raw.lowercased()
-        if r.isEmpty { return "Sign-in didn't complete. Try again." }
-        if r.contains("not entered in time") { return "That code wasn't entered in time. Try again." }
-        if r.contains("guard") || r.contains("two-factor") || r.contains("code") {
-            return "Steam wants a confirmation code. Enter the code from the Steam app."
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return "Sign-in didn't complete. Try again." }
+        let r = text.lowercased()
+        if r.contains("not entered in time") { return "The code wasn't entered in time. Try signing in again." }
+        if r.contains("guard") || r.contains("two-factor") || r.contains("2fa") {
+            if r.contains("waiting") || r.contains("already") {
+                return "Steam is still waiting on the previous code. Finish that prompt first."
+            }
+            return "Steam wants a Steam Guard code, or an approval in the Steam app."
         }
-        if r.contains("rate limit") || r.contains("too many") { return "Too many attempts. Wait a minute and try again." }
-        if r.contains("password") || r.contains("incorrect") || r.contains("invalid") || r.contains("denied") {
+        // Steam reports repeated bad sign-ins as a rate limit, so name both causes.
+        if r.contains("too many") || r.contains("rate limit") {
+            return "Steam blocked this sign-in after too many attempts. Wait a few minutes, and check the username and password are right."
+        }
+        if r.contains("invalid password") || r.contains("incorrect password") || r.contains("wrong password") {
+            return "Steam didn't accept that password."
+        }
+        if r.contains("password") || r.contains("account name") || r.contains("username")
+            || r.contains("invalid login") || r.contains("denied") || r.contains("credential") {
             return "Steam didn't accept that username or password."
         }
         if r.contains("network") || r.contains("connection") || r.contains("timeout") || r.contains("timed out") {
             return "Couldn't reach Steam. Check your connection."
         }
-        if r.contains("download") || r.contains("already running") { return "Finish or cancel the download first." }
-        return raw
+        if r.contains("download") || r.contains("already running") {
+            return "Finish or cancel the download first."
+        }
+        return text
     }
     func signOut() {
         guard !isBusy else { errorMessage = "Finish or cancel the download first."; return }
@@ -1969,7 +1985,7 @@ struct MarqueeText: View {
     }
 
     var body: some View {
-        ZStack(alignment: .leading) {
+        GeometryReader { geo in
             label
                 .fixedSize()
                 .background(
@@ -1980,17 +1996,12 @@ struct MarqueeText: View {
                     }
                 )
                 .offset(x: offset)
+                .frame(width: geo.size.width, height: geo.size.height, alignment: .leading)
+                .clipped()
+                .onAppear { setBoxWidth(geo.size.width) }
+                .onChange(of: geo.size.width) { setBoxWidth($0) }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .frame(height: height, alignment: .leading)
-        .clipped()
-        .background(
-            GeometryReader { g in
-                Color.clear
-                    .onAppear { setBoxWidth(g.size.width) }
-                    .onChange(of: g.size.width) { setBoxWidth($0) }
-            }
-        )
+        .frame(height: height)
         .accessibilityLabel(text)
         .task(id: cycleKey) { await run() }
     }
@@ -2050,6 +2061,19 @@ struct SelectionWaveDots: View {
     }
 }
 
+/// A word followed by an ellipsis that grows and resets, so "Downloading" reads as active.
+struct DottedLabel: View {
+    let text: String
+    var interval: Double = 0.45
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: interval)) { context in
+            let step = Int(abs(context.date.timeIntervalSinceReferenceDate) / interval) % 4
+            Text(text + String(repeating: ".", count: step))
+        }
+    }
+}
+
 // MARK: - Main view
 
 struct ContentView: View {
@@ -2069,7 +2093,6 @@ struct ContentView: View {
     @AppStorage("options.wifiOnly") private var wifiOnly = false
     @AppStorage("options.infoFile") private var infoFile = true
     @AppStorage("options.cleanBrowser") private var cleanBrowser = true
-    @AppStorage("browser.zoom") private var browserZoom = 1.0
     @State private var selectedTab = 0
     @State private var showShare = false
     @State private var popupItem: WorkshopItem?
@@ -2347,7 +2370,6 @@ struct ContentView: View {
                             },
                             requestedURL: $store.browserURL,
                             cleanPages: cleanBrowser,
-                            zoom: browserZoom,
                             bottomInset: tabBarReserve,
                             homeToken: browserHomeToken,
                             onScroll: { y in handleScroll(y) })
@@ -2527,16 +2549,18 @@ struct ContentView: View {
         ErrorText.friendly(raw)
     }
 
-    /// How far the running download has got, from the engine's transferred bytes.
-    private var downloadProgress: Double { min(1, max(0, store.progress)) }
-    private var downloadPercent: Int { Int((downloadProgress * 100).rounded()) }
-
-    /// The engine's current step with the trailing dots taken off, so the label sits still.
-    private var downloadStep: String {
-        var text = store.status
-        while let last = text.last, last == "…" || last == "." || last == " " { text.removeLast() }
-        return text.isEmpty ? "Downloading" : text
+    /// How far the download has gone, shown in the three steps Steam reports: the manifest, the
+    /// chunk download, then the install.
+    private var downloadPercent: Int {
+        guard store.isDownloading else { return 100 }
+        switch store.phases.count {
+        case 0: return 0
+        case 1: return 33
+        default: return 66
+        }
     }
+
+    private var downloadProgress: Double { Double(downloadPercent) / 100 }
 
     private func progressBar(_ fraction: Double) -> some View {
         let clamped = min(1, max(0, fraction))
@@ -2725,19 +2749,17 @@ struct ContentView: View {
     }
 
     private var progressCard: some View {
-        return VStack(alignment: .leading, spacing: 11) {
+        return VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 12) {
                 ZStack {
-                    Circle().fill(Color.accentColor.opacity(0.14)).frame(width: 38, height: 38)
-                    Image(systemName: "arrow.down").font(.system(size: 16, weight: .bold))
+                    Circle().fill(Color.accentColor.opacity(0.14)).frame(width: 44, height: 44)
+                    Image(systemName: "arrow.down")
+                        .font(.system(size: 18, weight: .bold))
                         .foregroundStyle(Color.accentColor)
                 }
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(store.activeTitle.isEmpty ? "Downloading" : store.activeTitle)
-                        .font(.system(size: 15, weight: .semibold)).lineLimit(1)
-                    Text(downloadStep)
-                        .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
-                }
+                DottedLabel(text: "Downloading")
+                    .font(.system(size: 20, weight: .semibold))
+                    .lineLimit(1)
                 Spacer(minLength: 8)
                 Text("\(downloadPercent)%")
                     .font(.system(size: 16, weight: .bold).monospacedDigit())
@@ -2745,18 +2767,13 @@ struct ContentView: View {
                 Button { Haptics.tap(); store.cancel() } label: {
                     Image(systemName: "xmark").font(.system(size: 12, weight: .bold))
                         .foregroundStyle(.secondary)
-                        .frame(width: 30, height: 30)
+                        .frame(width: 32, height: 32)
                         .background(Circle().fill(Color.primary.opacity(0.08)))
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Cancel download")
             }
             progressBar(downloadProgress)
-            if !store.currentFile.isEmpty {
-                Text(store.currentFile)
-                    .font(.system(size: 11, design: .monospaced)).foregroundStyle(.tertiary)
-                    .lineLimit(1).truncationMode(.middle)
-            }
         }
         .padding(14)
         .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
@@ -3455,16 +3472,6 @@ struct ContentView: View {
                 toggleRow("Workshop only (hide news, RSS and comments)", symbol: "newspaper", isOn: $cleanBrowser)
                 divider
                 toggleRow("Auto download from browser", symbol: "arrow.down.circle", isOn: $autoDownload)
-                divider
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Label("Text size", systemImage: "textformat.size").font(.system(size: 16))
-                        Spacer()
-                        Text("\(Int(browserZoom * 100))%").font(.system(size: 14, weight: .semibold)).foregroundStyle(.secondary).monospacedDigit()
-                    }
-                    Slider(value: $browserZoom, in: 0.8...1.4, step: 0.05).tint(.accentColor)
-                }
-                .padding(.horizontal, 15).padding(.vertical, 12)
             }
         )
     }
@@ -4026,7 +4033,7 @@ struct ExpandedMediaView: View {
 
     var body: some View {
         GeometryReader { geo in
-            ZStack(alignment: .topTrailing) {
+            ZStack {
                 Rectangle().fill(.ultraThinMaterial)
                     .overlay(Color.black.opacity(0.55))
                     .ignoresSafeArea()
@@ -4034,19 +4041,11 @@ struct ExpandedMediaView: View {
                     .onTapGesture { onClose() }
                 TabView(selection: $index) {
                     ForEach(Array(media.enumerated()), id: \.offset) { i, item in
-                        ExpandedMediaPage(item: item, index: i, count: media.count)
+                        ExpandedMediaPage(item: item, index: i, count: media.count, onClose: onClose)
                             .tag(i)
                     }
                 }
                 .tabViewStyle(.page(indexDisplayMode: .never))
-                Button { Haptics.tap(); onClose() } label: {
-                    Image(systemName: "xmark").font(.system(size: 13, weight: .bold)).foregroundStyle(.white)
-                        .frame(width: 32, height: 32)
-                        .background(Circle().fill(Color.black.opacity(0.45)))
-                }
-                .buttonStyle(.plain)
-                .padding(.top, 56).padding(.trailing, 16)
-                .accessibilityLabel("Close")
             }
             .frame(width: geo.size.width, height: geo.size.height)
         }
@@ -4059,17 +4058,24 @@ struct ExpandedMediaPage: View {
     let item: MediaItem
     let index: Int
     let count: Int
+    let onClose: () -> Void
     @AppStorage("options.gifDownloads") private var gifDownloads = true
     @State private var image: UIImage?
     @State private var failed = false
 
     var body: some View {
         GeometryReader { geo in
-            VStack(spacing: 12) {
-                content(in: geo.size)
-                if count > 1 { dots }
+            ZStack {
+                // Tapping anywhere around the media dismisses the viewer, the same as the backdrop.
+                Color.clear
+                    .contentShape(Rectangle())
+                    .onTapGesture { onClose() }
+                VStack(spacing: 12) {
+                    content(in: geo.size)
+                    if count > 1 { dots }
+                }
+                .frame(width: geo.size.width, height: geo.size.height, alignment: .center)
             }
-            .frame(width: geo.size.width, height: geo.size.height, alignment: .center)
         }
         .task(id: item.id) { await load() }
     }
@@ -4829,7 +4835,6 @@ struct WorkshopBrowserView: View {
     let onOpenInApp: (String) -> Void
     @Binding var requestedURL: URL?
     let cleanPages: Bool
-    let zoom: Double
     let bottomInset: CGFloat
     let homeToken: Int
     let onScroll: (CGFloat) -> Void
@@ -4855,7 +4860,7 @@ struct WorkshopBrowserView: View {
             ZStack {
                 WorkshopWebContainer(webView: $webView, currentURL: $currentURL, canGoBack: $canGoBack,
                                      canGoForward: $canGoForward, isLoading: $isLoading, showUse: $showUse,
-                                     requestedURL: $requestedURL, cleanPages: cleanPages, zoom: zoom,
+                                     requestedURL: $requestedURL, cleanPages: cleanPages,
                                      bottomInset: bottomInset, onScroll: onScroll, onOpenInApp: onOpenInApp)
                     .opacity(showHome ? 0 : 1)
                     .allowsHitTesting(!showHome)
@@ -4948,7 +4953,6 @@ struct WorkshopWebContainer: UIViewRepresentable {
     @Binding var showUse: Bool
     @Binding var requestedURL: URL?
     let cleanPages: Bool
-    let zoom: Double
     let bottomInset: CGFloat
     let onScroll: (CGFloat) -> Void
     let onOpenInApp: (String) -> Void
@@ -4987,10 +4991,6 @@ struct WorkshopWebContainer: UIViewRepresentable {
 
     func updateUIView(_ view: WKWebView, context: Context) {
         context.coordinator.parent = self
-        if abs(zoom - context.coordinator.lastZoom) > 0.001 {
-            context.coordinator.lastZoom = zoom
-            view.evaluateJavaScript(Self.zoomScript(zoom), completionHandler: nil)
-        }
         if abs(view.scrollView.contentInset.bottom - bottomInset) > 0.5 { view.scrollView.contentInset.bottom = bottomInset }
         if let url = requestedURL {
             view.load(URLRequest(url: url))
@@ -5006,45 +5006,11 @@ struct WorkshopWebContainer: UIViewRepresentable {
         UserDefaults.standard.string(forKey: WorkshopBrowserView.lastPageKey).flatMap { URL(string: $0) }
     }
 
-    /// Scales the page and widens it by the same amount, so the content keeps filling the screen
-    /// instead of shrinking away from one edge (which is where the bars came from).
-    static func zoomScript(_ zoom: Double) -> String {
-        let clamped = max(0.8, min(1.4, zoom))
-        let value = String(format: "%.3f", clamped)
-        let inverse = String(format: "%.3f", 100.0 / clamped)
-        return """
-        (function(){
-          var z = \(value);
-          var w = \(inverse);
-          var id = 'ms-zoom';
-          var st = document.getElementById(id);
-          if (!st) {
-            st = document.createElement('style');
-            st.id = id;
-            document.head.appendChild(st);
-            }
-          if (Math.abs(z - 1) < 0.001) {
-            st.innerHTML = '';
-            return;
-          }
-          if (window.CSS && CSS.supports && CSS.supports('zoom', '1.5')) {
-            st.innerHTML = 'html{zoom:1 !important}' +
-              ' body{zoom:' + z + ' !important; width:' + w + '% !important;' +
-              ' max-width:' + w + '% !important; min-width:0 !important;' +
-              ' margin-left:0 !important; margin-right:0 !important}';
-          } else {
-            st.innerHTML = 'html, body{-webkit-text-size-adjust:' + Math.round(z * 100) + '% !important;' +
-              ' text-size-adjust:' + Math.round(z * 100) + '% !important}';
-          }
-        })();
-        """
-    }
-
     /// Hides Steam's header, store link, the game tab row, news, RSS and the About box.
     /// Most of this works by matching visible text, so it doesn't depend on Steam's class names.
     static let hideScript = """
     (function(){
-      var markers = ['LATEST WORKSHOP NEWS','Subscribe to RSS feed','ABOUT - THE WORKSHOP','Workshop Home About Workshop','Read the full post on our Steam Blog',"Here's a quick look"];
+      var markers = ['LATEST WORKSHOP NEWS','Subscribe to RSS feed','ABOUT - THE WORKSHOP','Workshop Home About Workshop','Read the full post on our Steam Blog',"Here's a quick look",'About - The Workshop','About this Workshop','About the Workshop','About this Workshop item','About this game','About This Game'];
       var css = '#global_header,.global_header,[id*="global_header"],[class*="global_header"],header,#footer,.footer,.supernav_container,.store_header,#store_nav_area,.responsive_header,#workshop_header,.workshop_header,.workshopBanner,.workshop_banner{display:none!important}' +
                 ' body{padding-top:0!important;margin-top:0!important;margin-left:0!important;margin-right:0!important;background:#1b2838!important}' +
                 ' html,body{width:100%!important;min-width:0!important;max-width:100%!important}' +
@@ -5055,9 +5021,12 @@ struct WorkshopWebContainer: UIViewRepresentable {
         for(var i=0;i<all.length;i++){
           var el=all[i];
           if(el.dataset.msHidden) continue;
+          // Never touch a mod's own description, even if the author titled it "About".
+          if(el.closest && el.closest('.workshopItemDescription')) continue;
           var t=(el.innerText||'').trim();
           if(!t || t.length>6000) continue;
-          var hit=markers.some(function(m){return t.indexOf(m)===0 || (t.indexOf(m)>=0 && t.length<600);});
+          var lower=t.toLowerCase();
+          var hit=markers.some(function(m){var key=m.toLowerCase();return lower.indexOf(key)===0 || (lower.indexOf(key)>=0 && t.length<600);});
           // Steam's store link.
           if(t==='Store Page') hit=true;
           // Steam's row of game tabs (All, Discussions, Screenshots, Artwork, ...).
@@ -5144,13 +5113,11 @@ struct WorkshopWebContainer: UIViewRepresentable {
     final class Coordinator: NSObject, WKNavigationDelegate, UIScrollViewDelegate, WKScriptMessageHandler {
         var parent: WorkshopWebContainer
         var lastClean: Bool
-        var lastZoom: Double
         private var observations: [NSKeyValueObservation] = []
 
         init(_ parent: WorkshopWebContainer) {
             self.parent = parent
             self.lastClean = parent.cleanPages
-            self.lastZoom = parent.zoom
         }
 
         func observe(_ view: WKWebView) {
@@ -5187,7 +5154,6 @@ struct WorkshopWebContainer: UIViewRepresentable {
             if parent.cleanPages {
                 webView.evaluateJavaScript(WorkshopWebContainer.hideScript, completionHandler: nil)
             }
-            webView.evaluateJavaScript(WorkshopWebContainer.zoomScript(parent.zoom), completionHandler: nil)
         }
 
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
