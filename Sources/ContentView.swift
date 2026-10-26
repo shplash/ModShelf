@@ -126,6 +126,36 @@ enum MediaItem: Identifiable, Equatable {
     }
 }
 
+/// A folder choice: the shared mod folder, one game's folder, or where moved mods should go.
+enum FolderSheet: Identifiable {
+    case shared
+    case game(String)
+    case moveDestination
+
+    var id: String {
+        switch self {
+        case .shared: return "shared"
+        case .game(let appID): return "game-" + appID
+        case .moveDestination: return "move"
+        }
+    }
+}
+
+struct RelocateRequest: Identifiable {
+    let id = UUID()
+    let gameName: String
+    let root: URL
+    let folderName: String
+    let ids: [String]
+}
+
+/// A place the selected mods can be moved to.
+struct MoveDestination: Identifiable {
+    let id: String
+    let title: String
+    let detail: String
+}
+
 // MARK: - Keychain
 
 enum Keychain {
@@ -589,7 +619,8 @@ final class WorkshopStore: ObservableObject {
     @Published var activeTitle = ""
     @Published var phases: [String] = []
     @Published var revealFolderURL: URL?
-
+    /// Folder names chosen per game, keyed by Steam App ID. A game without an entry uses the shared folder.
+    @Published var customGameFolders: [String: String] = [:]
 
     private let engine = SteamengineNewEngine()!
     private var poller: Timer?
@@ -599,6 +630,9 @@ final class WorkshopStore: ObservableObject {
     private var didLaunchChecks = false
     private var customRoot: URL?
     private var scopedURL: URL?
+    private var gameRoots: [String: URL] = [:]
+    private var gameScopes: [String: URL] = [:]
+    private var didLoadGameFolders = false
 
     var isAuthenticated: Bool { engine.isAuthenticated() }
     private var documents: URL { FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0] }
@@ -697,7 +731,9 @@ final class WorkshopStore: ObservableObject {
         saveHistory()
     }
 
-    // MARK: download folder
+    // MARK: download folders
+
+    static let gameFoldersKey = "options.gameFolders"
 
     private func resolveCustomRoot() {
         guard let data = UserDefaults.standard.data(forKey: "options.folderBookmark") else { return }
@@ -709,50 +745,123 @@ final class WorkshopStore: ObservableObject {
             UserDefaults.standard.set(fresh, forKey: "options.folderBookmark")
         }
     }
-    func setCustomFolder(_ url: URL) {
-        scopedURL?.stopAccessingSecurityScopedResource(); scopedURL = nil
-        // Access must be started before the folder can be tested or bookmarked.
-        let ok = url.startAccessingSecurityScopedResource()
-        let probe = url.appendingPathComponent(".modshelf-write-test-\(UUID().uuidString)")
-        let writable: Bool
-        do {
-            try Data("ok".utf8).write(to: probe)
-            try? FileManager.default.removeItem(at: probe)
-            writable = true
-        } catch {
-            writable = false
+
+    /// Per-game bookmarks are resolved the first time they are needed, so launch stays quick.
+    private func loadGameFolders() {
+        guard !didLoadGameFolders else { return }
+        didLoadGameFolders = true
+        guard let stored = UserDefaults.standard.dictionary(forKey: Self.gameFoldersKey), !stored.isEmpty else { return }
+        var refreshed = stored
+        for (app, value) in stored {
+            guard let data = value as? Data else { continue }
+            var stale = false
+            guard let url = try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &stale) else { continue }
+            if url.startAccessingSecurityScopedResource() { gameScopes[app] = url }
+            gameRoots[app] = url
+            if stale, let fresh = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) {
+                refreshed[app] = fresh
+            }
         }
-        guard writable else {
-            if ok { url.stopAccessingSecurityScopedResource() }
+        UserDefaults.standard.set(refreshed, forKey: Self.gameFoldersKey)
+        rebuildGameFolderLabels()
+    }
+
+    private func rebuildGameFolderLabels() {
+        var labels: [String: String] = [:]
+        for (app, url) in gameRoots { labels[app] = Self.displayName(url) }
+        customGameFolders = labels
+    }
+
+    nonisolated static func displayName(_ url: URL) -> String {
+        (try? url.resourceValues(forKeys: [.localizedNameKey]).localizedName) ?? url.lastPathComponent
+    }
+
+    /// The folder new downloads for `appID` go into: that game's own folder when one is set.
+    func root(forGame appID: String?) -> URL {
+        if let appID {
+            loadGameFolders()
+            if let custom = gameRoots[appID] {
+                try? FileManager.default.createDirectory(at: custom, withIntermediateDirectories: true)
+                return custom
+            }
+        }
+        return downloadsRoot
+    }
+
+    func setCustomFolder(_ url: URL) { setFolder(url, for: nil) }
+
+    func setFolder(_ url: URL, for game: String?) {
+        // Access has to be started before the folder can be tested or bookmarked.
+        let started = url.startAccessingSecurityScopedResource()
+        guard Self.canWrite(into: url) else {
+            if started { url.stopAccessingSecurityScopedResource() }
             errorMessage = "ModShelf can't save into that folder. Pick a folder on this iPhone or in iCloud Drive that ModShelf is allowed to write to."
             Haptics.error()
             return
         }
         guard let data = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) else {
-            if ok { url.stopAccessingSecurityScopedResource() }
+            if started { url.stopAccessingSecurityScopedResource() }
             errorMessage = "Couldn't remember that folder. Try picking it again."
+            Haptics.error()
             return
         }
-        UserDefaults.standard.set(data, forKey: "options.folderBookmark")
-        customRoot = url
-        if ok { scopedURL = url }
-        updateFolderLabel()
-        operationMessage = "New downloads will be saved to \(url.lastPathComponent)."
+        if let game {
+            loadGameFolders()
+            if let previous = gameScopes[game], previous.path != url.path { previous.stopAccessingSecurityScopedResource() }
+            gameScopes[game] = started ? url : nil
+            gameRoots[game] = url
+            var stored = UserDefaults.standard.dictionary(forKey: Self.gameFoldersKey) ?? [:]
+            stored[game] = data
+            UserDefaults.standard.set(stored, forKey: Self.gameFoldersKey)
+            rebuildGameFolderLabels()
+            operationMessage = "New downloads for this game go to \(Self.displayName(url)). Mods already installed elsewhere stay where they are until you move them."
+        } else {
+            if let previous = scopedURL, previous.path != url.path { previous.stopAccessingSecurityScopedResource() }
+            scopedURL = started ? url : nil
+            customRoot = url
+            UserDefaults.standard.set(data, forKey: "options.folderBookmark")
+            updateFolderLabel()
+            operationMessage = "New downloads will be saved to \(Self.displayName(url))."
+        }
     }
-    func resetCustomFolder() {
-        scopedURL?.stopAccessingSecurityScopedResource(); scopedURL = nil
-        customRoot = nil
-        UserDefaults.standard.removeObject(forKey: "options.folderBookmark")
-        updateFolderLabel()
-        operationMessage = "Download folder reset to the default."
+
+    func resetCustomFolder() { resetFolder(for: nil) }
+
+    func resetFolder(for game: String?) {
+        if let game {
+            loadGameFolders()
+            gameScopes[game]?.stopAccessingSecurityScopedResource()
+            gameScopes[game] = nil
+            gameRoots[game] = nil
+            var stored = UserDefaults.standard.dictionary(forKey: Self.gameFoldersKey) ?? [:]
+            stored.removeValue(forKey: game)
+            UserDefaults.standard.set(stored, forKey: Self.gameFoldersKey)
+            rebuildGameFolderLabels()
+            operationMessage = "This game now uses the shared download folder."
+        } else {
+            scopedURL?.stopAccessingSecurityScopedResource(); scopedURL = nil
+            customRoot = nil
+            UserDefaults.standard.removeObject(forKey: "options.folderBookmark")
+            updateFolderLabel()
+            operationMessage = "Download folder reset to the default."
+        }
     }
+
     private func updateFolderLabel() {
         if let root = customRoot {
-            folderLabel = (try? root.resourceValues(forKeys: [.localizedNameKey]).localizedName) ?? root.lastPathComponent
+            folderLabel = Self.displayName(root)
         } else { folderLabel = "On My iPhone / ModShelf / Downloaded Mods" }
     }
+
     var usingCustomFolder: Bool { customRoot != nil }
     var currentRootURL: URL { customRoot ?? defaultRoot }
+
+    func gameDisplayName(_ appID: String) -> String {
+        if let name = library.first(where: { $0.appID == appID })?.gameName { return name }
+        let cache = UserDefaults.standard.dictionary(forKey: "modshelf.gameNames") as? [String: String] ?? [:]
+        return cache[appID] ?? "this game"
+    }
+
     func revealInFiles(_ item: WorkshopItem) {
         let path = item.folder
         if path.hasPrefix(documents.path + "/") {
@@ -767,10 +876,23 @@ final class WorkshopStore: ObservableObject {
             operationMessage = "That mod's folder is missing. Download it again."
         }
     }
-    private func isManagedPath(_ path: String) -> Bool {
-        var roots = [defaultRoot.path]
-        if let c = customRoot { roots.append(c.path) }
-        return roots.contains { path.hasPrefix($0 + "/") }
+
+    /// A mod keeps the folder it already lives in, so an update replaces it in place.
+    private func installRoot(for item: WorkshopItem?, appID: String?) -> URL {
+        if let item, FileManager.default.fileExists(atPath: item.folder) {
+            let parent = URL(fileURLWithPath: item.folder, isDirectory: true).deletingLastPathComponent()
+            if (try? parent.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true { return parent }
+        }
+        return root(forGame: appID)
+    }
+
+    nonisolated static func canWrite(into url: URL) -> Bool {
+        let probe = url.appendingPathComponent(".modshelf-write-test-\(UUID().uuidString)")
+        do {
+            try Data("ok".utf8).write(to: probe)
+            try? FileManager.default.removeItem(at: probe)
+            return true
+        } catch { return false }
     }
 
     // MARK: lookup
@@ -878,8 +1000,9 @@ final class WorkshopStore: ObservableObject {
         let meta: WorkshopMetadata = override ?? ((preview?.id == id ? preview : nil) ?? fallback)
         activeMeta = meta
         activeTitle = meta.title
-        let finalHint = downloadsRoot.appendingPathComponent(id, isDirectory: true)
-        let staging = downloadsRoot.appendingPathComponent(".partial-\(id)-\(UUID().uuidString)", isDirectory: true)
+        // Updates stage next to the current installation, so the swap is a rename rather than a copy.
+        let targetRoot = installRoot(for: library.first(where: { $0.id == id }), appID: meta.appID)
+        let staging = targetRoot.appendingPathComponent(".partial-\(id)-\(UUID().uuidString)", isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
         } catch {
@@ -905,7 +1028,6 @@ final class WorkshopStore: ObservableObject {
         record(id, title: meta.title, result: "Downloading", imageURL: meta.imageURL.isEmpty ? nil : meta.imageURL, game: meta.gameName)
         startPolling()
         UserDefaults.standard.set(staging.path, forKey: "modshelf.activeStaging")
-        UserDefaults.standard.set(finalHint.path, forKey: "modshelf.activeFinal")
     }
 
     func update(_ item: WorkshopItem) {
@@ -950,7 +1072,6 @@ final class WorkshopStore: ObservableObject {
         stopPolling()
         let stagingPath = UserDefaults.standard.string(forKey: "modshelf.activeStaging") ?? ""
         UserDefaults.standard.removeObject(forKey: "modshelf.activeStaging")
-        UserDefaults.standard.removeObject(forKey: "modshelf.activeFinal")
         let staging = URL(fileURLWithPath: stagingPath, isDirectory: true)
         let error = engine.lastError()
         let successStatus = s.contains("download complete")
@@ -1031,9 +1152,9 @@ final class WorkshopStore: ObservableObject {
         let limited = String(cleaned.prefix(80))
         return limited.isEmpty ? fallback : limited
     }
-    private func uniqueDestination(name: String, id: String) -> URL {
+    /// A free folder under `root`: the plain name, then the name with the Workshop ID, then a unique one.
+    nonisolated static func availableURL(name: String, id: String, in root: URL) -> URL {
         let fm = FileManager.default
-        let root = downloadsRoot
         var candidate = root.appendingPathComponent(name, isDirectory: true)
         if !fm.fileExists(atPath: candidate.path) { return candidate }
         candidate = root.appendingPathComponent("\(name) (\(id))", isDirectory: true)
@@ -1041,6 +1162,24 @@ final class WorkshopStore: ObservableObject {
         return root.appendingPathComponent("\(name) (\(id)-\(UUID().uuidString.prefix(4)))", isDirectory: true)
     }
 
+    /// Renames when both folders share a volume, which is instant, and copies when they do not.
+    nonisolated static func place(from source: URL, to destination: URL) throws {
+        let fm = FileManager.default
+        do {
+            try fm.moveItem(at: source, to: destination)
+        } catch {
+            do {
+                try fm.copyItem(at: source, to: destination)
+                try? fm.removeItem(at: source)
+            } catch let copyError {
+                try? fm.removeItem(at: destination)
+                throw copyError
+            }
+        }
+    }
+
+    /// Installs a finished download. The old installation is moved aside first and only removed once
+    /// the replacement is verified, so a failed update puts the previous version back.
     private func finalizeDownload(staging: URL, id: String, meta: WorkshopMetadata, existing: WorkshopItem?) throws -> (url: URL, files: Int, bytes: Int64) {
         let fm = FileManager.default
         guard !visibleChildren(staging).isEmpty else {
@@ -1061,34 +1200,54 @@ final class WorkshopStore: ObservableObject {
         }
         let name = singleMod ? sanitize(payload.lastPathComponent, fallback: id) : sanitize(meta.title, fallback: id)
 
-        // Replace the previous copy completely if it is still inside the downloads folder.
-        var destination: URL? = nil
-        if let ex = existing, isManagedPath(ex.folder) {
-            let exURL = URL(fileURLWithPath: ex.folder, isDirectory: true)
-            if fm.fileExists(atPath: exURL.path) { try fm.removeItem(at: exURL) }
-            if exURL.lastPathComponent != id { destination = exURL }   // old layouts used <id> as the folder name
+        // An update replaces the installation in the folder it already lives in; a new download goes into
+        // the folder set for its game.
+        let destination: URL
+        if let existing, fm.fileExists(atPath: existing.folder) {
+            destination = URL(fileURLWithPath: existing.folder, isDirectory: true)
+        } else {
+            destination = Self.availableURL(name: name, id: id, in: root(forGame: meta.appID))
         }
-        let dest = destination ?? uniqueDestination(name: name, id: id)
-        if fm.fileExists(atPath: dest.path) { try fm.removeItem(at: dest) }
+        let parent = destination.deletingLastPathComponent()
+        try fm.createDirectory(at: parent, withIntermediateDirectories: true)
 
-        let counts = Self.scan(folder: payload.path)
-        try fm.moveItem(at: payload, to: dest)
+        let backup = parent.appendingPathComponent(".modshelf-replacing-\(id)-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        let hadPrevious = fm.fileExists(atPath: destination.path)
+        if hadPrevious { try fm.moveItem(at: destination, to: backup) }
+
+        do {
+            try Self.place(from: payload, to: destination)
+        } catch {
+            if hadPrevious { try? fm.moveItem(at: backup, to: destination) }
+            throw NSError(domain: "ModShelf", code: 2,
+                          userInfo: [NSLocalizedDescriptionKey: "The new files could not be put in place: \(error.localizedDescription). The previous version was kept."])
+        }
+
+        let counts = Self.scan(folder: destination.path)
+        guard counts.exists, counts.count > 0 else {
+            try? fm.removeItem(at: destination)
+            if hadPrevious { try? fm.moveItem(at: backup, to: destination) }
+            throw NSError(domain: "ModShelf", code: 3,
+                          userInfo: [NSLocalizedDescriptionKey: "The download contained no files. The previous version was kept."])
+        }
+
+        if hadPrevious { try? fm.removeItem(at: backup) }
         try? fm.removeItem(at: staging)
 
+        let infoURL = destination.appendingPathComponent(modShelfInfoFileName)
         if UserDefaults.standard.object(forKey: "options.infoFile") as? Bool ?? true {
-            let text = infoText(meta: meta, id: id, destination: dest, files: counts.count, bytes: counts.bytes, existing: existing, singleMod: singleMod)
-            try? text.write(to: dest.appendingPathComponent(modShelfInfoFileName), atomically: true, encoding: .utf8)
+            let text = infoText(meta: meta, id: id, files: counts.count, bytes: counts.bytes, existing: existing, singleMod: singleMod)
+            try? text.write(to: infoURL, atomically: true, encoding: .utf8)
+        } else {
+            try? fm.removeItem(at: infoURL)
         }
-        return (dest, counts.count, counts.bytes)
+        return (destination, counts.count, counts.bytes)
     }
 
-    private func infoText(meta: WorkshopMetadata, id: String, destination: URL, files: Int, bytes: Int64, existing: WorkshopItem?, singleMod: Bool) -> String {
+    /// Starts with the first real detail line: the old "ModShelf Information" heading is gone.
+    private func infoText(meta: WorkshopMetadata, id: String, files: Int, bytes: Int64, existing: WorkshopItem?, singleMod: Bool) -> String {
         let stamp = DateFormatter(); stamp.dateFormat = "d MMM yyyy, h:mm a"
-        let version = modShelfVersion
-        let build = modShelfBuild
-        var lines: [String] = ["ModShelf Information"]
-        lines.append("")
-        lines.append("Title: \(meta.title)")
+        var lines: [String] = ["Title: \(meta.title)"]
         lines.append("Workshop ID: \(id)")
         lines.append("Workshop page: https://steamcommunity.com/sharedfiles/filedetails/?id=\(id)")
         if let game = meta.gameName ?? existing?.gameName {
@@ -1102,10 +1261,10 @@ final class WorkshopStore: ObservableObject {
         if meta.updatedAt > 0 { lines.append("Last updated on Workshop: \(Fmt.date(unix: meta.updatedAt))") }
         lines.append("")
         lines.append("Installed on: \(stamp.string(from: Date()))")
-        lines.append("Installed with: ModShelf \(version) (build \(build))")
+        lines.append("Installed with: ModShelf \(modShelfVersion) (build \(modShelfBuild))")
         lines.append("Size: \(Fmt.bytes(bytes)) - Files: \(files)")
         lines.append("")
-        lines.append("This file is written by ModShelf and is safe to delete, turn future info files off in ModShelf's options.")
+        lines.append("This file is written by ModShelf and is safe to delete or leave as is, turn future info files off in ModShelf's options.")
         return lines.joined(separator: "\n")
     }
 
@@ -1124,6 +1283,10 @@ final class WorkshopStore: ObservableObject {
         return (true, count, bytes)
     }
 
+    nonisolated static func folderName(_ path: String) -> String {
+        URL(fileURLWithPath: path, isDirectory: true).lastPathComponent
+    }
+
     // MARK: library actions
 
     func remove(_ item: WorkshopItem) {
@@ -1136,6 +1299,123 @@ final class WorkshopStore: ObservableObject {
             pendingDelete = item; showDeleteConfirmation = true
         } else { remove(item) }
     }
+
+    /// Mods for `appID` that are installed somewhere other than `root`, e.g. after the game's folder changed.
+    func modsOutside(_ root: URL, forGame appID: String) -> [WorkshopItem] {
+        library.filter { item in
+            guard item.appID == appID else { return false }
+            let parent = URL(fileURLWithPath: item.folder, isDirectory: true).deletingLastPathComponent()
+            return parent.path != root.path
+        }
+    }
+
+    func move(_ ids: [String], toPicked url: URL, onDone: (([String]) -> Void)? = nil) {
+        let started = url.startAccessingSecurityScopedResource()
+        move(ids, toRoot: url, label: Self.displayName(url), scope: started ? url : nil, onDone: onDone)
+    }
+
+    /// Moves whole installations, keeping each mod's folder name. Only mods whose files really moved get
+    /// their recorded path changed, so a failure never leaves a library entry pointing at nothing.
+    func move(_ ids: [String], toRoot root: URL, label: String, scope: URL? = nil, onDone: (([String]) -> Void)? = nil) {
+        let wanted = Set(ids)
+        guard !wanted.isEmpty else { return }
+        let entries = library.filter { wanted.contains($0.id) }.map { (id: $0.id, folder: $0.folder, title: $0.displayTitle) }
+        guard !entries.isEmpty else { scope?.stopAccessingSecurityScopedResource(); return }
+        do {
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        } catch {
+            scope?.stopAccessingSecurityScopedResource()
+            errorMessage = "Couldn't use that folder: \(error.localizedDescription)"
+            Haptics.error()
+            return
+        }
+        guard Self.canWrite(into: root) else {
+            scope?.stopAccessingSecurityScopedResource()
+            errorMessage = "ModShelf can't write to \(label). Pick a folder it is allowed to save into."
+            Haptics.error()
+            return
+        }
+        operationMessage = "Moving \(entries.count) mod\(entries.count == 1 ? "" : "s") to \(label)…"
+
+        Task { @MainActor in
+            let outcome = await Task.detached(priority: .userInitiated) { () -> (moved: [(String, String)], failed: [String]) in
+                var moved: [(String, String)] = []
+                var failed: [String] = []
+                let fm = FileManager.default
+                for entry in entries {
+                    let source = URL(fileURLWithPath: entry.folder, isDirectory: true)
+                    guard fm.fileExists(atPath: source.path) else {
+                        failed.append("\(entry.title) (files missing)")
+                        continue
+                    }
+                    if source.deletingLastPathComponent().path == root.path { continue }
+                    let destination = Self.availableURL(name: source.lastPathComponent, id: entry.id, in: root)
+                    do {
+                        try Self.place(from: source, to: destination)
+                        moved.append((entry.id, destination.path))
+                    } catch {
+                        failed.append("\(entry.title) (\(error.localizedDescription))")
+                    }
+                }
+                return (moved, failed)
+            }.value
+
+            scope?.stopAccessingSecurityScopedResource()
+            var movedIDs: [String] = []
+            for (id, path) in outcome.moved {
+                guard let index = self.library.firstIndex(where: { $0.id == id }) else { continue }
+                self.library[index].folder = path
+                self.library[index].filesBroken = false
+                movedIDs.append(id)
+            }
+            if !movedIDs.isEmpty { self.saveLibrary(); self.refreshLibraryBytes() }
+            onDone?(movedIDs)
+            if outcome.failed.isEmpty {
+                operationMessage = movedIDs.isEmpty
+                    ? "Those mods are already in \(label)."
+                    : "Moved \(movedIDs.count) mod\(movedIDs.count == 1 ? "" : "s") to \(label)."
+                Haptics.success()
+            } else if movedIDs.isEmpty {
+                errorMessage = "Nothing was moved. \(outcome.failed.joined(separator: ", "))"
+                Haptics.error()
+            } else {
+                errorMessage = "Moved \(movedIDs.count), but \(outcome.failed.count) failed: \(outcome.failed.joined(separator: ", "))"
+                Haptics.error()
+            }
+        }
+    }
+
+    /// Deletes several installations. An entry stays in the library when its files can't be removed.
+    func remove(_ ids: [String]) {
+        guard !ids.isEmpty else { return }
+        let wanted = Set(ids)
+        let entries = library.filter { wanted.contains($0.id) }
+        var removed: [String] = []
+        var failed: [String] = []
+        for item in entries {
+            do {
+                if FileManager.default.fileExists(atPath: item.folder) {
+                    try FileManager.default.removeItem(atPath: item.folder)
+                }
+                removed.append(item.id)
+            } catch {
+                failed.append("\(item.displayTitle) (\(error.localizedDescription))")
+            }
+        }
+        if !removed.isEmpty {
+            library.removeAll { removed.contains($0.id) }
+            saveLibrary()
+            refreshLibraryBytes()
+        }
+        if failed.isEmpty {
+            operationMessage = "Deleted \(removed.count) mod\(removed.count == 1 ? "" : "s")."
+            Haptics.success()
+        } else {
+            errorMessage = "Couldn't delete \(failed.count): \(failed.joined(separator: ", "))"
+            Haptics.error()
+        }
+    }
+
     func toggleFavourite(_ item: WorkshopItem) {
         guard let i = library.firstIndex(where: { $0.id == item.id }) else { return }
         library[i].isFavourite.toggle()
@@ -1192,7 +1472,9 @@ final class WorkshopStore: ObservableObject {
             let scan = await Task.detached(priority: .utility) { Self.scan(folder: folder) }.value
             guard scan.exists, scan.count > 0 else {
                 applyCheck(item.id, broken: true)
-                operationMessage = "\(item.displayTitle) is missing its files. Download it again."
+                operationMessage = scan.exists
+                    ? "\(item.displayTitle) has no files left in \(Self.folderName(folder)). Download it again."
+                    : "\(item.displayTitle) isn't in \(Self.folderName(folder)) any more. It was moved or deleted outside ModShelf."
                 return
             }
             guard let meta = await SteamMeta.fetch(id: item.id, includePage: false), meta.fileSize > 0 else {
@@ -1333,8 +1615,17 @@ final class WorkshopStore: ObservableObject {
         do {
             try FileManager.default.createDirectory(at: temporaryPath, withIntermediateDirectories: true)
             for url in try FileManager.default.contentsOfDirectory(at: temporaryPath, includingPropertiesForKeys: nil) { try FileManager.default.removeItem(at: url) }
-            // Leftover partial downloads from interrupted sessions
-            for url in visibleAndHidden(downloadsRoot) where url.lastPathComponent.hasPrefix(".partial-") { try? FileManager.default.removeItem(at: url) }
+            // Leftover partial downloads and replaced copies from interrupted sessions, in every folder
+            // ModShelf writes to.
+            loadGameFolders()
+            var roots = [downloadsRoot]
+            roots.append(contentsOf: gameRoots.values)
+            for root in roots {
+                for url in visibleAndHidden(root)
+                where url.lastPathComponent.hasPrefix(".partial-") || url.lastPathComponent.hasPrefix(".modshelf-replacing-") {
+                    try? FileManager.default.removeItem(at: url)
+                }
+            }
             status = "Temporary files cleared"
             operationMessage = "Temporary files cleared."
         } catch { errorMessage = "Could not clear temporary files: \(error.localizedDescription)" }
@@ -1605,7 +1896,13 @@ struct ContentView: View {
     @State private var pendingDeleteItem: WorkshopItem?
     @State private var tabCollapsed = false
     @State private var scrollAnchor: CGFloat = 0
-    @State private var showFolderPicker = false
+    @State private var folderSheet: FolderSheet?
+    @State private var moveSheetOpen = false
+    @State private var selecting = false
+    @State private var selection: Set<String> = []
+    @State private var confirmBulkDelete = false
+    @State private var pendingRelocate: RelocateRequest?
+    @State private var expandedMedia: MediaItem?
     @State private var selectedGame: String? = nil
     @State private var selectedTag: String? = nil
     @State private var favouritesOnly = false
@@ -1663,6 +1960,69 @@ struct ContentView: View {
         }
     }
 
+    /// Every game that gets a folder row: the ones in the library plus any game with a chosen folder.
+    private var gamesForFolders: [(id: String, name: String)] {
+        var map: [String: String] = [:]
+        for game in installedGames { map[game.id] = game.name }
+        for id in store.customGameFolders.keys where map[id] == nil {
+            map[id] = store.gameDisplayName(id)
+        }
+        return map.map { (id: $0.key, name: $0.value) }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    private var moveDestinations: [MoveDestination] {
+        var list: [MoveDestination] = [
+            MoveDestination(id: "shared", title: "Shared mod folder", detail: store.folderLabel)
+        ]
+        for game in gamesForFolders {
+            list.append(MoveDestination(id: game.id, title: "\(game.name) folder",
+                                        detail: store.customGameFolders[game.id] ?? store.folderLabel))
+        }
+        return list
+    }
+
+    private func toggleSelection(_ item: WorkshopItem) {
+        Haptics.select()
+        if selection.contains(item.id) { selection.remove(item.id) } else { selection.insert(item.id) }
+        if selection.isEmpty { selecting = false }
+    }
+
+    private func selectAllVisible() {
+        selection.formUnion(filteredLibrary.map(\.id))
+        Haptics.select()
+    }
+
+    /// Bulk delete respects the same confirmation setting as deleting one mod.
+    private func requestDeleteSelected() {
+        guard !selection.isEmpty else { return }
+        if confirmDelete { confirmBulkDelete = true } else { deleteSelected() }
+    }
+
+    private func deleteSelected() {
+        guard !selection.isEmpty else { return }
+        store.remove(Array(selection))
+        let liveIDs = Set(store.library.map(\.id))
+        selection = selection.intersection(liveIDs)
+        if selection.isEmpty { selecting = false }
+        confirmBulkDelete = false
+    }
+
+    /// After a folder change, mods still in the old place are offered a move rather than silently left behind.
+    private func offerRelocation(for appID: String) {
+        let root = store.root(forGame: appID)
+        let items = store.modsOutside(root, forGame: appID)
+        guard !items.isEmpty else { return }
+        pendingRelocate = RelocateRequest(gameName: store.gameDisplayName(appID),
+                                          root: root,
+                                          folderName: WorkshopStore.displayName(root),
+                                          ids: items.map(\.id))
+    }
+
+    private func destinationRoot(_ destination: MoveDestination) -> URL {
+        destination.id == "shared" ? store.root(forGame: nil) : store.root(forGame: destination.id)
+    }
+
     // MARK: body
 
     var body: some View {
@@ -1678,11 +2038,45 @@ struct ContentView: View {
                          onCancel: { store.revealFolderURL = nil },
                          startURL: store.revealFolderURL)
         }
-        .sheet(isPresented: $showFolderPicker) {
-            FolderPicker(onPick: { url in
-                showFolderPicker = false
-                store.setCustomFolder(url)
-            }, onCancel: { showFolderPicker = false }, startURL: store.currentRootURL)
+        .sheet(item: $folderSheet) { sheet in
+            switch sheet {
+            case .shared:
+                FolderPicker(onPick: { url in
+                    folderSheet = nil
+                    store.setFolder(url, for: nil)
+                }, onCancel: { folderSheet = nil }, startURL: store.currentRootURL)
+            case .game(let appID):
+                FolderPicker(onPick: { url in
+                    folderSheet = nil
+                    store.setFolder(url, for: appID)
+                    offerRelocation(for: appID)
+                }, onCancel: { folderSheet = nil }, startURL: store.root(forGame: appID))
+            case .moveDestination:
+                FolderPicker(onPick: { url in
+                    folderSheet = nil
+                    store.move(Array(selection), toPicked: url) { moved in
+                        selection.subtract(moved)
+                        if selection.isEmpty { selecting = false }
+                    }
+                }, onCancel: { folderSheet = nil }, startURL: store.currentRootURL)
+            }
+        }
+        .sheet(isPresented: $moveSheetOpen) {
+            MoveDestinationSheet(destinations: moveDestinations,
+                                 onPick: { destination in
+                                     moveSheetOpen = false
+                                     let ids = Array(selection)
+                                     guard !ids.isEmpty else { return }
+                                     store.move(ids, toRoot: destinationRoot(destination), label: destination.title) { moved in
+                                         selection.subtract(moved)
+                                         if selection.isEmpty { selecting = false }
+                                     }
+                                 },
+                                 onChooseFolder: {
+                                     moveSheetOpen = false
+                                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { folderSheet = .moveDestination }
+                                 },
+                                 onCancel: { moveSheetOpen = false })
         }
         .onChange(of: store.shareURL) { showShare = $0 != nil }
         .onChange(of: confirmDelete) { UserDefaults.standard.set($0, forKey: "options.confirmDelete") }
@@ -1701,6 +2095,16 @@ struct ContentView: View {
         .onChange(of: store.library.count) { _ in
             if let g = selectedGame, !installedGames.contains(where: { $0.id == g }) { selectedGame = nil }
             if let t = selectedTag, !installedTags.contains(t) { selectedTag = nil }
+            // A selection can never keep mods that are no longer in the library.
+            let liveIDs = Set(store.library.map(\.id))
+            selection = selection.intersection(liveIDs)
+            if selection.isEmpty { selecting = false }
+            if let request = pendingRelocate {
+                let remaining = request.ids.filter { liveIDs.contains($0) }
+                pendingRelocate = remaining.isEmpty ? nil
+                    : RelocateRequest(gameName: request.gameName, root: request.root,
+                                      folderName: request.folderName, ids: remaining)
+            }
         }
         .task { store.runLaunchChecks() }
     }
@@ -1806,6 +2210,41 @@ struct ContentView: View {
                                     confirm: { store.remove(item); store.showDeleteConfirmation = false },
                                     cancel: { store.showDeleteConfirmation = false })
                 .padding(30).zIndex(11)
+        }
+        if confirmBulkDelete {
+            Color.black.opacity(0.38).ignoresSafeArea().contentShape(Rectangle())
+                .onTapGesture { confirmBulkDelete = false }.zIndex(14)
+            ConfirmPopup(heading: "Delete \(selection.count) mod\(selection.count == 1 ? "" : "s")?",
+                         message: "Their downloaded files will be removed from this iPhone. You can download them again later.",
+                         actionTitle: "Delete",
+                         confirm: {
+                             deleteSelected()
+                         },
+                         cancel: { confirmBulkDelete = false })
+                .padding(30).zIndex(15)
+        }
+        if let request = pendingRelocate {
+            Color.black.opacity(0.38).ignoresSafeArea().contentShape(Rectangle())
+                .onTapGesture { pendingRelocate = nil }.zIndex(16)
+            ConfirmPopup(heading: "Move \(request.ids.count) mod\(request.ids.count == 1 ? "" : "s")?",
+                         message: "Your \(request.gameName) mods are still in the old folder. New downloads now go to \(request.folderName). ModShelf can move the existing mods there now, or leave them where they are.",
+                         actionTitle: "Move them",
+                         tint: .accentColor,
+                         confirm: {
+                             let ids = request.ids
+                             let root = request.root
+                             pendingRelocate = nil
+                             store.move(ids, toRoot: root, label: request.folderName)
+                         },
+                         cancel: { pendingRelocate = nil })
+                .padding(30).zIndex(17)
+        }
+        if let media = expandedMedia {
+            ExpandedMediaView(media: media) {
+                withAnimation(.easeOut(duration: 0.18)) { expandedMedia = nil }
+            }
+            .transition(.opacity)
+            .zIndex(20)
         }
     }
 
@@ -1998,7 +2437,8 @@ struct ContentView: View {
         VStack(spacing: 8) {
             HStack(spacing: 10) {
                 Image(systemName: "link").foregroundStyle(.secondary)
-                TextField("Workshop URL or ID", text: $store.input)
+                TextField("", text: $store.input)
+                    .accessibilityLabel("Workshop URL or ID")
                     .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL).submitLabel(.go)
                     .onSubmit { submitLookup() }
                     .onChange(of: store.input) { _ in if inputWasSubmitted { inputWasSubmitted = false } }
@@ -2130,7 +2570,10 @@ struct ContentView: View {
         let media = mediaList(for: item)
         return VStack(alignment: .leading, spacing: 11) {
             if !media.isEmpty {
-                MediaCarousel(media: media).id(media.map { $0.id }.joined(separator: "|"))
+                MediaCarousel(media: media, onExpand: { item in
+                    withAnimation(.easeOut(duration: 0.18)) { expandedMedia = item }
+                })
+                .id(media.map { $0.id }.joined(separator: "|"))
             }
             Text(item.title).font(.title3.bold()).fixedSize(horizontal: false, vertical: true)
             infoRow(item)
@@ -2174,11 +2617,9 @@ struct ContentView: View {
                     Image(systemName: "safari").font(.system(size: 16, weight: .semibold))
                     VStack(alignment: .leading, spacing: 1) {
                         Text("Workshop").font(.system(size: 15, weight: .semibold))
-                        if showIDs {
-                            Text("ID: \(item.id)")
-                                .font(.system(size: 10, weight: .medium, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                        }
+                        Text("ID: \(item.id)")
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.secondary)
                     }
                 }
                 .foregroundStyle(Color.accentColor)
@@ -2215,6 +2656,7 @@ struct ContentView: View {
     }
 
     private var librarySubtitle: String {
+        if selecting { return "\(selection.count) selected" }
         if showingHistory {
             let failed = store.history.filter { $0.result == "Failed" }.count
             return "\(store.history.count) attempts · \(failed) failed"
@@ -2269,10 +2711,22 @@ struct ContentView: View {
 
     private var moreMenu: some View {
         Menu {
-            let pending = store.library.filter { $0.updateAvailable }.count
-            Button { store.updateAll(); selectedTab = 0 } label: { Label("Update all (\(pending))", systemImage: "arrow.down.circle") }
-                .disabled(pending == 0 || store.isBusy)
-            Button { store.exportAll() } label: { Label("Export all as ZIP", systemImage: "square.and.arrow.up") }
+            if selecting {
+                Button { selectAllVisible() } label: { Label("Select all", systemImage: "checkmark.circle") }
+                Button { selection.removeAll() } label: { Label("Deselect all", systemImage: "circle.dashed") }
+                Divider()
+                Button { moveSheetOpen = true } label: { Label("Move selected (\(selection.count))", systemImage: "folder") }
+                    .disabled(selection.isEmpty)
+                Button(role: .destructive) { requestDeleteSelected() } label: {
+                    Label("Delete selected (\(selection.count))", systemImage: "trash")
+                }
+                .disabled(selection.isEmpty)
+            } else {
+                let pending = store.library.filter { $0.updateAvailable }.count
+                Button { store.updateAll(); selectedTab = 0 } label: { Label("Update all (\(pending))", systemImage: "arrow.down.circle") }
+                    .disabled(pending == 0 || store.isBusy)
+                Button { store.exportAll() } label: { Label("Export all as ZIP", systemImage: "square.and.arrow.up") }
+            }
         } label: { iconLabel("ellipsis") }
     }
 
@@ -2341,36 +2795,61 @@ struct ContentView: View {
     }
 
     private var filterRow: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                if !installedGames.isEmpty {
-                    Menu {
-                        Button { Haptics.select(); selectedGame = nil; selectedTag = nil } label: {
-                            if selectedGame == nil { Label("All games", systemImage: "checkmark") } else { Text("All games") }
-                        }
-                        ForEach(installedGames, id: \.id) { game in
-                            Button { Haptics.select(); selectedGame = game.id; selectedTag = nil } label: {
-                                if selectedGame == game.id { Label(game.name, systemImage: "checkmark") } else { Text(game.name) }
+        HStack(spacing: 8) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 9) {
+                    if !installedGames.isEmpty {
+                        Menu {
+                            Button { Haptics.select(); selectedGame = nil; selectedTag = nil } label: {
+                                if selectedGame == nil { Label("All games", systemImage: "checkmark") } else { Text("All games") }
                             }
-                        }
-                    } label: { FilterPill(symbol: "gamecontroller.fill", title: selectedGameName ?? "All games", active: selectedGame != nil) }
-                }
-                if !installedTags.isEmpty {
-                    Menu {
-                        Button { Haptics.select(); selectedTag = nil } label: {
-                            if selectedTag == nil { Label("All tags", systemImage: "checkmark") } else { Text("All tags") }
-                        }
-                        ForEach(installedTags, id: \.self) { tag in
-                            Button { Haptics.select(); selectedTag = tag } label: {
-                                if selectedTag == tag { Label(tag, systemImage: "checkmark") } else { Text(tag) }
+                            ForEach(installedGames, id: \.id) { game in
+                                Button { Haptics.select(); selectedGame = game.id; selectedTag = nil } label: {
+                                    if selectedGame == game.id { Label(game.name, systemImage: "checkmark") } else { Text(game.name) }
+                                }
                             }
-                        }
-                    } label: { FilterPill(symbol: "tag.fill", title: selectedTag ?? "Tags", active: selectedTag != nil) }
+                        } label: { FilterPill(symbol: "gamecontroller.fill", title: selectedGameName ?? "All games", active: selectedGame != nil) }
+                    }
+                    if !installedTags.isEmpty {
+                        Menu {
+                            Button { Haptics.select(); selectedTag = nil } label: {
+                                if selectedTag == nil { Label("All tags", systemImage: "checkmark") } else { Text("All tags") }
+                            }
+                            ForEach(installedTags, id: \.self) { tag in
+                                Button { Haptics.select(); selectedTag = tag } label: {
+                                    if selectedTag == tag { Label(tag, systemImage: "checkmark") } else { Text(tag) }
+                                }
+                            }
+                        } label: { FilterPill(symbol: "tag.fill", title: selectedTag ?? "Tags", active: selectedTag != nil) }
+                    }
                 }
+                .padding(.leading, 14)
             }
-            .padding(.horizontal, 14)
+            selectPill.padding(.trailing, 14)
         }
         .padding(.bottom, 8)
+    }
+
+    /// Selection lives beside the tags, so bulk actions are one tap away without a second menu.
+    private var selectPill: some View {
+        Button {
+            Haptics.select()
+            withAnimation(.easeOut(duration: 0.18)) {
+                selecting.toggle()
+                if !selecting { selection.removeAll() }
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: selecting ? "checkmark.circle.fill" : "checkmark.circle")
+                    .font(.system(size: 12, weight: .semibold))
+                Text(selecting ? "Done" : "Select").font(.system(size: 13, weight: .semibold)).lineLimit(1)
+            }
+            .foregroundStyle(selecting ? Color.white : Color.primary)
+            .padding(.horizontal, 11).padding(.vertical, 7)
+            .background(Capsule().fill(selecting ? Color.accentColor : Color(uiColor: .secondarySystemGroupedBackground)))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(selecting ? "Finish selecting" : "Select mods")
     }
 
     // MARK: grid + list
@@ -2382,7 +2861,7 @@ struct ContentView: View {
                 LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 16) {
                     ForEach(items) { item in gridCard(item) }
                 }
-                .padding(.horizontal, 14).padding(.top, 2).padding(.bottom, tabBarReserve)
+                .padding(.horizontal, 14).padding(.top, 0).padding(.bottom, tabBarReserve)
             }
         }
         .coordinateSpace(name: "scroll")
@@ -2391,7 +2870,8 @@ struct ContentView: View {
 
     private func listContent(_ items: [WorkshopItem]) -> some View {
         List {
-            ScrollSpy(onChange: handleScroll).listRowInsets(EdgeInsets()).listRowBackground(Color.clear)
+            ScrollSpy(onChange: handleScroll)
+                .listRowInsets(EdgeInsets()).listRowBackground(Color.clear).listRowSeparator(.hidden)
             ForEach(items) { item in
                 listRow(item)
                     .listRowInsets(EdgeInsets())
@@ -2414,7 +2894,11 @@ struct ContentView: View {
                         .tint(.yellow)
                     }
             }
+            // Keeps the last row clear of the tab bar.
+            Color.clear.frame(height: tabBarReserve)
+                .listRowInsets(EdgeInsets()).listRowBackground(Color.clear).listRowSeparator(.hidden)
         }
+        .environment(\.defaultMinListRowHeight, 0)
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
         .background(Color(uiColor: .systemGroupedBackground))
@@ -2451,19 +2935,37 @@ struct ContentView: View {
         .accessibilityLabel("Actions for \(item.displayTitle)")
     }
 
+    private func selectionBadge(_ picked: Bool) -> some View {
+        Image(systemName: picked ? "checkmark.circle.fill" : "circle")
+            .font(.system(size: 21, weight: .bold))
+            .foregroundStyle(picked ? Color.accentColor : Color.white)
+            .shadow(color: .black.opacity(0.45), radius: 2)
+            .accessibilityHidden(true)
+    }
+
     private func gridCard(_ item: WorkshopItem) -> some View {
         let line = dateLine(item)
+        let picked = selecting && selection.contains(item.id)
+        let tap = {
+            if selecting { toggleSelection(item) } else { Haptics.tap(); popupItem = item }
+        }
         return VStack(alignment: .leading, spacing: 7) {
-            Button { Haptics.tap(); popupItem = item } label: {
+            Button(action: tap) {
                 Color.clear.aspectRatio(1, contentMode: .fit)
-                    .overlay(CachedImage(urlString: item.imageURL, fill: true, maxPixel: 520))
+                    .overlay(CachedImage(urlString: item.imageURL, fill: true, maxPixel: 520).allowsHitTesting(false))
                     .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(Color.accentColor, lineWidth: picked ? 3 : 0))
             }
             .buttonStyle(.plain)
-            .overlay(alignment: .topLeading) { favouriteStar(item, size: 15).padding(8) }
-            .overlay(alignment: .topTrailing) { dotsButton(item, circle: 29).padding(8) }
+            .overlay(alignment: .topLeading) {
+                if selecting { selectionBadge(picked).padding(8) } else { favouriteStar(item, size: 15).padding(8) }
+            }
+            .overlay(alignment: .topTrailing) {
+                if !selecting { dotsButton(item, circle: 29).padding(8) }
+            }
 
-            Button { Haptics.tap(); popupItem = item } label: {
+            Button(action: tap) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(item.displayTitle).font(.system(size: 14, weight: .semibold)).lineLimit(2).multilineTextAlignment(.leading)
                     HStack(spacing: 6) {
@@ -2496,12 +2998,19 @@ struct ContentView: View {
 
     private func listRow(_ item: WorkshopItem) -> some View {
         let line = dateLine(item)
+        let picked = selecting && selection.contains(item.id)
+        let tap = {
+            if selecting { toggleSelection(item) } else { Haptics.tap(); popupItem = item }
+        }
         return HStack(spacing: 12) {
-            Button { Haptics.tap(); popupItem = item } label: {
+            if selecting { selectionBadge(picked) }
+            Button(action: tap) {
                 HStack(spacing: 12) {
                     Color.clear.frame(width: 84, height: 84)
-                        .overlay(CachedImage(urlString: item.imageURL, fill: true, maxPixel: 300))
+                        .overlay(CachedImage(urlString: item.imageURL, fill: true, maxPixel: 300).allowsHitTesting(false))
                         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(Color.accentColor, lineWidth: picked ? 3 : 0))
                     VStack(alignment: .leading, spacing: 4) {
                         Text(item.displayTitle).font(.system(size: 15, weight: .semibold)).lineLimit(2).multilineTextAlignment(.leading)
                         HStack(spacing: 6) {
@@ -2522,9 +3031,11 @@ struct ContentView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            VStack(spacing: 8) {
-                navCircle(item.isFavourite ? "star.fill" : "star") { store.toggleFavourite(item) }
-                navCircle("ellipsis") { contextItem = item }
+            if !selecting {
+                VStack(spacing: 8) {
+                    navCircle(item.isFavourite ? "star.fill" : "star") { store.toggleFavourite(item) }
+                    navCircle("ellipsis") { contextItem = item }
+                }
             }
         }
         .padding(.horizontal, 15).padding(.vertical, 10)
@@ -2697,12 +3208,12 @@ struct ContentView: View {
                         divider
                         toggleRow("Write info file into each mod", symbol: "doc.text", isOn: $infoFile)
                         divider
-                        Button { Haptics.tap(); showFolderPicker = true } label: {
-                            rowContent("Download folder", symbol: "folder", detail: store.folderLabel)
+                        Button { Haptics.tap(); folderSheet = .shared } label: {
+                            rowContent("Shared mod folder", symbol: "folder", detail: store.folderLabel)
                         }.buttonStyle(.plain)
                         if store.usingCustomFolder {
                             divider
-                            Button { Haptics.tap(); store.resetCustomFolder() } label: {
+                            Button { Haptics.tap(); store.resetFolder(for: nil) } label: {
                                 rowContent("Reset to default folder", symbol: "arrow.uturn.backward", detail: nil, tint: .accentColor)
                             }.buttonStyle(.plain)
                         }
@@ -2710,6 +3221,42 @@ struct ContentView: View {
                         Button { Haptics.tap(); store.clearTemporaryFiles() } label: {
                             rowContent("Clear temporary files", symbol: "trash.slash", detail: nil)
                         }.buttonStyle(.plain)
+                    }
+
+                    settingsGroup("Game folders") {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Each game can keep its mods in its own folder. New downloads for a game go there; mods you already have stay where they are until you move them.")
+                                .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 15).padding(.vertical, 11)
+                        ForEach(gamesForFolders, id: \.id) { game in
+                            divider
+                            HStack(spacing: 8) {
+                                Button { Haptics.tap(); folderSheet = .game(game.id) } label: {
+                                    rowContent(game.name, symbol: "folder",
+                                               detail: store.customGameFolders[game.id] ?? "Shared folder")
+                                }.buttonStyle(.plain)
+                                if store.customGameFolders[game.id] != nil {
+                                    Button { Haptics.tap(); store.resetFolder(for: game.id) } label: {
+                                        Image(systemName: "arrow.uturn.backward")
+                                            .font(.system(size: 13, weight: .semibold)).foregroundStyle(.secondary)
+                                            .frame(width: 30, height: 30)
+                                            .background(Circle().fill(Color.secondary.opacity(0.12)))
+                                    }
+                                    .buttonStyle(.plain)
+                                    .accessibilityLabel("Reset \(game.name)'s folder")
+                                    .padding(.trailing, 12)
+                                }
+                            }
+                        }
+                        if gamesForFolders.isEmpty {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("Games appear here once you have downloaded a mod for them.").font(.system(size: 13)).foregroundStyle(.secondary)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 15).padding(.vertical, 11)
+                        }
                     }
 
                     settingsGroup("Steam account") {
@@ -2835,6 +3382,11 @@ struct ContentView: View {
                             Text(store.isAuthenticated ? "Connected to Steam" : "Sign in to Steam").font(.title3.bold())
                             Text(store.isAuthenticated ? "Your Steam session is active." : "Your password is stored in the Keychain on this device only.")
                                 .font(.footnote).foregroundStyle(.secondary)
+                            if !store.isAuthenticated {
+                                Text("ModShelf signs in so Steam will serve Workshop downloads to your own account. Your details go to Steam and nowhere else.")
+                                    .font(.footnote).foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
                         }
                     }
                     if !store.isAuthenticated {
@@ -3043,6 +3595,7 @@ struct ConfirmPopup: View {
     let heading: String
     let message: String
     let actionTitle: String
+    var tint: Color = .red
     let confirm: () -> Void
     let cancel: () -> Void
     var body: some View {
@@ -3058,7 +3611,7 @@ struct ConfirmPopup: View {
                 Button { Haptics.medium(); confirm() } label: {
                     Text(actionTitle).font(.system(size: 16, weight: .semibold)).foregroundStyle(.white)
                         .frame(maxWidth: .infinity).frame(height: 44)
-                        .background(RoundedRectangle(cornerRadius: 12).fill(Color.red))
+                        .background(RoundedRectangle(cornerRadius: 12).fill(tint))
                 }.buttonStyle(.plain)
             }
         }
@@ -3138,7 +3691,9 @@ struct IDChip: View {
 
 struct MediaCarousel: View {
     let media: [MediaItem]
+    var onExpand: (MediaItem) -> Void = { _ in }
     @State private var index = 0
+
     var body: some View {
         VStack(spacing: 6) {
             TabView(selection: $index) {
@@ -3146,11 +3701,27 @@ struct MediaCarousel: View {
                     Group {
                         switch item {
                         case .image(let url):
-                            CachedImage(urlString: url, fill: false, maxPixel: 1000, isDownloadPreview: true)
-                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            Button { Haptics.tap(); onExpand(item) } label: {
+                                CachedImage(urlString: url, fill: false, maxPixel: 1000, isDownloadPreview: true)
+                                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Open image larger")
                         case .video(let id):
-                            YouTubeView(videoID: id)
+                            YouTubePlayerView(videoID: id)
                                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                .overlay(alignment: .topTrailing) {
+                                    Button { Haptics.tap(); onExpand(item) } label: {
+                                        Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                            .font(.system(size: 11, weight: .bold)).foregroundStyle(.white)
+                                            .frame(width: 28, height: 28)
+                                            .background(Circle().fill(Color.black.opacity(0.55)))
+                                    }
+                                    .buttonStyle(.plain)
+                                    .padding(8)
+                                    .accessibilityLabel("Open video larger")
+                                }
                         }
                     }
                     .padding(.horizontal, 2)
@@ -3171,13 +3742,122 @@ struct MediaCarousel: View {
     }
 }
 
-/// Embeds a YouTube video using the player's own controls (mute, quality, fullscreen).
-/// Links inside the player, such as "Watch on YouTube", open in the YouTube app or Safari instead of this page.
-struct YouTubeView: UIViewRepresentable {
-    let videoID: String
+/// Tapped media opens here, over a dark blurred backdrop that still shows the screen underneath.
+struct ExpandedMediaView: View {
+    let media: MediaItem
+    let onClose: () -> Void
+    @AppStorage("options.gifDownloads") private var gifDownloads = true
+    @State private var image: UIImage?
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack {
+                Rectangle().fill(.ultraThinMaterial)
+                    .overlay(Color.black.opacity(0.45))
+                    .ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .onTapGesture { onClose() }
+                content(in: geo.size)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .ignoresSafeArea()
+        .task(id: media.id) { await load() }
+    }
+
+    @ViewBuilder
+    private func content(in size: CGSize) -> some View {
+        let maxWidth = max(160, size.width - 32)
+        let maxHeight = max(160, size.height * 0.7)
+        switch media {
+        case .video(let id):
+            YouTubePlayerView(videoID: id, fullSize: true)
+                .frame(width: maxWidth, height: min(maxWidth * 9 / 16, maxHeight))
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .shadow(color: .black.opacity(0.4), radius: 20, y: 8)
+        case .image:
+            imageBody(maxWidth: maxWidth, maxHeight: maxHeight)
+        }
+    }
+
+    private func imageFrame(maxWidth: CGFloat, maxHeight: CGFloat) -> (width: CGFloat, height: CGFloat) {
+        let ratio = aspectRatio
+        let wide = ratio >= 1.2
+        // Square images and GIFs grow to about 1.5x their carousel size; wide ones to about twice its width.
+        var width = wide ? maxWidth : min(maxWidth, maxHeight)
+        var height = width / ratio
+        if height > maxHeight { height = maxHeight; width = height * ratio }
+        return (width, height)
+    }
+
+    private func imageBody(maxWidth: CGFloat, maxHeight: CGFloat) -> some View {
+        let frame = imageFrame(maxWidth: maxWidth, maxHeight: maxHeight)
+        return ZStack {
+            if let image {
+                if image.images != nil && gifDownloads {
+                    AnimatedUIImageView(image: image, fill: false)
+                } else {
+                    Image(uiImage: image).resizable().scaledToFit()
+                }
+            } else {
+                ProgressView().tint(.white)
+            }
+        }
+        .frame(width: frame.width, height: frame.height)
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .shadow(color: .black.opacity(0.4), radius: 20, y: 8)
+    }
+
+    private var aspectRatio: CGFloat {
+        guard let image, image.size.width > 0, image.size.height > 0 else { return 16.0 / 9.0 }
+        return image.size.width / image.size.height
+    }
+
+    private func load() async {
+        guard case .image(let urlString) = media, let url = URL(string: urlString) else { return }
+        if let hit = ImageStore.shared.cached(url, animate: gifDownloads) { image = hit; return }
+        image = await ImageStore.shared.load(url, maxPixel: 1600, animate: gifDownloads)
+    }
+}
+
+/// One live YouTube player, kept between the carousel and the expanded preview, so enlarging a video
+/// that is already playing moves the player instead of loading it again.
+final class YouTubePlayers {
+    static let shared = YouTubePlayers()
     private static let origin = "https://modshelf.app"
 
-    func makeUIView(context: Context) -> WKWebView {
+    private var webView: WKWebView?
+    private var loadedID: String?
+    private weak var carouselHost: YouTubeHostView?
+    private weak var previewHost: YouTubeHostView?
+    private let parking = UIView()
+    private let links = YouTubeLinkHandler()
+
+    func attach(_ videoID: String, to host: YouTubeHostView, fullSize: Bool) {
+        let player = view(for: videoID)
+        if fullSize {
+            previewHost = host
+        } else {
+            carouselHost = host
+            // While the preview is on screen it keeps the player.
+            if let previewHost, previewHost.window != nil, player.superview === previewHost { return }
+        }
+        if player.superview !== host { host.adopt(player) }
+    }
+
+    /// The preview closed: hand the player back so the carousel keeps the page it had.
+    func release(from host: YouTubeHostView) {
+        guard let player = webView, player.superview === host else { return }
+        if let carouselHost, carouselHost !== host, carouselHost.window != nil {
+            carouselHost.adopt(player)
+        } else {
+            player.removeFromSuperview()
+            parking.addSubview(player)
+        }
+    }
+
+    private func view(for id: String) -> WKWebView {
+        if let webView, loadedID == id { return webView }
         let cfg = WKWebViewConfiguration()
         cfg.allowsInlineMediaPlayback = true
         cfg.mediaTypesRequiringUserActionForPlayback = []
@@ -3185,14 +3865,15 @@ struct YouTubeView: UIViewRepresentable {
         view.isOpaque = false
         view.backgroundColor = .black
         view.scrollView.isScrollEnabled = false
-        view.navigationDelegate = context.coordinator
+        view.navigationDelegate = links
+        view.loadHTMLString(Self.page(id), baseURL: URL(string: Self.origin))
+        webView = view
+        loadedID = id
         return view
     }
 
-    func updateUIView(_ view: WKWebView, context: Context) {
-        guard context.coordinator.loaded != videoID else { return }
-        context.coordinator.loaded = videoID
-        let html = """
+    private static func page(_ videoID: String) -> String {
+        """
         <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
         <meta name="referrer" content="strict-origin-when-cross-origin">
         <style>html,body{margin:0;height:100%;background:#000;overflow:hidden}iframe{position:absolute;inset:0;width:100%;height:100%;border:0}</style>
@@ -3201,29 +3882,73 @@ struct YouTubeView: UIViewRepresentable {
           referrerpolicy="strict-origin-when-cross-origin" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen></iframe>
         </body></html>
         """
-        view.loadHTMLString(html, baseURL: URL(string: Self.origin))
+    }
+}
+
+final class YouTubeHostView: UIView {
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .black
+    }
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        backgroundColor = .black
+    }
+    func adopt(_ view: UIView) {
+        view.removeFromSuperview()
+        addSubview(view)
+        view.frame = bounds
+        view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+    }
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        for sub in subviews { sub.frame = bounds }
+    }
+}
+
+/// Opens "Watch on YouTube" and similar links in the YouTube app instead of inside the player.
+final class YouTubeLinkHandler: NSObject, WKNavigationDelegate {
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
+                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        if let url = navigationAction.request.url,
+           navigationAction.navigationType == .linkActivated || navigationAction.targetFrame == nil,
+           Self.isYouTube(url) {
+            UIApplication.shared.open(url)
+            decisionHandler(.cancel)
+            return
+        }
+        decisionHandler(.allow)
     }
 
-    func makeCoordinator() -> Coordinator { Coordinator() }
+    static func isYouTube(_ url: URL) -> Bool {
+        let host = url.host?.lowercased() ?? ""
+        return host == "youtu.be" || host == "youtube.com" || host.hasSuffix(".youtube.com")
+    }
+}
 
-    final class Coordinator: NSObject, WKNavigationDelegate {
-        var loaded: String?
+struct YouTubePlayerView: UIViewRepresentable {
+    let videoID: String
+    var fullSize = false
 
-        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-            if let url = navigationAction.request.url,
-               navigationAction.navigationType == .linkActivated || navigationAction.targetFrame == nil,
-               Self.isYouTube(url) {
-                UIApplication.shared.open(url)
-                decisionHandler(.cancel)
-                return
-            }
-            decisionHandler(.allow)
-        }
+    final class Coordinator {
+        let id: String
+        init(id: String) { self.id = id }
+    }
 
-        static func isYouTube(_ url: URL) -> Bool {
-            let host = url.host?.lowercased() ?? ""
-            return host == "youtu.be" || host == "youtube.com" || host.hasSuffix(".youtube.com")
-        }
+    func makeCoordinator() -> Coordinator { Coordinator(id: videoID) }
+
+    func makeUIView(context: Context) -> YouTubeHostView {
+        let host = YouTubeHostView()
+        YouTubePlayers.shared.attach(videoID, to: host, fullSize: fullSize)
+        return host
+    }
+
+    func updateUIView(_ host: YouTubeHostView, context: Context) {
+        YouTubePlayers.shared.attach(videoID, to: host, fullSize: fullSize)
+    }
+
+    static func dismantleUIView(_ host: YouTubeHostView, coordinator: Coordinator) {
+        YouTubePlayers.shared.release(from: host)
     }
 }
 
@@ -3259,6 +3984,37 @@ struct ShareSheet: UIViewControllerRepresentable {
     let activityItems: [Any]
     func makeUIViewController(context: Context) -> UIActivityViewController { UIActivityViewController(activityItems: activityItems, applicationActivities: nil) }
     func updateUIViewController(_ controller: UIActivityViewController, context: Context) { }
+}
+
+struct MoveDestinationSheet: View {
+    let destinations: [MoveDestination]
+    let onPick: (MoveDestination) -> Void
+    let onChooseFolder: () -> Void
+    let onCancel: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    ForEach(destinations) { destination in
+                        Button { onPick(destination) } label: {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(destination.title).font(.system(size: 16)).foregroundStyle(.primary)
+                                Text(destination.detail).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+                            }
+                        }
+                    }
+                } footer: {
+                    Text("Each mod keeps its folder name. If a folder with that name is already there, the Workshop ID is added.")
+                }
+                Section {
+                    Button { onChooseFolder() } label: { Label("Choose another folder…", systemImage: "folder.badge.plus") }
+                }
+            }
+            .navigationTitle("Move selected")
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { onCancel() } } }
+        }
+    }
 }
 
 
@@ -3520,7 +4276,6 @@ struct WorkshopBrowserView: View {
     @State private var showHome = true
     @State private var copied = false
 
-    static let home = URL(string: "https://steamcommunity.com/workshop/")!
     static let lastPageKey = "browser.lastURL"
 
     private var savedLastPage: URL? {
@@ -3549,6 +4304,7 @@ struct WorkshopBrowserView: View {
             if url != nil { showHome = false }
         }
         .onChange(of: homeToken) { _ in showHome = true }
+        .onAppear { if requestedURL != nil { showHome = false } }
     }
 
     private func open(_ url: URL) {
@@ -3653,10 +4409,12 @@ struct WorkshopWebContainer: UIViewRepresentable {
         context.coordinator.observe(view)
         webView = view
 
-        let start = requestedURL ?? Self.lastPage() ?? WorkshopBrowserView.home
+        // Only a page the user actually asked for is loaded: never a generic Workshop page, which
+        // would show up as a surprise destination when the history runs out.
+        let start = requestedURL ?? Self.lastPage()
         DispatchQueue.main.async { self.requestedURL = nil }
         CookieVault.restore(into: view.configuration.websiteDataStore.httpCookieStore) {
-            view.load(URLRequest(url: start))
+            if let start { view.load(URLRequest(url: start)) }
         }
         return view
     }
