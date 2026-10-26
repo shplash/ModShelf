@@ -2506,10 +2506,8 @@ struct ContentView: View {
     }
 
     private var progressCard: some View {
-        let total = max(3, store.phases.count)
-        let filled = min(store.phases.count, total)
-        let percent = Int(Double(filled) / Double(total) * 100)
-        return VStack(alignment: .leading, spacing: 12) {
+        let percent = Int((min(1, max(0, store.progress)) * 100).rounded())
+        return VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
                 Text("Downloading").font(.system(size: 15, weight: .semibold))
                 Spacer(minLength: 0)
@@ -2522,14 +2520,18 @@ struct ContentView: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Cancel download")
             }
-            HStack(spacing: 4) {
-                ForEach(0..<total, id: \.self) { i in
-                    Capsule()
-                        .fill(i < filled ? Color.accentColor : Color.accentColor.opacity(0.18))
-                        .frame(height: 8)
-                }
+            ProgressView(value: min(1, max(0, store.progress)))
+                .tint(.accentColor)
+                .animation(.easeOut(duration: 0.2), value: store.progress)
+            if !store.currentFile.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Text(store.currentFile)
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .textSelection(.enabled)
+            } else if !store.status.isEmpty {
+                Text(store.status).font(.caption).foregroundStyle(.secondary).lineLimit(2)
             }
-            .animation(.easeOut(duration: 0.25), value: filled)
         }
         .padding(14)
         .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
@@ -2822,10 +2824,10 @@ struct ContentView: View {
                             }
                         } label: { FilterPill(symbol: "tag.fill", title: selectedTag ?? "Tags", active: selectedTag != nil) }
                     }
+                    selectPill
                 }
-                .padding(.leading, 14)
+                .padding(.horizontal, 14)
             }
-            selectPill.padding(.trailing, 14)
         }
         .padding(.bottom, 8)
     }
@@ -2952,8 +2954,9 @@ struct ContentView: View {
         return VStack(alignment: .leading, spacing: 7) {
             Button(action: tap) {
                 Color.clear.aspectRatio(1, contentMode: .fit)
-                    .overlay(CachedImage(urlString: item.imageURL, fill: true, maxPixel: 520).allowsHitTesting(false))
+                    .overlay { CachedImage(urlString: item.imageURL, fill: true, maxPixel: 520).allowsHitTesting(false) }
                     .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                     .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
                         .stroke(Color.accentColor, lineWidth: picked ? 3 : 0))
             }
@@ -2968,6 +2971,7 @@ struct ContentView: View {
             Button(action: tap) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(item.displayTitle).font(.system(size: 14, weight: .semibold)).lineLimit(2).multilineTextAlignment(.leading)
+                        .frame(height: 34, alignment: .topLeading)
                     HStack(spacing: 6) {
                         RatingLine(rating: item.rating, count: item.ratingCount, size: 12)
                         if showIDs {
@@ -3711,17 +3715,6 @@ struct MediaCarousel: View {
                         case .video(let id):
                             YouTubePlayerView(videoID: id)
                                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                                .overlay(alignment: .topTrailing) {
-                                    Button { Haptics.tap(); onExpand(item) } label: {
-                                        Image(systemName: "arrow.up.left.and.arrow.down.right")
-                                            .font(.system(size: 11, weight: .bold)).foregroundStyle(.white)
-                                            .frame(width: 28, height: 28)
-                                            .background(Circle().fill(Color.black.opacity(0.55)))
-                                    }
-                                    .buttonStyle(.plain)
-                                    .padding(8)
-                                    .accessibilityLabel("Open video larger")
-                                }
                         }
                     }
                     .padding(.horizontal, 2)
@@ -3748,6 +3741,8 @@ struct ExpandedMediaView: View {
     let onClose: () -> Void
     @AppStorage("options.gifDownloads") private var gifDownloads = true
     @State private var image: UIImage?
+    @State private var imageScale: CGFloat = 1
+    @GestureState private var pinchScale: CGFloat = 1
 
     var body: some View {
         GeometryReader { geo in
@@ -3767,8 +3762,8 @@ struct ExpandedMediaView: View {
 
     @ViewBuilder
     private func content(in size: CGSize) -> some View {
-        let maxWidth = max(160, size.width - 32)
-        let maxHeight = max(160, size.height * 0.7)
+        let maxWidth = max(160, size.width - 16)
+        let maxHeight = max(160, size.height * 0.84)
         switch media {
         case .video(let id):
             YouTubePlayerView(videoID: id, fullSize: true)
@@ -3794,17 +3789,26 @@ struct ExpandedMediaView: View {
         let frame = imageFrame(maxWidth: maxWidth, maxHeight: maxHeight)
         return ZStack {
             if let image {
-                if image.images != nil && gifDownloads {
-                    AnimatedUIImageView(image: image, fill: false)
-                } else {
-                    Image(uiImage: image).resizable().scaledToFit()
+                Group {
+                    if image.images != nil && gifDownloads {
+                        AnimatedUIImageView(image: image, fill: false)
+                    } else {
+                        Image(uiImage: image).resizable().scaledToFit()
+                    }
                 }
+                .scaleEffect(imageScale * pinchScale)
             } else {
                 ProgressView().tint(.white)
             }
         }
         .frame(width: frame.width, height: frame.height)
+        .clipped()
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .contentShape(Rectangle())
+        .gesture(MagnificationGesture()
+            .updating($pinchScale) { value, state, _ in state = min(5, max(1, value)) }
+            .onEnded { value in imageScale = min(5, max(1, imageScale * value)) })
+        .onTapGesture(count: 2) { withAnimation(.easeOut(duration: 0.18)) { imageScale = imageScale > 1 ? 1 : 2 } }
         .shadow(color: .black.opacity(0.4), radius: 20, y: 8)
     }
 
@@ -4333,7 +4337,7 @@ struct WorkshopBrowserView: View {
     private var addressField: some View {
         Button { copyLink() } label: {
             HStack(spacing: 6) {
-                Text(copied ? "Copied to clipboard" : (showHome ? "Browse Workshop" : addressText))
+                Text(copied ? "Copied to clipboard" : (showHome || currentURL == nil ? "…" : addressText))
                     .font(.system(size: 13, weight: copied ? .bold : .regular))
                     .foregroundStyle(copied ? Color.accentColor : Color.secondary)
                     .lineLimit(1)
