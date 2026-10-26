@@ -909,8 +909,31 @@ final class WorkshopStore: ObservableObject {
     }
 
     private func updateFolderLabel() {
-        // The real path, so it matches where the app is installed (LiveContainer included).
-        folderLabel = currentRootURL.path
+        folderLabel = Self.readablePath(currentRootURL)
+    }
+
+    /// The folder as the Files app shows it, past "On My iPhone": the app's own folder for a normal
+    /// install, or LiveContainer's chain when the app is running inside it.
+    nonisolated static func readablePath(_ url: URL) -> String {
+        let path = url.path
+        if let range = path.range(of: "LiveContainer/", options: [.caseInsensitive]) {
+            return String(path[range.lowerBound...])
+        }
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].path
+        if path.hasPrefix(documents) {
+            let name = (Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
+                ?? (Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String)
+                ?? "ModShelf"
+            return name + String(path.dropFirst(documents.count))
+        }
+        // A folder the user picked elsewhere: keep the real path, without the sandbox boilerplate.
+        var stripped = path
+        for prefix in ["/private/var/mobile/Containers/", "/var/mobile/Containers/",
+                       "/private/var/mobile/", "/var/mobile/"] where stripped.hasPrefix(prefix) {
+            stripped = String(stripped.dropFirst(prefix.count))
+            break
+        }
+        return stripped
     }
 
     var usingCustomFolder: Bool { customRoot != nil }
@@ -2015,6 +2038,7 @@ final class MarqueeUIView: UIView {
     private var lastWidth: CGFloat = 0
     private var lastToken = -1
     private var lastText = ""
+    private var lastSpeed: CGFloat = 0
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -2032,8 +2056,10 @@ final class MarqueeUIView: UIView {
         if label.font != font { label.font = font }
         if label.text != text { label.text = text }
         let changed = text != lastText || token != lastToken || active != self.active
+            || abs(speed - lastSpeed) > 0.01
         lastText = text
         lastToken = token
+        lastSpeed = speed
         self.active = active
         if changed { restart() }
     }
@@ -2053,15 +2079,24 @@ final class MarqueeUIView: UIView {
     }
 
     /// Puts the first letter at the left edge and, when there is something to scroll, starts the
-    /// one-second pause that begins every pass.
+    /// one-second pause that begins every pass. With scrolling off the name stays one line and is
+    /// cut with an ellipsis where it no longer fits.
     private func restart() {
         generation += 1
         let generation = self.generation
         label.layer.removeAllAnimations()
         label.transform = .identity
         label.sizeToFit()
-        label.frame = CGRect(x: 0, y: (bounds.height - label.frame.height) / 2,
-                             width: label.frame.width, height: label.frame.height)
+
+        if active {
+            label.lineBreakMode = .byClipping
+            label.frame = CGRect(x: 0, y: (bounds.height - label.frame.height) / 2,
+                                 width: label.frame.width, height: label.frame.height)
+        } else {
+            label.lineBreakMode = .byTruncatingTail
+            label.frame = CGRect(x: 0, y: (bounds.height - label.frame.height) / 2,
+                                 width: max(bounds.width, 0), height: label.frame.height)
+        }
         guard active, bounds.width > 0 else { return }
         schedulePass(generation: generation)
     }
@@ -2129,6 +2164,7 @@ struct ContentView: View {
     @AppStorage("options.showIDs") private var showIDs = false
     @AppStorage("options.compactLibrary") private var compactLibrary = true
     @AppStorage("options.haptics") private var haptics = true
+    @AppStorage("options.marqueeSpeed") private var marqueeSpeed = 1.0
     @AppStorage("browser.autoDownload") private var autoDownload = false
     @AppStorage("browser.confirmAutoDownload") private var confirmAutoDownload = false
     @AppStorage("options.gifDownloads") private var gifDownloads = true
@@ -3340,7 +3376,9 @@ struct ContentView: View {
             Button(action: tap) {
                 VStack(alignment: .leading, spacing: 1) {
                     MarqueeText(text: item.displayTitle, fontSize: 14, weight: .semibold,
-                                height: 17, active: selectedTab == 2, restartToken: marqueeToken)
+                                height: 17, speed: 26 * marqueeSpeed,
+                                active: selectedTab == 2 && marqueeSpeed >= 0.5,
+                                restartToken: marqueeToken)
                     HStack(spacing: 6) {
                         if item.rating != nil {
                             RatingLine(rating: item.rating, count: item.ratingCount, size: 12)
@@ -3586,6 +3624,19 @@ struct ContentView: View {
                 toggleRow("Show Workshop IDs", symbol: "number", isOn: $showIDs)
                 divider
                 toggleRow("Haptic feedback", symbol: "iphone.radiowaves.left.and.right", isOn: $haptics)
+                divider
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Label("Scrolling text speed", systemImage: "speedometer").font(.system(size: 16))
+                        Spacer()
+                        Text(marqueeSpeed < 0.5 ? "Off" : String(format: "%.2f×", marqueeSpeed))
+                            .font(.system(size: 14, weight: .semibold)).foregroundStyle(.secondary).monospacedDigit()
+                    }
+                    Slider(value: $marqueeSpeed, in: 0...2, step: 0.05).tint(.accentColor)
+                    Text("0.5× is slow, 1× is normal and 2× is fast. Below 0.5× the scrolling text is off.")
+                        .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.horizontal, 15).padding(.vertical, 12)
             }
         )
     }
@@ -4577,6 +4628,12 @@ final class YouTubePlayers {
         view.isOpaque = false
         view.backgroundColor = .black
         view.scrollView.isScrollEnabled = false
+        // A video is never zoomable: no pinch, no rubber-banding, no page scale.
+        view.scrollView.minimumZoomScale = 1
+        view.scrollView.maximumZoomScale = 1
+        view.scrollView.bouncesZoom = false
+        view.scrollView.pinchGestureRecognizer?.isEnabled = false
+        view.scrollView.isMultipleTouchEnabled = false
         view.navigationDelegate = links
         view.loadHTMLString(Self.page(id), baseURL: URL(string: Self.origin))
         webView = view
@@ -4586,7 +4643,7 @@ final class YouTubePlayers {
 
     private static func page(_ videoID: String) -> String {
         """
-        <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+        <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
         <meta name="referrer" content="strict-origin-when-cross-origin">
         <style>html,body{margin:0;height:100%;background:#000;overflow:hidden}iframe{position:absolute;inset:0;width:100%;height:100%;border:0}</style>
         </head><body>
@@ -4864,16 +4921,41 @@ final class WorkshopCatalogue {
 }
 
 enum GameSearch {
-    /// Steam's own Workshop game list, searched by name, so only games that really have a Workshop
-    /// appear. The catalogue is cached after the first use.
+    /// Steam's store search finds the name (aliases included), then each game that is not already
+    /// in the cached Workshop list is checked once for a real Workshop, so a title missing from the
+    /// cached list still appears and a game without a Workshop still does not.
     static func search(_ term: String) async -> [GameHit] {
         let query = term.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return [] }
-        let catalogue = await WorkshopCatalogue.shared.games()
-        guard !catalogue.isEmpty else { return await storeSearch(query) }
-
         let lowered = query.lowercased()
-        let matches = catalogue.filter { $0.name.lowercased().contains(lowered) }
+
+        let catalogue = await WorkshopCatalogue.shared.games()
+        let known = Set(catalogue.map { $0.id })
+
+        // Candidates: the store's name matches, then any Workshop-list matches it missed.
+        let store = await storeSearch(query)
+        var candidates: [GameHit] = []
+        var seen = Set<Int>()
+        for hit in store where seen.insert(hit.id).inserted { candidates.append(hit) }
+        for hit in catalogue
+        where hit.name.lowercased().contains(lowered) && seen.insert(hit.id).inserted {
+            candidates.append(hit)
+        }
+        candidates = candidates.filter { $0.name.lowercased().contains(lowered) }
+        guard !candidates.isEmpty else { return [] }
+
+        var keep = [Bool](repeating: false, count: candidates.count)
+        await withTaskGroup(of: (Int, Bool).self) { group in
+            for (index, hit) in candidates.enumerated() {
+                group.addTask {
+                    if known.contains(hit.id) { return (index, true) }
+                    return (index, await WorkshopAvailability.shared.hasWorkshop(id: hit.id))
+                }
+            }
+            for await (index, ok) in group { keep[index] = ok }
+        }
+
+        let matches = zip(candidates, keep).filter { $0.1 }.map { $0.0 }
         let ranked = matches.sorted { a, b in
             let aPrefix = a.name.lowercased().hasPrefix(lowered)
             let bPrefix = b.name.lowercased().hasPrefix(lowered)
@@ -4884,13 +4966,61 @@ enum GameSearch {
         return Array(ranked.prefix(30))
     }
 
-    /// The catalogue could not be fetched: fall back to Steam's store search rather than nothing.
     private static func storeSearch(_ term: String) async -> [GameHit] {
         guard let q = term.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
               let url = URL(string: "https://store.steampowered.com/api/storesearch/?term=\(q)&l=english&cc=US"),
               let (data, _) = try? await URLSession.shared.data(from: url),
               let root = try? JSONDecoder().decode(GameSearchResponse.self, from: data) else { return [] }
         return root.items
+    }
+}
+
+/// Remembers whether an app has a Workshop, for the games the cached list does not cover.
+final class WorkshopAvailability {
+    static let shared = WorkshopAvailability()
+    private let key = "modshelf.workshopAvailability"
+    private var cache: [Int: Bool] = [:]
+
+    private init() {
+        guard let stored = UserDefaults.standard.dictionary(forKey: key) as? [String: Bool] else { return }
+        for (raw, value) in stored { if let id = Int(raw) { cache[id] = value } }
+    }
+
+    func hasWorkshop(id: Int) async -> Bool {
+        if let hit = cache[id] { return hit }
+        guard let url = URL(string: "https://steamcommunity.com/app/\(id)/workshop/") else { return true }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 12
+        request.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+                         forHTTPHeaderField: "User-Agent")
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              let html = String(data: data, encoding: .utf8) else {
+            // Unknown: keep the game rather than hide a real Workshop.
+            return true
+        }
+        let finalURL = (response as? HTTPURLResponse)?.url ?? url
+        let value: Bool
+        if html.localizedCaseInsensitiveContains("does not have a workshop") {
+            value = false
+        } else if finalURL.path.contains("/app/\(id)/workshop") || html.contains("/app/\(id)/workshop") {
+            value = true
+        } else if finalURL.host?.contains("store.steampowered.com") == true
+                    || finalURL.path == "/app/\(id)/" || finalURL.path == "/app/\(id)" {
+            // Steam sent us to the store or the plain hub: there is no Workshop tab.
+            value = false
+        } else {
+            // Unknown page: keep it rather than hide a real Workshop.
+            return true
+        }
+        remember(id, value)
+        return value
+    }
+
+    private func remember(_ id: Int, _ value: Bool) {
+        cache[id] = value
+        var stored: [String: Bool] = [:]
+        for (key, flag) in cache { stored[String(key)] = flag }
+        UserDefaults.standard.set(stored, forKey: key)
     }
 }
 
