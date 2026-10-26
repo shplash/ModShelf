@@ -30,17 +30,6 @@ jobs:
         run: |
           gomobile init
           gomobile bind -v -target=ios -o ../SteamEngine.xcframework .
-
-      - name: Fix engine framework minimum OS version
-        run: |
-          # Current gomobile writes MinimumOSVersion 100.0 into the framework's
-          # Info.plist, which can fail iOS launch validation. Set the real target.
-          for slice in ios-arm64 ios-arm64_x86_64-simulator; do
-            plist="SteamEngine.xcframework/$slice/SteamEngine.framework/Info.plist"
-            if [ -f "$plist" ]; then
-              /usr/bin/plutil -replace MinimumOSVersion -string "16.0" "$plist"
-            fi
-          done
       - name: Install XcodeGen
         run: brew install xcodegen
       - name: Verify source files
