@@ -664,6 +664,8 @@ final class WorkshopStore: ObservableObject {
     @Published var revealFolderURL: URL?
     /// Folder names chosen per game, keyed by Steam App ID. A game without an entry uses the shared folder.
     @Published var customGameFolders: [String: String] = [:]
+    /// Games whose saved folder can no longer be opened, so the UI can ask for it again.
+    @Published var unreadableGameFolders: Set<String> = []
 
     private let engine = SteamengineNewEngine()!
     private var poller: Timer?
@@ -781,14 +783,16 @@ final class WorkshopStore: ObservableObject {
     private func resolveCustomRoot() {
         guard let data = UserDefaults.standard.data(forKey: "options.folderBookmark") else { return }
         var stale = false
-        guard let url = try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &stale) else {
+        guard let url = try? URL(resolvingBookmarkData: data, options: [],
+                                 relativeTo: nil, bookmarkDataIsStale: &stale) else {
             // A bookmark saved by an older install can no longer resolve; forget it instead of retrying every launch.
             UserDefaults.standard.removeObject(forKey: "options.folderBookmark")
             return
         }
         if url.startAccessingSecurityScopedResource() { scopedURL = url }
         customRoot = url
-        if stale, let fresh = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) {
+        if stale, let fresh = try? url.bookmarkData(options: [],
+                                                    includingResourceValuesForKeys: nil, relativeTo: nil) {
             UserDefaults.standard.set(fresh, forKey: "options.folderBookmark")
         }
     }
@@ -799,23 +803,29 @@ final class WorkshopStore: ObservableObject {
         didLoadGameFolders = true
         guard let stored = UserDefaults.standard.dictionary(forKey: Self.gameFoldersKey), !stored.isEmpty else { return }
         var refreshed = stored
+        var unreadable: Set<String> = []
         for (app, value) in stored {
             guard let data = value as? Data else {
                 refreshed.removeValue(forKey: app)
                 continue
             }
             var stale = false
-            guard let url = try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &stale) else {
-                refreshed.removeValue(forKey: app)
+            guard let url = try? URL(resolvingBookmarkData: data, options: [],
+                                     relativeTo: nil, bookmarkDataIsStale: &stale) else {
+                // Keep the bookmark: the folder may be reachable again, and silently falling
+                // back to the shared folder would move a mod somewhere the user never picked.
+                unreadable.insert(app)
                 continue
             }
             if url.startAccessingSecurityScopedResource() { gameScopes[app] = url }
             gameRoots[app] = url
-            if stale, let fresh = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) {
+            if stale, let fresh = try? url.bookmarkData(options: [],
+                                                        includingResourceValuesForKeys: nil, relativeTo: nil) {
                 refreshed[app] = fresh
             }
         }
         UserDefaults.standard.set(refreshed, forKey: Self.gameFoldersKey)
+        unreadableGameFolders = unreadable
         rebuildGameFolderLabels()
     }
 
@@ -852,7 +862,8 @@ final class WorkshopStore: ObservableObject {
             Haptics.error()
             return
         }
-        guard let data = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) else {
+        guard let data = try? url.bookmarkData(options: [],
+                                               includingResourceValuesForKeys: nil, relativeTo: nil) else {
             if started { url.stopAccessingSecurityScopedResource() }
             errorMessage = "Couldn't save that folder. Try again."
             Haptics.error()
@@ -960,7 +971,8 @@ final class WorkshopStore: ObservableObject {
         }
     }
 
-    /// Opens any folder in Files: ModShelf's own folders directly, a picked one through the browser.
+    /// Opens any folder in Files: ModShelf's own folders directly, another app's folder in an
+    /// in-app listing (iOS has no way to hand the Files app a folder inside someone else's container).
     func revealFolder(_ url: URL) {
         let path = url.path
         if path.hasPrefix(documents.path + "/") {
@@ -968,7 +980,7 @@ final class WorkshopStore: ObservableObject {
             guard let shared = URL(string: "shareddocuments://" + encoded) else { return }
             UIApplication.shared.open(shared)
         } else if FileManager.default.fileExists(atPath: path) {
-            revealFolderURL = URL(fileURLWithPath: path, isDirectory: true)
+            revealFolderURL = url
         } else {
             operationMessage = "That folder doesn't exist any more."
         }
@@ -1295,19 +1307,29 @@ final class WorkshopStore: ObservableObject {
     }
 
     /// Renames when both folders share a volume, which is instant, and copies when they do not.
+    /// A copy is only accepted once the destination really holds files, and the original is only
+    /// removed after that, so a move can never leave the mod in neither place.
     nonisolated static func place(from source: URL, to destination: URL) throws {
         let fm = FileManager.default
         do {
             try fm.moveItem(at: source, to: destination)
+            return
         } catch {
-            do {
-                try fm.copyItem(at: source, to: destination)
-                try? fm.removeItem(at: source)
-            } catch let copyError {
-                try? fm.removeItem(at: destination)
-                throw copyError
-            }
+            // Different volume, or a document provider that cannot rename across containers.
         }
+        do {
+            try fm.copyItem(at: source, to: destination)
+        } catch let copyError {
+            try? fm.removeItem(at: destination)
+            throw copyError
+        }
+        let arrived = scan(folder: destination.path)
+        guard arrived.exists, arrived.count > 0 else {
+            try? fm.removeItem(at: destination)
+            throw NSError(domain: "ModShelf", code: 4,
+                          userInfo: [NSLocalizedDescriptionKey: "The copy arrived empty."])
+        }
+        try? fm.removeItem(at: source)
     }
 
     /// Installs a finished download. The old installation is moved aside first and only removed once
@@ -1484,6 +1506,13 @@ final class WorkshopStore: ObservableObject {
                     let destination = Self.availableURL(name: source.lastPathComponent, id: entry.id, in: root)
                     do {
                         try Self.place(from: source, to: destination)
+                        // Only count it as moved when the destination really holds the files.
+                        let arrived = Self.scan(folder: destination.path)
+                        guard arrived.exists, arrived.count > 0 else {
+                            try? fm.removeItem(at: destination)
+                            failed.append("\(entry.title) (the copy arrived empty)")
+                            continue
+                        }
                         moved.append((entry.id, destination.path))
                     } catch {
                         failed.append("\(entry.title) (\(error.localizedDescription))")
@@ -2319,8 +2348,13 @@ struct ContentView: View {
                                           ids: items.map(\.id))
     }
 
-    private func destinationRoot(_ destination: MoveDestination) -> URL {
-        destination.id == "shared" ? store.root(forGame: nil) : store.root(forGame: destination.id)
+    private func destinationRoot(_ destination: MoveDestination) -> URL? {
+        if destination.id == "shared" { return store.root(forGame: nil) }
+        if store.unreadableGameFolders.contains(destination.id) {
+            store.operationMessage = "Can't open that game's folder any more. Pick it again in Options → Game folders."
+            return nil
+        }
+        return store.root(forGame: destination.id)
     }
 
     // MARK: body
@@ -2334,9 +2368,9 @@ struct ContentView: View {
         .sheet(isPresented: $showShare, onDismiss: { store.shareURL = nil }) { if let url = store.shareURL { ShareSheet(activityItems: [url]) } }
         .sheet(isPresented: Binding(get: { store.revealFolderURL != nil },
                                     set: { if !$0 { store.revealFolderURL = nil } })) {
-            FolderPicker(onPick: { _ in store.revealFolderURL = nil },
-                         onCancel: { store.revealFolderURL = nil },
-                         startURL: store.revealFolderURL)
+            if let folder = store.revealFolderURL {
+                FolderContentsSheet(url: folder) { store.revealFolderURL = nil }
+            }
         }
         .sheet(item: $folderSheet) { sheet in
             switch sheet {
@@ -2367,7 +2401,8 @@ struct ContentView: View {
                                      moveSheetOpen = false
                                      let ids = Array(selection)
                                      guard !ids.isEmpty else { return }
-                                     store.move(ids, toRoot: destinationRoot(destination), label: destination.title) { moved in
+                                     guard let root = destinationRoot(destination) else { return }
+                                     store.move(ids, toRoot: root, label: destination.title) { moved in
                                          selection.subtract(moved)
                                          if selection.isEmpty { selecting = false }
                                      }
@@ -3708,7 +3743,9 @@ struct ContentView: View {
                     HStack(spacing: 6) {
                         Button { Haptics.tap(); folderSheet = .game(game.id) } label: {
                             rowContent(game.name, symbol: "folder",
-                                       detail: store.customGameFolders[game.id] ?? "Shared folder")
+                                       detail: store.unreadableGameFolders.contains(game.id)
+                                           ? "Folder unavailable — pick it again"
+                                           : (store.customGameFolders[game.id] ?? "Shared folder"))
                         }
                         .buttonStyle(.plain)
                         Button { Haptics.tap(); store.revealFolder(store.root(forGame: game.id)) } label: {
@@ -4722,6 +4759,65 @@ struct YouTubePlayerView: UIViewRepresentable {
 }
 
 // MARK: - Folder picker and share sheet
+
+/// Lists a folder's contents. This is how a folder inside another app's container is shown, since
+/// iOS cannot hand the Files app someone else's folder.
+struct FolderContentsSheet: View {
+    let url: URL
+    let onClose: () -> Void
+    @State private var entries: [URL] = []
+    @State private var error: String?
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if let error {
+                    Text(error).foregroundStyle(.secondary)
+                } else if entries.isEmpty {
+                    Text("This folder is empty.").foregroundStyle(.secondary)
+                } else {
+                    Section {
+                        ForEach(entries, id: \.self) { entry in
+                            HStack(spacing: 10) {
+                                Image(systemName: isDirectory(entry) ? "folder" : "doc")
+                                    .foregroundStyle(isDirectory(entry) ? Color.accentColor : Color.secondary)
+                                Text(entry.lastPathComponent).lineLimit(1)
+                            }
+                        }
+                    } header: {
+                        Text("\(entries.count) item\(entries.count == 1 ? "" : "s")")
+                    }
+                }
+            }
+            .navigationTitle(url.lastPathComponent)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) { Button("Done") { onClose() } }
+            }
+            .task { load() }
+        }
+    }
+
+    private func isDirectory(_ item: URL) -> Bool {
+        (try? item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+    }
+
+    private func load() {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        guard let contents = try? FileManager.default.contentsOfDirectory(
+            at: url, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]
+        ) else {
+            error = "Couldn't read this folder."
+            return
+        }
+        entries = contents.sorted { a, b in
+            let aDir = isDirectory(a), bDir = isDirectory(b)
+            if aDir != bDir { return aDir }
+            return a.lastPathComponent.localizedCaseInsensitiveCompare(b.lastPathComponent) == .orderedAscending
+        }
+    }
+}
 
 struct FolderPicker: UIViewControllerRepresentable {
     let onPick: (URL) -> Void
