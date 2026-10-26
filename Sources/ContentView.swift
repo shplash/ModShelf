@@ -126,6 +126,13 @@ enum MediaItem: Identifiable, Equatable {
     }
 }
 
+/// The media the focused viewer was opened on, with the rest of that item's media to swipe through.
+struct MediaViewer: Identifiable {
+    let id = UUID()
+    let media: [MediaItem]
+    let index: Int
+}
+
 /// A folder choice: the shared mod folder, one game's folder, or where moved mods should go.
 enum FolderSheet: Identifiable {
     case shared
@@ -596,6 +603,8 @@ final class WorkshopStore: ObservableObject {
     @Published var guardCode = ""
     @Published var status = "Ready"
     @Published var errorMessage = ""
+    /// Sign-in problems stay in the login sheet, so they never sit in the banner behind it.
+    @Published var loginError = ""
     @Published var progress = 0.0
     @Published var currentFile = ""
     @Published var isBusy = false
@@ -795,13 +804,13 @@ final class WorkshopStore: ObservableObject {
         let started = url.startAccessingSecurityScopedResource()
         guard Self.canWrite(into: url) else {
             if started { url.stopAccessingSecurityScopedResource() }
-            errorMessage = "ModShelf can't save into that folder. Pick a folder on this iPhone or in iCloud Drive that ModShelf is allowed to write to."
+            errorMessage = "ModShelf can't write to that folder. Pick another one."
             Haptics.error()
             return
         }
         guard let data = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) else {
             if started { url.stopAccessingSecurityScopedResource() }
-            errorMessage = "Couldn't remember that folder. Try picking it again."
+            errorMessage = "Couldn't save that folder. Try again."
             Haptics.error()
             return
         }
@@ -912,7 +921,7 @@ final class WorkshopStore: ObservableObject {
         guard !isFetching, !isBusy else { return }
         guard let id = Self.workshopID(from: input) else {
             preview = nil
-            errorMessage = "Paste a valid Steam Workshop URL or numeric item ID."
+            errorMessage = "Enter a Workshop link or item ID."
             return
         }
         isFetching = true
@@ -923,7 +932,7 @@ final class WorkshopStore: ObservableObject {
             if let result {
                 preview = result
             } else {
-                errorMessage = "Workshop item \(id) could not be found or its details could not be loaded. It may be private, deleted, unavailable, or Steam may be rate-limiting requests. You can still try downloading it by ID."
+                errorMessage = "Couldn't load item \(id). It may be private, deleted or unavailable."
                 preview = WorkshopMetadata(id: id, title: "Workshop item \(id)", author: "", description: "Metadata was unavailable. Downloading may still work if this item is accessible to your Steam account.", imageURL: "", updatedAt: 0)
             }
             isFetching = false
@@ -933,22 +942,22 @@ final class WorkshopStore: ObservableObject {
     // MARK: sign in
 
     func signIn(automatic: Bool = false) async {
+        loginError = ""
         if isBusy && needsGuardCode {
             let code = guardCode.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !code.isEmpty else { errorMessage = "Enter the Steam Guard code from the Steam app."; return }
+            guard !code.isEmpty else { loginError = "Enter the Steam Guard code."; return }
             Haptics.tap()
             engine.submitGuardCode(code)
             guardCode = ""
             status = "Checking code…"
             return
         }
-        guard !isBusy else { errorMessage = "Cancel the current download before signing in or out."; return }
+        guard !isBusy else { loginError = "Finish or cancel the download first."; return }
         guard !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !password.isEmpty else {
-            if !automatic { showLogin = true }
-            errorMessage = automatic ? "" : "Enter your Steam username and password."
+            if !automatic { showLogin = true; loginError = "Enter your username and password." }
             return
         }
-        isBusy = true; status = "Signing in to Steam…"; errorMessage = ""; needsGuardCode = false
+        isBusy = true; status = "Signing in to Steam…"; needsGuardCode = false
         startPolling()
         let user = username.trimmingCharacters(in: .whitespacesAndNewlines)
         let pass = password
@@ -965,20 +974,39 @@ final class WorkshopStore: ObservableObject {
             Keychain.write(user, key: "steam.username")
             Keychain.write(pass, key: "steam.password")
             guardCode = ""; showLogin = false; status = "Signed in to Steam"
+            loginError = ""
             Haptics.success()
         } else {
-            errorMessage = result.isEmpty ? (engine.lastError().isEmpty ? "Steam sign-in did not complete." : engine.lastError()) : result
-            if errorMessage.localizedCaseInsensitiveContains("guard") || errorMessage.localizedCaseInsensitiveContains("code") {
+            let raw = result.isEmpty ? engine.lastError() : result
+            loginError = Self.signInMessage(raw)
+            if raw.localizedCaseInsensitiveContains("guard") || raw.localizedCaseInsensitiveContains("code") {
                 status = "Steam Guard code required"
                 needsGuardCode = true
             }
             if !automatic { showLogin = true; Haptics.error() }
-            // An automatic launch sign-in that needs a code is not retried; it would only send another prompt.
-            if automatic { errorMessage = "" }
         }
     }
+
+    /// Steam's own sign-in wording, cut down to a line the login sheet can show.
+    nonisolated static func signInMessage(_ raw: String) -> String {
+        let r = raw.lowercased()
+        if r.isEmpty { return "Sign-in didn't complete. Try again." }
+        if r.contains("not entered in time") { return "That code wasn't entered in time. Try again." }
+        if r.contains("guard") || r.contains("two-factor") || r.contains("code") {
+            return "Steam wants a confirmation code. Enter the code from the Steam app."
+        }
+        if r.contains("rate limit") || r.contains("too many") { return "Too many attempts. Wait a minute and try again." }
+        if r.contains("password") || r.contains("incorrect") || r.contains("invalid") || r.contains("denied") {
+            return "Steam didn't accept that username or password."
+        }
+        if r.contains("network") || r.contains("connection") || r.contains("timeout") || r.contains("timed out") {
+            return "Couldn't reach Steam. Check your connection."
+        }
+        if r.contains("download") || r.contains("already running") { return "Finish or cancel the download first." }
+        return raw
+    }
     func signOut() {
-        guard !isBusy else { errorMessage = "Cancel the current download before signing out."; return }
+        guard !isBusy else { errorMessage = "Finish or cancel the download first."; return }
         engine.logout(); Keychain.delete("steam.password"); password = ""; guardCode = ""
         status = "Signed out"
     }
@@ -987,11 +1015,11 @@ final class WorkshopStore: ObservableObject {
 
     func download(_ raw: String? = nil, meta override: WorkshopMetadata? = nil) {
         errorMessage = ""
-        guard !isBusy else { errorMessage = "A download or sign-in is already running."; return }
+        guard !isBusy else { errorMessage = "Something is already running. Wait for it to finish."; return }
         guard isAuthenticated else { operationMessage = "Sign in to Steam to download this item."; showLogin = true; return }
-        guard let id = Self.workshopID(from: raw ?? input) else { errorMessage = "Enter a valid Workshop URL or ID."; return }
+        guard let id = Self.workshopID(from: raw ?? input) else { errorMessage = "Enter a Workshop link or item ID."; return }
         if UserDefaults.standard.bool(forKey: "options.wifiOnly") && NetworkWatcher.shared.isExpensive {
-            errorMessage = "Wi-Fi only is on and you're on a cellular or hotspot connection."
+            errorMessage = "Wi-Fi only is on and you're on cellular."
             queue.removeAll()
             return
         }
@@ -1006,7 +1034,7 @@ final class WorkshopStore: ObservableObject {
         do {
             try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
         } catch {
-            errorMessage = "Could not create a download folder: \(error.localizedDescription)"
+            errorMessage = "Couldn't create the download folder."
             record(id, title: meta.title, result: "Failed", error: errorMessage, game: meta.gameName)
             return
         }
@@ -1183,7 +1211,7 @@ final class WorkshopStore: ObservableObject {
     private func finalizeDownload(staging: URL, id: String, meta: WorkshopMetadata, existing: WorkshopItem?) throws -> (url: URL, files: Int, bytes: Int64) {
         let fm = FileManager.default
         guard !visibleChildren(staging).isEmpty else {
-            throw NSError(domain: "ModShelf", code: 1, userInfo: [NSLocalizedDescriptionKey: "Steam reported completion but the download folder is empty."])
+            throw NSError(domain: "ModShelf", code: 1, userInfo: [NSLocalizedDescriptionKey: "The download came back empty."])
         }
         // Steam lays files out as <id>/mods/<ModName>/... ; keep only the mod itself.
         var base = staging
@@ -1220,7 +1248,7 @@ final class WorkshopStore: ObservableObject {
         } catch {
             if hadPrevious { try? fm.moveItem(at: backup, to: destination) }
             throw NSError(domain: "ModShelf", code: 2,
-                          userInfo: [NSLocalizedDescriptionKey: "The new files could not be put in place: \(error.localizedDescription). The previous version was kept."])
+                          userInfo: [NSLocalizedDescriptionKey: "Couldn't put the new files in place. Your previous version is still there."])
         }
 
         let counts = Self.scan(folder: destination.path)
@@ -1228,7 +1256,7 @@ final class WorkshopStore: ObservableObject {
             try? fm.removeItem(at: destination)
             if hadPrevious { try? fm.moveItem(at: backup, to: destination) }
             throw NSError(domain: "ModShelf", code: 3,
-                          userInfo: [NSLocalizedDescriptionKey: "The download contained no files. The previous version was kept."])
+                          userInfo: [NSLocalizedDescriptionKey: "The download had no files. Your previous version is still there."])
         }
 
         if hadPrevious { try? fm.removeItem(at: backup) }
@@ -1291,7 +1319,7 @@ final class WorkshopStore: ObservableObject {
 
     func remove(_ item: WorkshopItem) {
         do { if FileManager.default.fileExists(atPath: item.folder) { try FileManager.default.removeItem(atPath: item.folder) } }
-        catch { errorMessage = "Could not delete downloaded files: \(error.localizedDescription)"; return }
+        catch { errorMessage = "Couldn't delete those files."; return }
         library.removeAll { $0.id == item.id }; saveLibrary(); refreshLibraryBytes()
     }
     func requestDelete(_ item: WorkshopItem) {
@@ -1325,13 +1353,13 @@ final class WorkshopStore: ObservableObject {
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         } catch {
             scope?.stopAccessingSecurityScopedResource()
-            errorMessage = "Couldn't use that folder: \(error.localizedDescription)"
+            errorMessage = "Couldn't use that folder."
             Haptics.error()
             return
         }
         guard Self.canWrite(into: root) else {
             scope?.stopAccessingSecurityScopedResource()
-            errorMessage = "ModShelf can't write to \(label). Pick a folder it is allowed to save into."
+            errorMessage = "Can't save to \(label). Pick another folder."
             Haptics.error()
             return
         }
@@ -1411,7 +1439,7 @@ final class WorkshopStore: ObservableObject {
             operationMessage = "Deleted \(removed.count) mod\(removed.count == 1 ? "" : "s")."
             Haptics.success()
         } else {
-            errorMessage = "Couldn't delete \(failed.count): \(failed.joined(separator: ", "))"
+            errorMessage = "Couldn't delete \(failed.count) mod\(failed.count == 1 ? "" : "s"): \(failed.joined(separator: ", "))"
             Haptics.error()
         }
     }
@@ -1424,10 +1452,10 @@ final class WorkshopStore: ObservableObject {
     }
     func export(_ item: WorkshopItem) {
         let source = URL(fileURLWithPath: item.folder, isDirectory: true)
-        guard FileManager.default.fileExists(atPath: source.path) else { errorMessage = "Downloaded files could not be found. Use Verify files to check the library entry."; return }
+        guard FileManager.default.fileExists(atPath: source.path) else { errorMessage = "Those files are missing. Download the mod again."; return }
         let zip = FileManager.default.temporaryDirectory.appendingPathComponent("\(item.displayTitle.replacingOccurrences(of: "/", with: "-")).zip")
         do { try? FileManager.default.removeItem(at: zip); try FileManager.default.zipItem(at: source, to: zip, shouldKeepParent: true); shareURL = zip }
-        catch { errorMessage = "ZIP export failed: \(error.localizedDescription)" }
+        catch { errorMessage = "Couldn't build the ZIP." }
     }
     func exportAll() {
         guard !library.isEmpty else { operationMessage = "Your library is empty."; return }
@@ -1473,19 +1501,19 @@ final class WorkshopStore: ObservableObject {
             guard scan.exists, scan.count > 0 else {
                 applyCheck(item.id, broken: true)
                 operationMessage = scan.exists
-                    ? "\(item.displayTitle) has no files left in \(Self.folderName(folder)). Download it again."
-                    : "\(item.displayTitle) isn't in \(Self.folderName(folder)) any more. It was moved or deleted outside ModShelf."
+                    ? "\(item.displayTitle) has no files left. Download it again."
+                    : "\(item.displayTitle) is missing from its folder."
                 return
             }
             guard let meta = await SteamMeta.fetch(id: item.id, includePage: false), meta.fileSize > 0 else {
-                operationMessage = "Couldn't get \(item.displayTitle)'s size from Steam. Check your connection and try again."
+                operationMessage = "Couldn't check \(item.displayTitle) with Steam."
                 return
             }
             let ok = Self.sizeMatches(disk: scan.bytes, steam: meta.fileSize)
             applyCheck(item.id, broken: !ok)
             operationMessage = ok
                 ? "\(item.displayTitle) matches Steam (\(Fmt.bytes(scan.bytes)))."
-                : "\(item.displayTitle) is \(Fmt.bytes(scan.bytes)) here, but Steam lists \(Fmt.bytes(meta.fileSize)). Try downloading it again."
+                : "\(item.displayTitle) doesn't match Steam (\(Fmt.bytes(scan.bytes)) here, \(Fmt.bytes(meta.fileSize)) expected)."
         }
     }
 
@@ -1536,7 +1564,7 @@ final class WorkshopStore: ObservableObject {
             if success, let latest = library.first(where: { $0.id == item.id }) {
                 operationMessage = latest.updateAvailable ? "Update available: \(latest.displayTitle)" : "\(latest.displayTitle) is up to date."
             } else {
-                operationMessage = "Could not check item \(item.id). It may be private, deleted, or Steam may be rate-limiting requests."
+                operationMessage = "Couldn't check item \(item.id). It may be private or deleted."
             }
         }
     }
@@ -1628,7 +1656,7 @@ final class WorkshopStore: ObservableObject {
             }
             status = "Temporary files cleared"
             operationMessage = "Temporary files cleared."
-        } catch { errorMessage = "Could not clear temporary files: \(error.localizedDescription)" }
+        } catch { errorMessage = "Couldn't clear temporary files." }
     }
     private func visibleAndHidden(_ url: URL) -> [URL] {
         (try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil, options: [])) ?? []
@@ -1866,10 +1894,123 @@ struct RatingLine: View {
     }
 }
 
+/// One line of text that slides sideways when it doesn't fit, so a long mod name never makes a
+/// grid cell taller than its neighbours. It waits, slides the whole name into view, waits again,
+/// slides back and repeats. The caller restarts it by changing `restartToken`.
+struct MarqueeText: View {
+    let text: String
+    let font: Font
+    var height: CGFloat = 18
+    var speed: CGFloat = 30
+    var active = true
+    var restartToken = 0
+
+    @State private var textWidth: CGFloat = 0
+    @State private var boxWidth: CGFloat = 0
+    @State private var offset: CGFloat = 0
+    @State private var runToken = 0
+
+    private var overflow: CGFloat { max(0, textWidth - boxWidth) }
+
+    var body: some View {
+        GeometryReader { geo in
+            label
+                .fixedSize()
+                .background(
+                    GeometryReader { g in
+                        Color.clear
+                            .onAppear { setTextWidth(g.size.width) }
+                            .onChange(of: g.size.width) { setTextWidth($0) }
+                    }
+                )
+                .offset(x: offset)
+                .frame(width: geo.size.width, height: geo.size.height, alignment: .leading)
+                .clipped()
+                .onAppear { setBoxWidth(geo.size.width) }
+                .onChange(of: geo.size.width) { setBoxWidth($0) }
+        }
+        .frame(height: height)
+        .onChange(of: restartToken) { _ in restart() }
+        .onChange(of: active) { _ in restart() }
+        .onChange(of: text) { _ in restart() }
+        .task(id: runToken) { await run() }
+    }
+
+    private var label: some View {
+        Text(text).font(font).lineLimit(1).fixedSize(horizontal: true, vertical: false)
+    }
+
+    private func setTextWidth(_ width: CGFloat) {
+        guard abs(width - textWidth) > 0.5 else { return }
+        textWidth = width
+        runToken += 1
+    }
+
+    private func setBoxWidth(_ width: CGFloat) {
+        guard abs(width - boxWidth) > 0.5 else { return }
+        boxWidth = width
+        runToken += 1
+    }
+
+    private func restart() {
+        offset = 0
+        runToken += 1
+    }
+
+    private func run() async {
+        offset = 0
+        guard active, overflow > 0.5 else { return }
+        let distance = overflow
+        let travel = max(1.4, Double(distance / max(1, speed)))
+        while !Task.isCancelled {
+            // A second at rest before setting off.
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            if Task.isCancelled { return }
+            withAnimation(.linear(duration: travel)) { offset = -distance }
+            try? await Task.sleep(nanoseconds: UInt64((travel + 1.0) * 1_000_000_000))
+            if Task.isCancelled { return }
+            withAnimation(.easeOut(duration: 0.35)) { offset = 0 }
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            if Task.isCancelled { return }
+        }
+    }
+}
+
+/// A gentle side-to-side wave, used on the actions button while mods are selected.
+struct WavingIcon: View {
+    let symbol: String
+    var size: CGFloat = 16
+    @State private var leans = false
+
+    var body: some View {
+        Image(systemName: symbol)
+            .font(.system(size: size, weight: .semibold))
+            .foregroundStyle(Color.accentColor)
+            .rotationEffect(.degrees(leans ? 12 : -12))
+            .animation(.easeInOut(duration: 0.55).repeatForever(autoreverses: true), value: leans)
+            .onAppear { leans = true }
+    }
+}
+
+/// Text with an ellipsis that gains one dot at a time, so a status reads as moving rather than
+/// jumping between the same words with a different number of dots.
+struct DottedLabel: View {
+    let text: String
+    var interval: Double = 0.4
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: interval)) { context in
+            let step = Int(abs(context.date.timeIntervalSinceReferenceDate) / interval) % 4
+            Text(text + String(repeating: ".", count: step))
+        }
+    }
+}
+
 // MARK: - Main view
 
 struct ContentView: View {
     @StateObject private var store = WorkshopStore()
+    @Environment(\.scenePhase) private var scenePhase
     @AppStorage("options.appearance") private var appearance = "System"
     @AppStorage("options.confirmDelete") private var confirmDelete = true
     @AppStorage("options.showIDs") private var showIDs = false
@@ -1902,7 +2043,8 @@ struct ContentView: View {
     @State private var selection: Set<String> = []
     @State private var confirmBulkDelete = false
     @State private var pendingRelocate: RelocateRequest?
-    @State private var expandedMedia: MediaItem?
+    @State private var mediaViewer: MediaViewer?
+    @State private var marqueeToken = 0
     @State private var selectedGame: String? = nil
     @State private var selectedTag: String? = nil
     @State private var favouritesOnly = false
@@ -2080,6 +2222,10 @@ struct ContentView: View {
         }
         .onChange(of: store.shareURL) { showShare = $0 != nil }
         .onChange(of: confirmDelete) { UserDefaults.standard.set($0, forKey: "options.confirmDelete") }
+        .onChange(of: scenePhase) { phase in
+            // Coming back from another app restarts the scrolling names, like arriving on the tab does.
+            if phase == .active, selectedTab == 2 { marqueeToken += 1 }
+        }
         .onChange(of: store.errorMessage) { message in
             guard !message.isEmpty else { return }
             DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
@@ -2125,7 +2271,11 @@ struct ContentView: View {
         }
         .tint(Color.accentColor)
         .preferredColorScheme(appearance == "System" ? nil : (appearance == "Dark" ? .dark : .light))
-        .onChange(of: selectedTab) { _ in tabCollapsed = false }
+        .onChange(of: selectedTab) { tab in
+            tabCollapsed = false
+            // Every arrival on the library restarts the scrolling names from their resting place.
+            if tab == 2 { marqueeToken += 1 }
+        }
     }
 
     private var tabContent: some View {
@@ -2239,9 +2389,9 @@ struct ContentView: View {
                          cancel: { pendingRelocate = nil })
                 .padding(30).zIndex(17)
         }
-        if let media = expandedMedia {
-            ExpandedMediaView(media: media) {
-                withAnimation(.easeOut(duration: 0.18)) { expandedMedia = nil }
+        if let viewer = mediaViewer {
+            ExpandedMediaView(media: viewer.media, startIndex: viewer.index) {
+                withAnimation(.easeOut(duration: 0.18)) { mediaViewer = nil }
             }
             .transition(.opacity)
             .zIndex(20)
@@ -2325,34 +2475,71 @@ struct ContentView: View {
         }
     }
 
-    /// Turns raw engine text into something a person can act on.
+    /// Turns raw engine text into one short line a person can act on.
     private func friendlyError(_ raw: String) -> String {
         let r = raw.lowercased()
-        if r.contains("steam guard") || r.contains("guard code") {
-            return "Steam wants a confirmation code. Enter the code from your Steam app and tap Submit code."
+        if r.contains("not own") || r.contains("own this game") || r.contains("licen") || r.contains("purchase") {
+            return "You don't own this game on Steam, so its Workshop items can't be downloaded."
         }
-        if r.contains("not entered in time") { return "The code wasn't entered in time. Tap Sign in to try again." }
-        if r.contains("password") && (r.contains("invalid") || r.contains("incorrect") || r.contains("wrong")) {
-            return "Steam didn't accept that username or password. Check them and try again."
+        if r.contains("private") { return "That Workshop item is private." }
+        if r.contains("not found") || r.contains("does not exist") || r.contains("invalid item") {
+            return "Steam couldn't find that item."
         }
-        if r.contains("rate limit") || r.contains("too many") { return "Steam is limiting requests right now. Wait a minute and try again." }
-        if r.contains("timeout") || r.contains("timed out") || r.contains("network") || r.contains("offline") {
-            return "No connection to Steam. Check your internet and try again."
+        if r.contains("window") && r.contains("item") { return "That item isn't allowed to be downloaded." }
+        if r.contains("rate limit") || r.contains("too many") { return "Steam is limiting requests. Try again in a minute." }
+        if r.contains("without a completion event") && r.contains("download") {
+            return "The download didn't finish. Try again."
+        }
+        if r.contains("timeout") || r.contains("timed out") || r.contains("network") || r.contains("offline")
+            || r.contains("connection") || r.contains("reach") {
+            return "Couldn't reach Steam. Check your connection."
         }
         if r.contains("cancel") { return "The download was cancelled." }
         return raw
     }
 
+    /// How far the running download has got, from the engine's transferred bytes.
+    private var downloadProgress: Double { min(1, max(0, store.progress)) }
+    private var downloadPercent: Int { Int((downloadProgress * 100).rounded()) }
+
+    /// The engine's current step with the trailing dots taken off, so `DottedLabel` can animate them.
+    private var downloadStep: String {
+        var text = store.status
+        while let last = text.last, last == "…" || last == "." || last == " " { text.removeLast() }
+        return text.isEmpty ? "Downloading" : text
+    }
+
+    private func progressBar(_ fraction: Double) -> some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.accentColor.opacity(0.15))
+                Capsule()
+                    .fill(Color.accentColor)
+                    .frame(width: max(6, geo.size.width * min(1, max(0, fraction))))
+            }
+        }
+        .frame(height: 8)
+        .animation(.easeOut(duration: 0.35), value: fraction)
+    }
+
     @ViewBuilder private var downloadBanner: some View {
         if store.isDownloading && selectedTab != 0 {
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 8) {
-                    Text(store.activeTitle).font(.footnote.weight(.semibold)).lineLimit(1)
-                    Spacer(minLength: 0)
-                    Text("\(Int(store.progress * 100))%").font(.footnote.monospacedDigit().weight(.semibold))
-                    Button { store.cancel() } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
+                    Image(systemName: "arrow.down.circle.fill")
+                        .font(.system(size: 14)).foregroundStyle(Color.accentColor)
+                    Text(store.activeTitle.isEmpty ? "Downloading" : store.activeTitle)
+                        .font(.footnote.weight(.semibold)).lineLimit(1)
+                    Spacer(minLength: 6)
+                    Text("\(downloadPercent)%")
+                        .font(.footnote.monospacedDigit().weight(.semibold))
+                        .foregroundStyle(Color.accentColor)
+                    Button { store.cancel() } label: {
+                        Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                    }
+                    .accessibilityLabel("Cancel download")
                 }
-                ProgressView(value: store.progress).tint(.accentColor)
+                progressBar(downloadProgress)
             }
             .padding(10)
             .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
@@ -2506,14 +2693,19 @@ struct ContentView: View {
     }
 
     private var progressCard: some View {
-        let total = max(3, store.phases.count)
-        let filled = min(store.phases.count, total)
-        let percent = Int(Double(filled) / Double(total) * 100)
-        return VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 10) {
-                Text("Downloading").font(.system(size: 15, weight: .semibold))
-                Spacer(minLength: 0)
-                Text("\(percent)%").font(.system(size: 14, weight: .bold).monospacedDigit())
+        return VStack(alignment: .leading, spacing: 11) {
+            HStack(spacing: 11) {
+                Image(systemName: "arrow.down.circle.fill")
+                    .font(.system(size: 22)).foregroundStyle(Color.accentColor)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(store.activeTitle.isEmpty ? "Downloading" : store.activeTitle)
+                        .font(.system(size: 15, weight: .semibold)).lineLimit(1)
+                    DottedLabel(text: downloadStep)
+                        .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+                }
+                Spacer(minLength: 6)
+                Text("\(downloadPercent)%")
+                    .font(.system(size: 13, weight: .bold).monospacedDigit())
                     .foregroundStyle(Color.accentColor)
                 Button { Haptics.tap(); store.cancel() } label: {
                     Image(systemName: "xmark").font(.system(size: 12, weight: .bold)).foregroundStyle(.red)
@@ -2522,14 +2714,12 @@ struct ContentView: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Cancel download")
             }
-            HStack(spacing: 4) {
-                ForEach(0..<total, id: \.self) { i in
-                    Capsule()
-                        .fill(i < filled ? Color.accentColor : Color.accentColor.opacity(0.18))
-                        .frame(height: 8)
-                }
+            progressBar(downloadProgress)
+            if !store.currentFile.isEmpty {
+                Text(store.currentFile)
+                    .font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+                    .lineLimit(1).truncationMode(.middle)
             }
-            .animation(.easeOut(duration: 0.25), value: filled)
         }
         .padding(14)
         .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
@@ -2570,8 +2760,8 @@ struct ContentView: View {
         let media = mediaList(for: item)
         return VStack(alignment: .leading, spacing: 11) {
             if !media.isEmpty {
-                MediaCarousel(media: media, onExpand: { item in
-                    withAnimation(.easeOut(duration: 0.18)) { expandedMedia = item }
+                MediaCarousel(media: media, onExpand: { item, index in
+                    withAnimation(.easeOut(duration: 0.18)) { mediaViewer = MediaViewer(media: media, index: index) }
                 })
                 .id(media.map { $0.id }.joined(separator: "|"))
             }
@@ -2665,9 +2855,15 @@ struct ContentView: View {
         return "\(n) mod\(n == 1 ? "" : "s") · \(Fmt.bytes(store.libraryStorageBytes))"
     }
 
-    private func iconLabel(_ symbol: String, spinning: Bool = false) -> some View {
+    private func iconLabel(_ symbol: String, spinning: Bool = false, waving: Bool = false) -> some View {
         Group {
-            if spinning { ProgressView() } else { Image(systemName: symbol).font(.system(size: 16, weight: .semibold)).foregroundStyle(Color.accentColor) }
+            if spinning {
+                ProgressView()
+            } else if waving {
+                WavingIcon(symbol: symbol)
+            } else {
+                Image(systemName: symbol).font(.system(size: 16, weight: .semibold)).foregroundStyle(Color.accentColor)
+            }
         }
         .frame(width: 36, height: 36)
         .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(Color.accentColor.opacity(0.14)))
@@ -2727,7 +2923,7 @@ struct ContentView: View {
                     .disabled(pending == 0 || store.isBusy)
                 Button { store.exportAll() } label: { Label("Export all as ZIP", systemImage: "square.and.arrow.up") }
             }
-        } label: { iconLabel("ellipsis") }
+        } label: { iconLabel("ellipsis", waving: selecting) }
     }
 
     private var libraryBody: some View {
@@ -2966,8 +3162,9 @@ struct ContentView: View {
             }
 
             Button(action: tap) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(item.displayTitle).font(.system(size: 14, weight: .semibold)).lineLimit(2).multilineTextAlignment(.leading)
+                VStack(alignment: .leading, spacing: 2) {
+                    MarqueeText(text: item.displayTitle, font: .system(size: 14, weight: .semibold),
+                                height: 18, active: selectedTab == 2, restartToken: marqueeToken)
                     HStack(spacing: 6) {
                         RatingLine(rating: item.rating, count: item.ratingCount, size: 12)
                         if showIDs {
@@ -2975,10 +3172,12 @@ struct ContentView: View {
                                 .foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.6)
                         }
                     }
+                    .frame(height: 16, alignment: .leading)
                     HStack(spacing: 4) {
                         StatusGlyph(status: item.status, size: 11)
-                        Text(line.0).font(.system(size: 11, weight: .medium)).foregroundStyle(line.1)
+                        Text(line.0).font(.system(size: 11, weight: .medium)).foregroundStyle(line.1).lineLimit(1)
                     }
+                    .frame(height: 15, alignment: .leading)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
@@ -3420,13 +3619,14 @@ struct ContentView: View {
                                 .background(RoundedRectangle(cornerRadius: 13).fill(Color.accentColor))
                         }.buttonStyle(.plain)
                     }
-                    if !store.errorMessage.isEmpty {
-                        Text(store.errorMessage).font(.footnote).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
+                    if !store.loginError.isEmpty {
+                        Text(store.loginError).font(.footnote).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
                     }
                 }
                 .padding(20)
             }
             .background(Color(uiColor: .systemGroupedBackground))
+            .onDisappear { store.loginError = "" }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Close") { store.showLogin = false } }
             }
@@ -3691,7 +3891,7 @@ struct IDChip: View {
 
 struct MediaCarousel: View {
     let media: [MediaItem]
-    var onExpand: (MediaItem) -> Void = { _ in }
+    var onExpand: (MediaItem, Int) -> Void = { _, _ in }
     @State private var index = 0
 
     var body: some View {
@@ -3701,7 +3901,7 @@ struct MediaCarousel: View {
                     Group {
                         switch item {
                         case .image(let url):
-                            Button { Haptics.tap(); onExpand(item) } label: {
+                            Button { Haptics.tap(); onExpand(item, i) } label: {
                                 CachedImage(urlString: url, fill: false, maxPixel: 1000, isDownloadPreview: true)
                                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                                     .contentShape(Rectangle())
@@ -3712,7 +3912,7 @@ struct MediaCarousel: View {
                             YouTubePlayerView(videoID: id)
                                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                                 .overlay(alignment: .topTrailing) {
-                                    Button { Haptics.tap(); onExpand(item) } label: {
+                                    Button { Haptics.tap(); onExpand(item, i) } label: {
                                         Image(systemName: "arrow.up.left.and.arrow.down.right")
                                             .font(.system(size: 11, weight: .bold)).foregroundStyle(.white)
                                             .frame(width: 28, height: 28)
@@ -3742,62 +3942,105 @@ struct MediaCarousel: View {
     }
 }
 
-/// Tapped media opens here, over a dark blurred backdrop that still shows the screen underneath.
+/// A tapped image or video opens here, over a dark blurred backdrop. It is the same pager as the
+/// carousel, so swiping moves through the item's media, and the page dots sit just under the media.
 struct ExpandedMediaView: View {
-    let media: MediaItem
+    let media: [MediaItem]
+    let startIndex: Int
     let onClose: () -> Void
-    @AppStorage("options.gifDownloads") private var gifDownloads = true
-    @State private var image: UIImage?
+    @State private var index: Int
+
+    init(media: [MediaItem], startIndex: Int, onClose: @escaping () -> Void) {
+        self.media = media
+        self.onClose = onClose
+        self.startIndex = startIndex
+        _index = State(initialValue: max(0, min(startIndex, max(0, media.count - 1))))
+    }
 
     var body: some View {
         GeometryReader { geo in
-            ZStack {
+            ZStack(alignment: .topTrailing) {
                 Rectangle().fill(.ultraThinMaterial)
-                    .overlay(Color.black.opacity(0.45))
+                    .overlay(Color.black.opacity(0.55))
                     .ignoresSafeArea()
                     .contentShape(Rectangle())
                     .onTapGesture { onClose() }
-                content(in: geo.size)
+                TabView(selection: $index) {
+                    ForEach(Array(media.enumerated()), id: \.offset) { i, item in
+                        ExpandedMediaPage(item: item, index: i, count: media.count)
+                            .tag(i)
+                    }
+                }
+                .tabViewStyle(.page(indexDisplayMode: .never))
+                Button { Haptics.tap(); onClose() } label: {
+                    Image(systemName: "xmark").font(.system(size: 13, weight: .bold)).foregroundStyle(.white)
+                        .frame(width: 32, height: 32)
+                        .background(Circle().fill(Color.black.opacity(0.45)))
+                }
+                .buttonStyle(.plain)
+                .padding(.top, 56).padding(.trailing, 16)
+                .accessibilityLabel("Close")
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .frame(width: geo.size.width, height: geo.size.height)
         }
         .ignoresSafeArea()
-        .task(id: media.id) { await load() }
+    }
+}
+
+/// One page of the focused viewer: the media sized to its own shape, with the dots right under it.
+struct ExpandedMediaPage: View {
+    let item: MediaItem
+    let index: Int
+    let count: Int
+    @AppStorage("options.gifDownloads") private var gifDownloads = true
+    @State private var image: UIImage?
+    @State private var failed = false
+
+    var body: some View {
+        GeometryReader { geo in
+            VStack(spacing: 12) {
+                content(in: geo.size)
+                if count > 1 { dots }
+            }
+            .frame(width: geo.size.width, height: geo.size.height, alignment: .center)
+        }
+        .task(id: item.id) { await load() }
     }
 
     @ViewBuilder
     private func content(in size: CGSize) -> some View {
-        let maxWidth = max(160, size.width - 32)
-        let maxHeight = max(160, size.height * 0.7)
-        switch media {
+        let fitting = fittingSize(size)
+        switch item {
         case .video(let id):
-            YouTubePlayerView(videoID: id, fullSize: true)
-                .frame(width: maxWidth, height: min(maxWidth * 9 / 16, maxHeight))
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .shadow(color: .black.opacity(0.4), radius: 20, y: 8)
+            videoPlayer(id, in: fitting)
         case .image:
-            imageBody(maxWidth: maxWidth, maxHeight: maxHeight)
+            imageBody(in: fitting)
         }
     }
 
-    private func imageFrame(maxWidth: CGFloat, maxHeight: CGFloat) -> (width: CGFloat, height: CGFloat) {
-        let ratio = aspectRatio
-        let wide = ratio >= 1.2
-        // Square images and GIFs grow to about 1.5x their carousel size; wide ones to about twice its width.
-        var width = wide ? maxWidth : min(maxWidth, maxHeight)
-        var height = width / ratio
-        if height > maxHeight { height = maxHeight; width = height * ratio }
-        return (width, height)
+    /// The screen, less room for the dots and a little breathing space.
+    private func fittingSize(_ size: CGSize) -> CGSize {
+        CGSize(width: size.width, height: max(160, size.height - (count > 1 ? 34 : 0) - 40))
     }
 
-    private func imageBody(maxWidth: CGFloat, maxHeight: CGFloat) -> some View {
-        let frame = imageFrame(maxWidth: maxWidth, maxHeight: maxHeight)
-        return ZStack {
+    private func videoPlayer(_ id: String, in size: CGSize) -> some View {
+        let width = max(160, min(size.width - 20, size.height * 16 / 9))
+        let height = width * 9 / 16
+        return YouTubePlayerView(videoID: id, fullSize: true)
+            .frame(width: width, height: height)
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .shadow(color: .black.opacity(0.45), radius: 22, y: 10)
+    }
+
+    private func imageBody(in size: CGSize) -> some View {
+        let frame = imageFrame(in: size)
+        return Group {
             if let image {
-                if image.images != nil && gifDownloads {
-                    AnimatedUIImageView(image: image, fill: false)
-                } else {
-                    Image(uiImage: image).resizable().scaledToFit()
+                ZoomableImage(image: image, animate: image.images != nil && gifDownloads)
+            } else if failed {
+                VStack(spacing: 8) {
+                    Image(systemName: "photo").font(.system(size: 28)).foregroundStyle(.white.opacity(0.7))
+                    Text("Couldn't load this image").font(.system(size: 13)).foregroundStyle(.white.opacity(0.8))
                 }
             } else {
                 ProgressView().tint(.white)
@@ -3805,7 +4048,30 @@ struct ExpandedMediaView: View {
         }
         .frame(width: frame.width, height: frame.height)
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .shadow(color: .black.opacity(0.4), radius: 20, y: 8)
+        .shadow(color: .black.opacity(0.45), radius: 22, y: 10)
+    }
+
+    /// Wide images fill the width; square ones stop at the height there is, so nothing is cut off.
+    private func imageFrame(in size: CGSize) -> CGSize {
+        let maxWidth = max(160, size.width - 20)
+        let maxHeight = max(160, size.height)
+        let ratio = max(0.2, aspectRatio)
+        var width = ratio >= 1.2 ? maxWidth : min(maxWidth, maxHeight)
+        var height = width / ratio
+        if height > maxHeight { height = maxHeight; width = height * ratio }
+        return CGSize(width: width, height: height)
+    }
+
+    private var dots: some View {
+        HStack(spacing: 6) {
+            ForEach(0..<count, id: \.self) { i in
+                Circle()
+                    .fill(i == index ? Color.white : Color.white.opacity(0.35))
+                    .frame(width: 6, height: 6)
+            }
+        }
+        .padding(.horizontal, 10).padding(.vertical, 6)
+        .background(Capsule().fill(Color.black.opacity(0.35)))
     }
 
     private var aspectRatio: CGFloat {
@@ -3814,9 +4080,100 @@ struct ExpandedMediaView: View {
     }
 
     private func load() async {
-        guard case .image(let urlString) = media, let url = URL(string: urlString) else { return }
+        guard case .image(let urlString) = item, let url = URL(string: urlString) else { return }
         if let hit = ImageStore.shared.cached(url, animate: gifDownloads) { image = hit; return }
-        image = await ImageStore.shared.load(url, maxPixel: 1600, animate: gifDownloads)
+        let loaded = await ImageStore.shared.load(url, maxPixel: 2000, animate: gifDownloads)
+        if Task.isCancelled { return }
+        image = loaded
+        failed = loaded == nil
+    }
+}
+
+/// An image that pinches to zoom around your fingers and pans while zoomed in. At normal size the
+/// pan gesture is off, so a sideways swipe still moves the focused viewer to the next image.
+struct ZoomableImage: UIViewRepresentable {
+    let image: UIImage
+    var animate = false
+
+    func makeUIView(context: Context) -> ZoomImageView {
+        let view = ZoomImageView()
+        view.set(image: image, animated: animate)
+        return view
+    }
+
+    func updateUIView(_ view: ZoomImageView, context: Context) {
+        if view.shownImage !== image { view.set(image: image, animated: animate) }
+    }
+}
+
+final class ZoomImageView: UIScrollView, UIScrollViewDelegate {
+    private let imageView = UIImageView()
+    private(set) var shownImage: UIImage?
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        delegate = self
+        backgroundColor = .clear
+        showsVerticalScrollIndicator = false
+        showsHorizontalScrollIndicator = false
+        bouncesZoom = true
+        decelerationRate = .fast
+        contentInsetAdjustmentBehavior = .never
+        minimumZoomScale = 1
+        maximumZoomScale = 5
+        imageView.contentMode = .scaleAspectFit
+        addSubview(imageView)
+        // Pinching keeps working while the pan gesture is off, so the pager keeps the swipes at 1x.
+        panGestureRecognizer.isEnabled = false
+        let doubleTap = UITapGestureRecognizer(target: self, action: #selector(doubleTapped(_:)))
+        doubleTap.numberOfTapsRequired = 2
+        addGestureRecognizer(doubleTap)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func set(image: UIImage, animated: Bool) {
+        shownImage = image
+        imageView.image = image
+        imageView.frame = CGRect(origin: .zero, size: bounds.size)
+        zoomScale = 1
+        contentSize = bounds.size
+        if animated { imageView.startAnimating() } else { imageView.stopAnimating() }
+        setNeedsLayout()
+        updatePanGesture()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        if zoomScale <= 1.01, imageView.frame.size != bounds.size {
+            imageView.frame = CGRect(origin: .zero, size: bounds.size)
+            contentSize = bounds.size
+        }
+    }
+
+    func viewForZooming(in scrollView: UIScrollView) -> UIView? { imageView }
+
+    func scrollViewDidZoom(_ scrollView: UIScrollView) {
+        let insetX = max(0, (bounds.width - contentSize.width) / 2)
+        let insetY = max(0, (bounds.height - contentSize.height) / 2)
+        contentInset = UIEdgeInsets(top: insetY, left: insetX, bottom: insetY, right: insetX)
+        updatePanGesture()
+    }
+
+    private func updatePanGesture() {
+        panGestureRecognizer.isEnabled = zoomScale > 1.01
+    }
+
+    @objc private func doubleTapped(_ gesture: UITapGestureRecognizer) {
+        if zoomScale > 1.01 {
+            setZoomScale(1, animated: true)
+            return
+        }
+        let point = gesture.location(in: imageView)
+        let width = bounds.width / 2.6
+        let height = bounds.height / 2.6
+        zoom(to: CGRect(x: point.x - width / 2, y: point.y - height / 2, width: width, height: height),
+             animated: true)
     }
 }
 
@@ -4029,13 +4386,46 @@ struct GameHit: Codable, Identifiable, Equatable {
 struct GameSearchResponse: Codable { let items: [GameHit] }
 
 enum GameSearch {
-    /// Finds games by name using Steam's public store search (no sign-in needed).
+    /// Finds games by name with Steam's public store search, then keeps only the ones that have a
+    /// Workshop ("Steam Workshop" is category 30 in the app details), so the browse page never
+    /// offers a game whose Workshop link leads nowhere.
     static func search(_ term: String) async -> [GameHit] {
         guard let q = term.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
               let url = URL(string: "https://store.steampowered.com/api/storesearch/?term=\(q)&l=english&cc=US"),
               let (data, _) = try? await URLSession.shared.data(from: url),
               let root = try? JSONDecoder().decode(GameSearchResponse.self, from: data) else { return [] }
-        return root.items
+        let hits = root.items
+        guard !hits.isEmpty else { return [] }
+        var supported: [Int: Bool] = [:]
+        let ids = hits.map(\.id)
+        var start = 0
+        while start < ids.count {
+            let chunk = Array(ids[start..<min(start + 20, ids.count)])
+            start += 20
+            let found = await workshopSupport(for: chunk)
+            for (app, hasWorkshop) in found { supported[app] = hasWorkshop }
+        }
+        return hits.filter { supported[$0.id] ?? true }
+    }
+
+    /// Whether each of `apps` lists the Steam Workshop category. Apps the details call missing are
+    /// dropped; a request that fails leaves those games in rather than emptying the results.
+    private static func workshopSupport(for apps: [Int]) async -> [Int: Bool] {
+        let list = apps.map(String.init).joined(separator: ",")
+        guard let url = URL(string: "https://store.steampowered.com/api/appdetails?appids=\(list)&filters=categories&l=english"),
+              let (data, _) = try? await URLSession.shared.data(from: url),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }
+        var result: [Int: Bool] = [:]
+        for (key, value) in root {
+            guard let app = Int(key), let entry = value as? [String: Any] else { continue }
+            guard (entry["success"] as? Bool) == true, let details = entry["data"] as? [String: Any] else {
+                result[app] = false
+                continue
+            }
+            let categories = details["categories"] as? [[String: Any]] ?? []
+            result[app] = categories.contains { ($0["id"] as? Int) == 30 }
+        }
+        return result
     }
 }
 
@@ -4405,7 +4795,6 @@ struct WorkshopWebContainer: UIViewRepresentable {
         view.scrollView.backgroundColor = UIColor.systemBackground
         view.scrollView.contentInsetAdjustmentBehavior = .never
         view.scrollView.contentInset.bottom = bottomInset
-        view.pageZoom = zoom
         context.coordinator.observe(view)
         webView = view
 
@@ -4421,7 +4810,10 @@ struct WorkshopWebContainer: UIViewRepresentable {
 
     func updateUIView(_ view: WKWebView, context: Context) {
         context.coordinator.parent = self
-        if abs(view.pageZoom - zoom) > 0.001 { view.pageZoom = zoom }
+        if abs(zoom - context.coordinator.lastZoom) > 0.001 {
+            context.coordinator.lastZoom = zoom
+            view.evaluateJavaScript(Self.zoomScript(zoom), completionHandler: nil)
+        }
         if abs(view.scrollView.contentInset.bottom - bottomInset) > 0.5 { view.scrollView.contentInset.bottom = bottomInset }
         if let url = requestedURL {
             view.load(URLRequest(url: url))
@@ -4435,6 +4827,29 @@ struct WorkshopWebContainer: UIViewRepresentable {
 
     static func lastPage() -> URL? {
         UserDefaults.standard.string(forKey: WorkshopBrowserView.lastPageKey).flatMap { URL(string: $0) }
+    }
+
+    /// Scales the page inside its own layout, so it stays exactly as wide as the screen. Page zoom
+    /// leaves a gutter beside the content, which is where the bars came from.
+    static func zoomScript(_ zoom: Double) -> String {
+        let value = String(format: "%.3f", zoom)
+        return """
+        (function(){
+          var z = \(value);
+          var id = 'ms-zoom';
+          var st = document.getElementById(id);
+          if (!st) {
+            st = document.createElement('style');
+            st.id = id;
+            document.head.appendChild(st);
+          }
+          if (window.CSS && CSS.supports && CSS.supports('zoom', '1.5')) {
+            st.innerHTML = 'html{zoom:' + z + ' !important}';
+          } else {
+            st.innerHTML = 'html{-webkit-text-size-adjust:' + Math.round(z * 100) + '% !important}';
+          }
+        })();
+        """
     }
 
     /// Hides Steam's header, store link, the game tab row, news, RSS and the About box.
@@ -4541,11 +4956,13 @@ struct WorkshopWebContainer: UIViewRepresentable {
     final class Coordinator: NSObject, WKNavigationDelegate, UIScrollViewDelegate, WKScriptMessageHandler {
         var parent: WorkshopWebContainer
         var lastClean: Bool
+        var lastZoom: Double
         private var observations: [NSKeyValueObservation] = []
 
         init(_ parent: WorkshopWebContainer) {
             self.parent = parent
             self.lastClean = parent.cleanPages
+            self.lastZoom = parent.zoom
         }
 
         func observe(_ view: WKWebView) {
@@ -4582,6 +4999,7 @@ struct WorkshopWebContainer: UIViewRepresentable {
             if parent.cleanPages {
                 webView.evaluateJavaScript(WorkshopWebContainer.hideScript, completionHandler: nil)
             }
+            webView.evaluateJavaScript(WorkshopWebContainer.zoomScript(parent.zoom), completionHandler: nil)
         }
 
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
