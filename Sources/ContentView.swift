@@ -1070,7 +1070,11 @@ final class WorkshopStore: ObservableObject {
         let nextStatus = engine.status()
         // Each new step Steam reports becomes its own segment of the progress bar.
         if isDownloading, !nextStatus.isEmpty, phases.last != nextStatus { phases.append(nextStatus) }
-        let nextProgress = min(1, max(0, engine.progress()))
+        // SteamEngine exposes status phases but not reliable byte totals. Keep the original
+        // phase-based visual progress rather than displaying a misleading byte-accurate value.
+        let nextProgress: Double = isDownloading
+            ? min(0.92, max(progress, Double(phases.count) / 8.0))
+            : min(1, max(0, engine.progress()))
         let nextFile = engine.currentFile()
         let waitingForCode = nextStatus == "Steam Guard code required"
         if waitingForCode != needsGuardCode { needsGuardCode = waitingForCode }
@@ -1881,6 +1885,24 @@ struct RatingLine: View {
     }
 }
 
+struct SelectionWaveDots: View {
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 0.08, paused: false)) { timeline in
+            let t = timeline.date.timeIntervalSinceReferenceDate
+            HStack(spacing: 3) {
+                ForEach(0..<3, id: \.self) { index in
+                    Circle()
+                        .fill(Color.accentColor)
+                        .frame(width: 4, height: 4)
+                        .offset(y: sin(t * 5 - Double(index) * 0.8) * 2.2)
+                }
+            }
+            .frame(width: 36, height: 36)
+        }
+        .accessibilityLabel("Selection actions")
+    }
+}
+
 // MARK: - Main view
 
 struct ContentView: View {
@@ -2133,8 +2155,8 @@ struct ContentView: View {
             tabContent
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .background(Color(uiColor: .systemGroupedBackground))
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
         .safeAreaInset(edge: .bottom, spacing: 0) {
             AppTabBar(selected: $selectedTab, style: tabStyle, collapsed: tabCollapsed,
                       libraryBadge: store.library.contains(where: { $0.updateAvailable }),
@@ -2688,7 +2710,12 @@ struct ContentView: View {
 
     private func iconLabel(_ symbol: String, spinning: Bool = false) -> some View {
         Group {
-            if spinning { ProgressView() } else { Image(systemName: symbol).font(.system(size: 16, weight: .semibold)).foregroundStyle(Color.accentColor) }
+            if spinning { ProgressView() }
+            else if symbol == "ellipsis" && selecting && selection.count >= 2 {
+                SelectionWaveDots()
+            } else {
+                Image(systemName: symbol).font(.system(size: 16, weight: .semibold)).foregroundStyle(Color.accentColor)
+            }
         }
         .frame(width: 36, height: 36)
         .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(Color.accentColor.opacity(0.14)))
@@ -2994,19 +3021,27 @@ struct ContentView: View {
 
             Button(action: tap) {
                 VStack(alignment: .leading, spacing: 2) {
-                    MarqueeTitle(text: item.displayTitle, fontSize: 14)
-                        .frame(height: 18, alignment: .leading)
+                    Text(item.displayTitle)
+                        .font(.system(size: 14, weight: .semibold))
+                        .lineLimit(2, reservesSpace: true)
+                        .truncationMode(.tail)
+                        .multilineTextAlignment(.leading)
+                        .frame(maxWidth: .infinity, minHeight: 34, maxHeight: 34, alignment: .topLeading)
                     HStack(spacing: 6) {
-                        RatingLine(rating: item.rating, count: item.ratingCount, size: 12)
+                        if item.rating != nil {
+                            RatingLine(rating: item.rating, count: item.ratingCount, size: 12)
+                        }
                         if showIDs {
                             Text("ID: \(item.id)").font(.system(size: 10, weight: .medium, design: .monospaced))
                                 .foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.6)
                         }
                     }
+                    .frame(height: 15, alignment: .leading)
                     HStack(spacing: 4) {
                         StatusGlyph(status: item.status, size: 11)
-                        Text(line.0).font(.system(size: 11, weight: .medium)).foregroundStyle(line.1)
+                        Text(line.0).font(.system(size: 11, weight: .medium)).foregroundStyle(line.1).lineLimit(1)
                     }
+                    .frame(height: 15, alignment: .leading)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
@@ -3535,64 +3570,6 @@ struct ContentView: View {
         .textInputAutocapitalization(.never).autocorrectionDisabled()
         .padding(.horizontal, 13).frame(height: 46)
         .background(RoundedRectangle(cornerRadius: 11).fill(Color(uiColor: .secondarySystemGroupedBackground)))
-    }
-}
-
-/// Single-line title that scrolls continuously only when its full text does not fit.
-struct MarqueeTitle: View {
-    let text: String
-    var fontSize: CGFloat = 14
-    @State private var shouldScroll = false
-    @State private var textWidth: CGFloat = 0
-    @State private var offset: CGFloat = 0
-    private let gap: CGFloat = 34
-    private var font: UIFont { .systemFont(ofSize: fontSize, weight: .semibold) }
-
-    var body: some View {
-        GeometryReader { geo in
-            ZStack(alignment: .leading) {
-                if shouldScroll {
-                    HStack(spacing: gap) {
-                        titleText
-                        titleText
-                    }
-                    .fixedSize(horizontal: true, vertical: false)
-                    .offset(x: offset)
-                    .onAppear { startIfNeeded(containerWidth: geo.size.width) }
-                } else {
-                    titleText
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-            }
-            .frame(width: geo.size.width, height: geo.size.height, alignment: .leading)
-            .clipped()
-            .onAppear { update(containerWidth: geo.size.width) }
-            .onChange(of: geo.size.width) { update(containerWidth: $0) }
-            .onChange(of: text) { _ in update(containerWidth: geo.size.width) }
-        }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(text)
-    }
-
-    private var titleText: some View {
-        Text(text).font(.system(size: fontSize, weight: .semibold)).lineLimit(1).fixedSize(horizontal: true, vertical: false)
-    }
-
-    private func update(containerWidth: CGFloat) {
-        let measured = (text as NSString).size(withAttributes: [.font: font]).width
-        textWidth = measured
-        shouldScroll = measured > containerWidth + 1
-        if !shouldScroll { offset = 0 }
-        else { startIfNeeded(containerWidth: containerWidth) }
-    }
-
-    private func startIfNeeded(containerWidth: CGFloat) {
-        guard shouldScroll, textWidth > containerWidth else { return }
-        offset = 0
-        let distance = textWidth + gap
-        withAnimation(.linear(duration: max(5, Double(distance / 22))).repeatForever(autoreverses: false)) {
-            offset = -distance
-        }
     }
 }
 
