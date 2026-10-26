@@ -60,7 +60,23 @@ func (e *Engine) IsAuthenticated() bool {
 	return e.authenticated && e.client != nil
 }
 
-func (e *Engine) Login(username, password, guardCode, cachePath string) string {
+// Login runs the full Steam sign-in flow. gomobile does not recover panics in
+// exported functions, so a panic anywhere in the engine would kill the whole
+// app instantly — and the engine runs at every launch via auto sign-in. Every
+// entry point therefore converts a panic into a returned error message.
+func (e *Engine) Login(username, password, guardCode, cachePath string) (result string) {
+	defer func() {
+		if r := recover(); r != nil {
+			result = fmt.Sprintf("Steam engine error: %v (please try signing in again)", r)
+			if e.mu.TryLock() {
+				e.status = "Sign-in failed"
+				e.lastError = result
+				e.guardCh = nil
+				e.guardPending = false
+				e.mu.Unlock()
+			}
+		}
+	}()
 	e.loginMu.Lock()
 	defer e.loginMu.Unlock()
 	username = strings.TrimSpace(username)
@@ -200,7 +216,21 @@ func (e *Engine) DownloadWorkshopItem(itemID, targetDir string) string {
 	e.mu.Unlock()
 
 	go func() {
-		defer func() { e.mu.Lock(); e.cancel = nil; e.mu.Unlock() }()
+		defer func() {
+			// A panic in the download goroutine must not kill the app either.
+			if r := recover(); r != nil {
+				if e.mu.TryLock() {
+					e.status = "Download failed"
+					e.lastError = fmt.Sprintf("Steam engine error: %v", r)
+					e.cancel = nil
+					e.mu.Unlock()
+				}
+				return
+			}
+			e.mu.Lock()
+			e.cancel = nil
+			e.mu.Unlock()
+		}()
 		fail := func(err error) {
 			e.mu.Lock()
 			e.status = "Download failed"
