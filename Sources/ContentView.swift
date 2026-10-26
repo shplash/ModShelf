@@ -909,9 +909,8 @@ final class WorkshopStore: ObservableObject {
     }
 
     private func updateFolderLabel() {
-        if let root = customRoot {
-            folderLabel = Self.displayName(root)
-        } else { folderLabel = "On My iPhone / ModShelf / Downloaded Mods" }
+        // The real path, so it matches where the app is installed (LiveContainer included).
+        folderLabel = currentRootURL.path
     }
 
     var usingCustomFolder: Bool { customRoot != nil }
@@ -1976,95 +1975,114 @@ struct RatingLine: View {
     }
 }
 
-/// One line of text that slides sideways when it doesn't fit, so a long mod name never makes a
-/// grid cell taller than its neighbours. It rests a second, slides the whole name into view, holds
-/// a second, slides back, then rests again before the next pass. Changing `restartToken` (or the
-/// text, or the space it has) starts the cycle over from the beginning.
-struct MarqueeText: View {
+/// One line of text that scrolls sideways when it doesn't fit, so a long mod name never makes a
+/// grid cell taller than its neighbours. The timing lives in UIKit, so leaving a tab puts the name
+/// back on its first letter immediately and coming back always waits a second before it moves.
+struct MarqueeText: UIViewRepresentable {
     let text: String
-    let font: Font
+    var fontSize: CGFloat = 14
+    var weight: UIFont.Weight = .semibold
     var height: CGFloat = 17
     var speed: CGFloat = 26
     var active = true
     var restartToken = 0
 
-    @State private var textWidth: CGFloat = 0
-    @State private var boxWidth: CGFloat = 0
-    @State private var offset: CGFloat = 0
-
-    private var overflow: CGFloat { max(0, textWidth - boxWidth) }
-
-    /// Any change here cancels the running pass and starts a fresh one.
-    private var cycleKey: String {
-        "\(restartToken)|\(active)|\(Int(textWidth.rounded()))|\(Int(boxWidth.rounded()))|\(text)"
+    func makeUIView(context: Context) -> MarqueeUIView {
+        let view = MarqueeUIView()
+        view.update(text: text, font: .systemFont(ofSize: fontSize, weight: weight),
+                    active: active, token: restartToken, speed: speed)
+        return view
     }
 
-    var body: some View {
-        GeometryReader { geo in
-            label
-                .fixedSize()
-                .background(
-                    GeometryReader { g in
-                        Color.clear
-                            .onAppear { setTextWidth(g.size.width) }
-                            .onChange(of: g.size.width) { setTextWidth($0) }
-                    }
-                )
-                .offset(x: offset)
-                .frame(width: geo.size.width, height: geo.size.height, alignment: .leading)
-                .clipped()
-                .onAppear { setBoxWidth(geo.size.width) }
-                .onChange(of: geo.size.width) { setBoxWidth($0) }
+    func updateUIView(_ view: MarqueeUIView, context: Context) {
+        view.update(text: text, font: .systemFont(ofSize: fontSize, weight: weight),
+                    active: active, token: restartToken, speed: speed)
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: MarqueeUIView, context: Context) -> CGSize? {
+        guard let width = proposal.width else { return nil }
+        return CGSize(width: width, height: height)
+    }
+}
+
+/// The label that does the scrolling. All of the state is here, so a tab switch can never leave a
+/// half-finished scroll behind.
+final class MarqueeUIView: UIView {
+    private let label = UILabel()
+    private var speed: CGFloat = 26
+    private var active = false
+    private var generation = 0
+    private var lastWidth: CGFloat = 0
+    private var lastToken = -1
+    private var lastText = ""
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        clipsToBounds = true
+        backgroundColor = .clear
+        label.numberOfLines = 1
+        label.lineBreakMode = .byClipping
+        addSubview(label)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func update(text: String, font: UIFont, active: Bool, token: Int, speed: CGFloat) {
+        self.speed = speed
+        if label.font != font { label.font = font }
+        if label.text != text { label.text = text }
+        let changed = text != lastText || token != lastToken || active != self.active
+        lastText = text
+        lastToken = token
+        self.active = active
+        if changed { restart() }
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        if abs(bounds.width - lastWidth) > 0.5 {
+            lastWidth = bounds.width
+            restart()
         }
-        .frame(height: height)
-        .accessibilityLabel(text)
-        .onChange(of: restartToken) { _ in snapToStart() }
-        .onChange(of: active) { isActive in
-            if !isActive { snapToStart() }
-        }
-        .onDisappear { snapToStart() }
-        .task(id: cycleKey) { await run() }
     }
 
-    /// Puts the name back at its first letter without animating the change.
-    private func snapToStart() {
-        withTransaction(Transaction(animation: nil)) { offset = 0 }
+    /// Coming back to the library (from history, say) starts the name over with its pause.
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window != nil { restart() }
     }
 
-    private var label: some View {
-        Text(text).font(font).lineLimit(1).fixedSize(horizontal: true, vertical: false)
+    /// Puts the first letter at the left edge and, when there is something to scroll, starts the
+    /// one-second pause that begins every pass.
+    private func restart() {
+        generation += 1
+        let generation = self.generation
+        label.layer.removeAllAnimations()
+        label.transform = .identity
+        label.sizeToFit()
+        label.frame = CGRect(x: 0, y: (bounds.height - label.frame.height) / 2,
+                             width: label.frame.width, height: label.frame.height)
+        guard active, bounds.width > 0 else { return }
+        schedulePass(generation: generation)
     }
 
-    private func setTextWidth(_ width: CGFloat) {
-        guard abs(width - textWidth) > 0.5 else { return }
-        textWidth = width
-    }
-
-    private func setBoxWidth(_ width: CGFloat) {
-        guard abs(width - boxWidth) > 0.5 else { return }
-        boxWidth = width
-    }
-
-    @MainActor
-    private func run() async {
-        // Always begin on the first letter, with no animation carrying over.
-        snapToStart()
-        guard active, overflow > 0.5 else { return }
-        while !Task.isCancelled {
-            // A second at rest before setting off.
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
-            if Task.isCancelled { return }
-
-            let distance = overflow
-            let travel = max(1.2, Double(distance / max(1, speed)))
-            withAnimation(.linear(duration: travel)) { offset = -distance }
-            // A second with the end of the name showing.
-            try? await Task.sleep(nanoseconds: UInt64((travel + 1.0) * 1_000_000_000))
-            if Task.isCancelled { return }
-
-            // Snap back to the start, then rest before the next pass.
-            snapToStart()
-            try? await Task.sleep(nanoseconds: 1_250_000_000)
+    private func schedulePass(generation: Int, delay: TimeInterval = 0) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, self.generation == generation, self.active else { return }
+            let overflow = max(0, self.label.bounds.width - self.bounds.width)
+            guard overflow > 0.5 else { return }
+            let travel = max(1.2, Double(overflow / self.speed))
+            UIView.animate(withDuration: travel, delay: 1.0,
+                           options: [.curveLinear, .beginFromCurrentState]) {
+                self.label.transform = CGAffineTransform(translationX: -overflow, y: 0)
+            } completion: { _ in
+                guard self.generation == generation, self.active else { return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    guard self.generation == generation, self.active else { return }
+                    self.label.transform = .identity
+                    self.schedulePass(generation: generation)
+                }
+            }
         }
     }
 }
@@ -3321,7 +3339,7 @@ struct ContentView: View {
 
             Button(action: tap) {
                 VStack(alignment: .leading, spacing: 1) {
-                    MarqueeText(text: item.displayTitle, font: .system(size: 14, weight: .semibold),
+                    MarqueeText(text: item.displayTitle, fontSize: 14, weight: .semibold,
                                 height: 17, active: selectedTab == 2, restartToken: marqueeToken)
                     HStack(spacing: 6) {
                         if item.rating != nil {
@@ -3593,9 +3611,20 @@ struct ContentView: View {
                 divider
                 toggleRow("Write info file into each mod", symbol: "doc.text", isOn: $infoFile)
                 divider
-                Button { Haptics.tap(); folderSheet = .shared } label: {
-                    rowContent("Shared mod folder", symbol: "folder", detail: store.folderLabel)
-                }.buttonStyle(.plain)
+                HStack(spacing: 6) {
+                    Button { Haptics.tap(); folderSheet = .shared } label: {
+                        rowContent("Shared mod folder", symbol: "folder", detail: store.folderLabel)
+                    }.buttonStyle(.plain)
+                    Button { Haptics.tap(); store.revealFolder(store.currentRootURL) } label: {
+                        Image(systemName: "folder")
+                            .font(.system(size: 13, weight: .semibold)).foregroundStyle(.secondary)
+                            .frame(width: 30, height: 30)
+                            .background(Circle().fill(Color.secondary.opacity(0.12)))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Open the shared mod folder")
+                }
+                .padding(.trailing, 12)
                 if store.usingCustomFolder {
                     divider
                     Button { Haptics.tap(); store.resetFolder(for: nil) } label: {
@@ -3633,9 +3662,9 @@ struct ContentView: View {
                         .buttonStyle(.plain)
                         Button { Haptics.tap(); store.revealFolder(store.root(forGame: game.id)) } label: {
                             Image(systemName: "folder")
-                                .font(.system(size: 13, weight: .semibold)).foregroundStyle(Color.accentColor)
+                                .font(.system(size: 13, weight: .semibold)).foregroundStyle(.secondary)
                                 .frame(width: 30, height: 30)
-                                .background(Circle().fill(Color.accentColor.opacity(0.12)))
+                                .background(Circle().fill(Color.secondary.opacity(0.12)))
                         }
                         .buttonStyle(.plain)
                         .accessibilityLabel("Open \(game.name)'s folder")
@@ -4150,13 +4179,12 @@ struct MediaCarousel: View {
                     Group {
                         switch item {
                         case .image(let url):
-                            Button { Haptics.tap(); onExpand(item, i) } label: {
-                                CachedImage(urlString: url, fill: false, maxPixel: 1000, isDownloadPreview: true)
-                                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                                    .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("Open image larger")
+                            // Images and GIFs zoom in place; videos never do.
+                            ZoomableCarouselImage(urlString: url, onTap: {
+                                Haptics.tap()
+                                onExpand(item, i)
+                            })
+                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                         case .video(let id):
                             YouTubePlayerView(videoID: id)
                                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -4347,24 +4375,84 @@ struct ExpandedMediaPage: View {
 }
 
 /// An image that pinches to zoom around your fingers and pans while zoomed in. At normal size the
-/// pan gesture is off, so a sideways swipe still moves the focused viewer to the next image.
+/// pan gesture is off, so a sideways swipe still moves the pager to the next page. Only images and
+/// GIFs use this; videos are always plain players.
 struct ZoomableImage: UIViewRepresentable {
     let image: UIImage
     var animate = false
+    /// Called for a single tap while the image is not zoomed in.
+    var onTap: (() -> Void)? = nil
+
+    func makeCoordinator() -> Coordinator { Coordinator(onTap: onTap) }
 
     func makeUIView(context: Context) -> ZoomImageView {
         let view = ZoomImageView()
         view.set(image: image, animated: animate)
+        context.coordinator.attach(to: view)
         return view
     }
 
     func updateUIView(_ view: ZoomImageView, context: Context) {
+        context.coordinator.onTap = onTap
         if view.shownImage !== image { view.set(image: image, animated: animate) }
+    }
+
+    final class Coordinator {
+        var onTap: (() -> Void)?
+        weak var view: ZoomImageView?
+
+        init(onTap: (() -> Void)?) { self.onTap = onTap }
+
+        func attach(to view: ZoomImageView) {
+            self.view = view
+            let doubleTap = UITapGestureRecognizer(target: self, action: #selector(doubleTapped(_:)))
+            doubleTap.numberOfTapsRequired = 2
+            view.addGestureRecognizer(doubleTap)
+
+            let singleTap = UITapGestureRecognizer(target: self, action: #selector(singleTapped(_:)))
+            singleTap.require(toFail: doubleTap)
+            view.addGestureRecognizer(singleTap)
+        }
+
+        @objc private func singleTapped(_ gesture: UITapGestureRecognizer) {
+            guard let view, view.zoomScale <= 1.01 else { return }
+            onTap?()
+        }
+
+        @objc private func doubleTapped(_ gesture: UITapGestureRecognizer) {
+            guard let view else { return }
+            view.toggleZoom(at: gesture.location(in: view.imageView))
+        }
+    }
+}
+
+/// An image or GIF in the downloads carousel, with the same pinch-to-zoom as the full-screen
+/// viewer. A tap while it is not zoomed opens the full-screen viewer.
+struct ZoomableCarouselImage: View {
+    let urlString: String?
+    var onTap: () -> Void
+    @AppStorage("options.gifDownloads") private var gifDownloads = true
+    @State private var image: UIImage?
+
+    var body: some View {
+        ZStack {
+            if let image {
+                ZoomableImage(image: image, animate: image.images != nil && gifDownloads, onTap: onTap)
+            } else {
+                Color(uiColor: .tertiarySystemFill)
+                Image(systemName: "shippingbox").font(.title2).foregroundStyle(.tertiary)
+            }
+        }
+        .task(id: (urlString ?? "") + (gifDownloads ? "|1" : "|0")) {
+            guard let s = urlString, !s.isEmpty, let url = URL(string: s) else { image = nil; return }
+            if let hit = ImageStore.shared.cached(url, animate: gifDownloads) { image = hit; return }
+            image = await ImageStore.shared.load(url, maxPixel: 1000, animate: gifDownloads)
+        }
     }
 }
 
 final class ZoomImageView: UIScrollView, UIScrollViewDelegate {
-    private let imageView = UIImageView()
+    let imageView = UIImageView()
     private(set) var shownImage: UIImage?
 
     override init(frame: CGRect) {
@@ -4382,9 +4470,6 @@ final class ZoomImageView: UIScrollView, UIScrollViewDelegate {
         addSubview(imageView)
         // Pinching keeps working while the pan gesture is off, so the pager keeps the swipes at 1x.
         panGestureRecognizer.isEnabled = false
-        let doubleTap = UITapGestureRecognizer(target: self, action: #selector(doubleTapped(_:)))
-        doubleTap.numberOfTapsRequired = 2
-        addGestureRecognizer(doubleTap)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -4421,12 +4506,11 @@ final class ZoomImageView: UIScrollView, UIScrollViewDelegate {
         panGestureRecognizer.isEnabled = zoomScale > 1.01
     }
 
-    @objc private func doubleTapped(_ gesture: UITapGestureRecognizer) {
+    func toggleZoom(at point: CGPoint) {
         if zoomScale > 1.01 {
             setZoomScale(1, animated: true)
             return
         }
-        let point = gesture.location(in: imageView)
         let width = bounds.width / 2.6
         let height = bounds.height / 2.6
         zoom(to: CGRect(x: point.x - width / 2, y: point.y - height / 2, width: width, height: height),
