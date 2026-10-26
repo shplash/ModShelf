@@ -747,7 +747,11 @@ final class WorkshopStore: ObservableObject {
     private func resolveCustomRoot() {
         guard let data = UserDefaults.standard.data(forKey: "options.folderBookmark") else { return }
         var stale = false
-        guard let url = try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &stale) else { return }
+        guard let url = try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &stale) else {
+            // A bookmark saved by an older install can no longer resolve; forget it instead of retrying every launch.
+            UserDefaults.standard.removeObject(forKey: "options.folderBookmark")
+            return
+        }
         if url.startAccessingSecurityScopedResource() { scopedURL = url }
         customRoot = url
         if stale, let fresh = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) {
@@ -762,9 +766,15 @@ final class WorkshopStore: ObservableObject {
         guard let stored = UserDefaults.standard.dictionary(forKey: Self.gameFoldersKey), !stored.isEmpty else { return }
         var refreshed = stored
         for (app, value) in stored {
-            guard let data = value as? Data else { continue }
+            guard let data = value as? Data else {
+                refreshed.removeValue(forKey: app)
+                continue
+            }
             var stale = false
-            guard let url = try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &stale) else { continue }
+            guard let url = try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &stale) else {
+                refreshed.removeValue(forKey: app)
+                continue
+            }
             if url.startAccessingSecurityScopedResource() { gameScopes[app] = url }
             gameRoots[app] = url
             if stale, let fresh = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) {
@@ -817,7 +827,12 @@ final class WorkshopStore: ObservableObject {
         if let game {
             loadGameFolders()
             if let previous = gameScopes[game], previous.path != url.path { previous.stopAccessingSecurityScopedResource() }
-            gameScopes[game] = started ? url : nil
+            // Picking the folder that is already set must not start a second access to it.
+            if let previous = gameScopes[game], previous.path == url.path {
+                if started { url.stopAccessingSecurityScopedResource() }
+            } else {
+                gameScopes[game] = started ? url : nil
+            }
             gameRoots[game] = url
             var stored = UserDefaults.standard.dictionary(forKey: Self.gameFoldersKey) ?? [:]
             stored[game] = data
@@ -826,7 +841,11 @@ final class WorkshopStore: ObservableObject {
             operationMessage = "New downloads for this game go to \(Self.displayName(url)). Mods already installed elsewhere stay where they are until you move them."
         } else {
             if let previous = scopedURL, previous.path != url.path { previous.stopAccessingSecurityScopedResource() }
-            scopedURL = started ? url : nil
+            if let previous = scopedURL, previous.path == url.path {
+                if started { url.stopAccessingSecurityScopedResource() }
+            } else {
+                scopedURL = started ? url : nil
+            }
             customRoot = url
             UserDefaults.standard.set(data, forKey: "options.folderBookmark")
             updateFolderLabel()
@@ -1976,19 +1995,22 @@ struct MarqueeText: View {
     }
 }
 
-/// A gentle side-to-side wave, used on the actions button while mods are selected.
-struct WavingIcon: View {
-    let symbol: String
-    var size: CGFloat = 16
-    @State private var leans = false
-
+/// Three dots that ripple while mods are selected, so the actions button waves instead of sitting still.
+struct SelectionWaveDots: View {
     var body: some View {
-        Image(systemName: symbol)
-            .font(.system(size: size, weight: .semibold))
-            .foregroundStyle(Color.accentColor)
-            .rotationEffect(.degrees(leans ? 12 : -12))
-            .animation(.easeInOut(duration: 0.55).repeatForever(autoreverses: true), value: leans)
-            .onAppear { leans = true }
+        TimelineView(.animation(minimumInterval: 0.08, paused: false)) { timeline in
+            let t = timeline.date.timeIntervalSinceReferenceDate
+            HStack(spacing: 3) {
+                ForEach(0..<3, id: \.self) { index in
+                    Circle()
+                        .fill(Color.accentColor)
+                        .frame(width: 4, height: 4)
+                        .offset(y: sin(t * 5 - Double(index) * 0.8) * 2.2)
+                }
+            }
+            .frame(width: 36, height: 36)
+        }
+        .accessibilityLabel("Selection actions")
     }
 }
 
@@ -2227,9 +2249,9 @@ struct ContentView: View {
             if phase == .active, selectedTab == 2 { marqueeToken += 1 }
         }
         .onChange(of: store.errorMessage) { message in
-            guard !message.isEmpty else { return }
+            guard !message.isEmpty, !store.showLogin else { return }
             DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
-                if store.errorMessage == message { withAnimation { store.errorMessage = "" } }
+                if store.errorMessage == message && !store.showLogin { withAnimation { store.errorMessage = "" } }
             }
         }
         .onChange(of: store.operationMessage) { message in
@@ -2258,11 +2280,13 @@ struct ContentView: View {
     private var mainStack: some View {
         VStack(spacing: 0) {
             accountHeader
-            errorBanner
+            if !store.showLogin { errorBanner }
             downloadBanner
             tabContent
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
-        .background(Color(uiColor: .systemGroupedBackground))
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
         .safeAreaInset(edge: .bottom, spacing: 0) {
             AppTabBar(selected: $selectedTab, style: tabStyle, collapsed: tabCollapsed,
                       libraryBadge: store.library.contains(where: { $0.updateAvailable }),
@@ -2279,12 +2303,13 @@ struct ContentView: View {
     }
 
     private var tabContent: some View {
-        ZStack {
+        ZStack(alignment: .top) {
             downloadView.tabLayer(0, selected: selectedTab)
             browserTab.tabLayer(1, selected: selectedTab)
             libraryView.tabLayer(2, selected: selectedTab)
             optionsView.tabLayer(3, selected: selectedTab)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
     private var browserTab: some View {
@@ -2447,8 +2472,8 @@ struct ContentView: View {
     }
 
     @ViewBuilder private var errorBanner: some View {
-        if !store.errorMessage.isEmpty || !store.operationMessage.isEmpty {
-            let isError = !store.errorMessage.isEmpty
+        if (!store.errorMessage.isEmpty && !store.showLogin) || !store.operationMessage.isEmpty {
+            let isError = !store.errorMessage.isEmpty && !store.showLogin
             let text = isError ? friendlyError(store.errorMessage) : store.operationMessage
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: isError ? "exclamationmark.triangle.fill" : "info.circle.fill")
@@ -2860,7 +2885,7 @@ struct ContentView: View {
             if spinning {
                 ProgressView()
             } else if waving {
-                WavingIcon(symbol: symbol)
+                SelectionWaveDots()
             } else {
                 Image(systemName: symbol).font(.system(size: 16, weight: .semibold)).foregroundStyle(Color.accentColor)
             }
@@ -3018,10 +3043,10 @@ struct ContentView: View {
                             }
                         } label: { FilterPill(symbol: "tag.fill", title: selectedTag ?? "Tags", active: selectedTag != nil) }
                     }
+                    selectPill
                 }
-                .padding(.leading, 14)
+                .padding(.horizontal, 14)
             }
-            selectPill.padding(.trailing, 14)
         }
         .padding(.bottom, 8)
     }
@@ -3147,9 +3172,15 @@ struct ContentView: View {
         }
         return VStack(alignment: .leading, spacing: 7) {
             Button(action: tap) {
-                Color.clear.aspectRatio(1, contentMode: .fit)
-                    .overlay(CachedImage(urlString: item.imageURL, fill: true, maxPixel: 520).allowsHitTesting(false))
-                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                GeometryReader { proxy in
+                    CachedImage(urlString: item.imageURL, fill: true, maxPixel: 520)
+                        .frame(width: proxy.size.width, height: proxy.size.height)
+                        .allowsHitTesting(false)
+                }
+                .aspectRatio(1, contentMode: .fit)
+                .frame(maxWidth: .infinity)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .contentShape(Rectangle())
                     .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
                         .stroke(Color.accentColor, lineWidth: picked ? 3 : 0))
             }
@@ -3166,7 +3197,9 @@ struct ContentView: View {
                     MarqueeText(text: item.displayTitle, font: .system(size: 14, weight: .semibold),
                                 height: 18, active: selectedTab == 2, restartToken: marqueeToken)
                     HStack(spacing: 6) {
-                        RatingLine(rating: item.rating, count: item.ratingCount, size: 12)
+                        if item.rating != nil {
+                            RatingLine(rating: item.rating, count: item.ratingCount, size: 12)
+                        }
                         if showIDs {
                             Text("ID: \(item.id)").font(.system(size: 10, weight: .medium, design: .monospaced))
                                 .foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.6)
