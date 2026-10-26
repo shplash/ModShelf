@@ -3332,169 +3332,204 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 18) {
                     ScrollSpy(onChange: handleScroll)
                     Text("Options").font(.system(size: 27, weight: .bold, design: .rounded)).padding(.top, 10)
-
-                    settingsGroup("Appearance") {
-                        row("Theme", symbol: "circle.lefthalf.filled") {
-                            Menu {
-                                ForEach(["System", "Light", "Dark"], id: \.self) { mode in
-                                    Button { Haptics.select(); appearance = mode } label: {
-                                        if appearance == mode { Label(mode, systemImage: "checkmark") } else { Text(mode) }
-                                    }
-                                }
-                            } label: { menuChip(appearance) }
-                        }
-                        divider
-                        row("Tab bar style", symbol: "rectangle.bottomhalf.filled") {
-                            Menu {
-                                Button { Haptics.select(); tabStyle = "bar" } label: { Label("Classic bar", systemImage: tabStyle == "bar" ? "checkmark" : "circle") }
-                                Button { Haptics.select(); tabStyle = "pill" } label: { Label("Pill (shrinks on scroll)", systemImage: tabStyle == "pill" ? "checkmark" : "circle") }
-                                Button { Haptics.select(); tabStyle = "pillFull" } label: { Label("Pill (always full)", systemImage: tabStyle == "pillFull" ? "checkmark" : "circle") }
-                            } label: { menuChip(tabStyle == "bar" ? "Classic" : (tabStyle == "pill" ? "Pill" : "Pill full")) }
-                        }
-                        divider
-                        row("Workshop GIFs", symbol: "sparkles") {
-                            Menu {
-                                Section("Downloads") {
-                                    Button { Haptics.select(); gifDownloads = true } label: {
-                                        if gifDownloads { Label("On", systemImage: "checkmark") } else { Text("On") }
-                                    }
-                                    Button { Haptics.select(); gifDownloads = false } label: {
-                                        if !gifDownloads { Label("Off", systemImage: "checkmark") } else { Text("Off") }
-                                    }
-                                }
-                                Section("Library & History") {
-                                    Button { Haptics.select(); gifLibrary = true } label: {
-                                        if gifLibrary { Label("On", systemImage: "checkmark") } else { Text("On") }
-                                    }
-                                    Button { Haptics.select(); gifLibrary = false } label: {
-                                        if !gifLibrary { Label("Off", systemImage: "checkmark") } else { Text("Off") }
-                                    }
-                                }
-                            } label: {
-                                menuChip(gifDownloads == gifLibrary ? (gifDownloads ? "On" : "Off") : "Mixed")
-                            }
-                        }
-                        divider
-                        toggleRow("Compact library grid", symbol: "square.grid.2x2", isOn: $compactLibrary)
-                        divider
-                        toggleRow("Show Workshop IDs", symbol: "number", isOn: $showIDs)
-                        divider
-                        toggleRow("Haptic feedback", symbol: "iphone.radiowaves.left.and.right", isOn: $haptics)
-                    }
-
-                    settingsGroup("Browser") {
-                        toggleRow("Workshop only (hide news, RSS and comments)", symbol: "newspaper", isOn: $cleanBrowser)
-                        divider
-                        toggleRow("Auto download from browser", symbol: "arrow.down.circle", isOn: $autoDownload)
-                        divider
-                        VStack(alignment: .leading, spacing: 8) {
-                            HStack {
-                                Label("Text size", systemImage: "textformat.size").font(.system(size: 16))
-                                Spacer()
-                                Text("\(Int(browserZoom * 100))%").font(.system(size: 14, weight: .semibold)).foregroundStyle(.secondary).monospacedDigit()
-                            }
-                            Slider(value: $browserZoom, in: 0.8...1.4, step: 0.05).tint(.accentColor)
-                        }
-                        .padding(.horizontal, 15).padding(.vertical, 12)
-                    }
-
-                    settingsGroup("Downloads") {
-                        toggleRow("Confirm before deleting", symbol: "trash", isOn: $confirmDelete)
-                        divider
-                        toggleRow("Check updates on launch", symbol: "arrow.clockwise", isOn: $autoCheck)
-                        divider
-                        toggleRow("Wi-Fi only downloads", symbol: "wifi", isOn: $wifiOnly)
-                        divider
-                        toggleRow("Write info file into each mod", symbol: "doc.text", isOn: $infoFile)
-                        divider
-                        Button { Haptics.tap(); folderSheet = .shared } label: {
-                            rowContent("Shared mod folder", symbol: "folder", detail: store.folderLabel)
-                        }.buttonStyle(.plain)
-                        if store.usingCustomFolder {
-                            divider
-                            Button { Haptics.tap(); store.resetFolder(for: nil) } label: {
-                                rowContent("Reset to default folder", symbol: "arrow.uturn.backward", detail: nil, tint: .accentColor)
-                            }.buttonStyle(.plain)
-                        }
-                        divider
-                        Button { Haptics.tap(); store.clearTemporaryFiles() } label: {
-                            rowContent("Clear temporary files", symbol: "trash.slash", detail: nil)
-                        }.buttonStyle(.plain)
-                    }
-
-                    settingsGroup("Game folders") {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text("Each game can keep its mods in its own folder. New downloads for a game go there; mods you already have stay where they are until you move them.")
-                                .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 15).padding(.vertical, 11)
-                        ForEach(gamesForFolders, id: \.id) { game in
-                            divider
-                            HStack(spacing: 8) {
-                                Button { Haptics.tap(); folderSheet = .game(game.id) } label: {
-                                    rowContent(game.name, symbol: "folder",
-                                               detail: store.customGameFolders[game.id] ?? "Shared folder")
-                                }.buttonStyle(.plain)
-                                if store.customGameFolders[game.id] != nil {
-                                    Button { Haptics.tap(); store.resetFolder(for: game.id) } label: {
-                                        Image(systemName: "arrow.uturn.backward")
-                                            .font(.system(size: 13, weight: .semibold)).foregroundStyle(.secondary)
-                                            .frame(width: 30, height: 30)
-                                            .background(Circle().fill(Color.secondary.opacity(0.12)))
-                                    }
-                                    .buttonStyle(.plain)
-                                    .accessibilityLabel("Reset \(game.name)'s folder")
-                                    .padding(.trailing, 12)
-                                }
-                            }
-                        }
-                        if gamesForFolders.isEmpty {
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text("Games appear here once you have downloaded a mod for them.").font(.system(size: 13)).foregroundStyle(.secondary)
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 15).padding(.vertical, 11)
-                        }
-                    }
-
-                    settingsGroup("Steam account") {
-                        HStack(spacing: 12) {
-                            Image(systemName: store.isAuthenticated ? "checkmark.shield.fill" : "exclamationmark.shield")
-                                .font(.system(size: 20)).foregroundStyle(store.isAuthenticated ? Color.green : Color.orange)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(store.isAuthenticated ? "Connected to Steam" : "Not signed in").font(.system(size: 16, weight: .semibold))
-                                Text(store.isAuthenticated ? "Your Steam session is active." : "Sign in to download mods.").font(.system(size: 13)).foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                        }
-                        .padding(.horizontal, 15).padding(.vertical, 12)
-                        divider
-                        if store.isAuthenticated {
-                            Button { Haptics.tap(); store.signOut() } label: { rowContent("Sign out", symbol: "rectangle.portrait.and.arrow.right", detail: nil, tint: .red) }.buttonStyle(.plain)
-                        } else {
-                            Button { Haptics.tap(); store.showLogin = true } label: { rowContent("Sign in to Steam", symbol: "person.crop.circle", detail: nil) }.buttonStyle(.plain)
-                        }
-                    }
-
-                    settingsGroup("Credits") {
-                        creditRow("ModShelf", "Created by Splash (@shplash)")
-                        divider
-                        creditLicenseRow("go-steam", "Engine by Alexander Birkner (@BirknerAlex)", license: "MIT License")
-                        divider
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("Steam and the Steam Workshop are trademarks of Valve Corporation. ModShelf is not made by or endorsed by Valve.")
-                                .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                        }
-                        .padding(.horizontal, 15).padding(.vertical, 12)
-                    }
+                    appearanceSettings
+                    browserSettings
+                    downloadsSettings
+                    gameFoldersSettings
+                    steamAccountSettings
+                    creditsSettings
                 }
-                .padding(.horizontal, 15).padding(.bottom, tabBarReserve)
+                .padding(.horizontal, 15)
+                .padding(.bottom, tabBarReserve)
             }
             .coordinateSpace(name: "scroll")
             .background(Color(uiColor: .systemGroupedBackground))
             .toolbar(.hidden, for: .navigationBar)
         }
+    }
+
+    // Each options section is its own type-erased view, so this screen never becomes one enormous
+    // nested view type. Deep generic metadata from a single big expression is what the launch
+    // crash log pointed at.
+    private var appearanceSettings: AnyView {
+        AnyView(
+            settingsGroup("Appearance") {
+                row("Theme", symbol: "circle.lefthalf.filled") {
+                    Menu {
+                        ForEach(["System", "Light", "Dark"], id: \.self) { mode in
+                            Button { Haptics.select(); appearance = mode } label: {
+                                if appearance == mode { Label(mode, systemImage: "checkmark") } else { Text(mode) }
+                            }
+                        }
+                    } label: { menuChip(appearance) }
+                }
+                divider
+                row("Tab bar style", symbol: "rectangle.bottomhalf.filled") {
+                    Menu {
+                        Button { Haptics.select(); tabStyle = "bar" } label: { Label("Classic bar", systemImage: tabStyle == "bar" ? "checkmark" : "circle") }
+                        Button { Haptics.select(); tabStyle = "pill" } label: { Label("Pill (shrinks on scroll)", systemImage: tabStyle == "pill" ? "checkmark" : "circle") }
+                        Button { Haptics.select(); tabStyle = "pillFull" } label: { Label("Pill (always full)", systemImage: tabStyle == "pillFull" ? "checkmark" : "circle") }
+                    } label: { menuChip(tabStyle == "bar" ? "Classic" : (tabStyle == "pill" ? "Pill" : "Pill full")) }
+                }
+                divider
+                row("Workshop GIFs", symbol: "sparkles") {
+                    Menu {
+                        Section("Downloads") {
+                            Button { Haptics.select(); gifDownloads = true } label: {
+                                if gifDownloads { Label("On", systemImage: "checkmark") } else { Text("On") }
+                            }
+                            Button { Haptics.select(); gifDownloads = false } label: {
+                                if !gifDownloads { Label("Off", systemImage: "checkmark") } else { Text("Off") }
+                            }
+                        }
+                        Section("Library & History") {
+                            Button { Haptics.select(); gifLibrary = true } label: {
+                                if gifLibrary { Label("On", systemImage: "checkmark") } else { Text("On") }
+                            }
+                            Button { Haptics.select(); gifLibrary = false } label: {
+                                if !gifLibrary { Label("Off", systemImage: "checkmark") } else { Text("Off") }
+                            }
+                        }
+                    } label: {
+                        menuChip(gifDownloads == gifLibrary ? (gifDownloads ? "On" : "Off") : "Mixed")
+                    }
+                }
+                divider
+                toggleRow("Compact library grid", symbol: "square.grid.2x2", isOn: $compactLibrary)
+                divider
+                toggleRow("Show Workshop IDs", symbol: "number", isOn: $showIDs)
+                divider
+                toggleRow("Haptic feedback", symbol: "iphone.radiowaves.left.and.right", isOn: $haptics)
+            }
+        )
+    }
+
+    private var browserSettings: AnyView {
+        AnyView(
+            settingsGroup("Browser") {
+                toggleRow("Workshop only (hide news, RSS and comments)", symbol: "newspaper", isOn: $cleanBrowser)
+                divider
+                toggleRow("Auto download from browser", symbol: "arrow.down.circle", isOn: $autoDownload)
+                divider
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Label("Text size", systemImage: "textformat.size").font(.system(size: 16))
+                        Spacer()
+                        Text("\(Int(browserZoom * 100))%").font(.system(size: 14, weight: .semibold)).foregroundStyle(.secondary).monospacedDigit()
+                    }
+                    Slider(value: $browserZoom, in: 0.8...1.4, step: 0.05).tint(.accentColor)
+                }
+                .padding(.horizontal, 15).padding(.vertical, 12)
+            }
+        )
+    }
+
+    private var downloadsSettings: AnyView {
+        AnyView(
+            settingsGroup("Downloads") {
+                toggleRow("Confirm before deleting", symbol: "trash", isOn: $confirmDelete)
+                divider
+                toggleRow("Check updates on launch", symbol: "arrow.clockwise", isOn: $autoCheck)
+                divider
+                toggleRow("Wi-Fi only downloads", symbol: "wifi", isOn: $wifiOnly)
+                divider
+                toggleRow("Write info file into each mod", symbol: "doc.text", isOn: $infoFile)
+                divider
+                Button { Haptics.tap(); folderSheet = .shared } label: {
+                    rowContent("Shared mod folder", symbol: "folder", detail: store.folderLabel)
+                }.buttonStyle(.plain)
+                if store.usingCustomFolder {
+                    divider
+                    Button { Haptics.tap(); store.resetFolder(for: nil) } label: {
+                        rowContent("Reset to default folder", symbol: "arrow.uturn.backward", detail: nil, tint: .accentColor)
+                    }.buttonStyle(.plain)
+                }
+                divider
+                Button { Haptics.tap(); store.clearTemporaryFiles() } label: {
+                    rowContent("Clear temporary files", symbol: "trash.slash", detail: nil)
+                }.buttonStyle(.plain)
+            }
+        )
+    }
+
+    private var gameFoldersSettings: AnyView {
+        AnyView(
+            settingsGroup("Game folders") {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Each game can keep its mods in its own folder. New downloads for a game go there; mods you already have stay where they are until you move them.")
+                        .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 15).padding(.vertical, 11)
+                ForEach(gamesForFolders, id: \.id) { game in
+                    divider
+                    HStack(spacing: 8) {
+                        Button { Haptics.tap(); folderSheet = .game(game.id) } label: {
+                            rowContent(game.name, symbol: "folder",
+                                       detail: store.customGameFolders[game.id] ?? "Shared folder")
+                        }
+                        .buttonStyle(.plain)
+                        if store.customGameFolders[game.id] != nil {
+                            Button { Haptics.tap(); store.resetFolder(for: game.id) } label: {
+                                Image(systemName: "arrow.uturn.backward")
+                                    .font(.system(size: 13, weight: .semibold)).foregroundStyle(.secondary)
+                                    .frame(width: 30, height: 30)
+                                    .background(Circle().fill(Color.secondary.opacity(0.12)))
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Reset \(game.name)'s folder")
+                            .padding(.trailing, 12)
+                        }
+                    }
+                }
+                if gamesForFolders.isEmpty {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Games appear here once you have downloaded a mod for them.").font(.system(size: 13)).foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 15).padding(.vertical, 11)
+                }
+            }
+        )
+    }
+
+    private var steamAccountSettings: AnyView {
+        AnyView(
+            settingsGroup("Steam account") {
+                HStack(spacing: 12) {
+                    Image(systemName: store.isAuthenticated ? "checkmark.shield.fill" : "exclamationmark.shield")
+                        .font(.system(size: 20)).foregroundStyle(store.isAuthenticated ? Color.green : Color.orange)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(store.isAuthenticated ? "Connected to Steam" : "Not signed in").font(.system(size: 16, weight: .semibold))
+                        Text(store.isAuthenticated ? "Your Steam session is active." : "Sign in to download mods.").font(.system(size: 13)).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                }
+                .padding(.horizontal, 15).padding(.vertical, 12)
+                divider
+                if store.isAuthenticated {
+                    Button { Haptics.tap(); store.signOut() } label: { rowContent("Sign out", symbol: "rectangle.portrait.and.arrow.right", detail: nil, tint: .red) }.buttonStyle(.plain)
+                } else {
+                    Button { Haptics.tap(); store.showLogin = true } label: { rowContent("Sign in to Steam", symbol: "person.crop.circle", detail: nil) }.buttonStyle(.plain)
+                }
+            }
+        )
+    }
+
+    private var creditsSettings: AnyView {
+        AnyView(
+            settingsGroup("Credits") {
+                creditRow("ModShelf", "Created by Splash (@shplash)")
+                divider
+                creditLicenseRow("go-steam", "Engine by Alexander Birkner (@BirknerAlex)", license: "MIT License")
+                divider
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Steam and the Steam Workshop are trademarks of Valve Corporation. ModShelf is not made by or endorsed by Valve.")
+                        .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.horizontal, 15).padding(.vertical, 12)
+            }
+        )
     }
 
     private func creditRow(_ title: String, _ detail: String) -> some View {
