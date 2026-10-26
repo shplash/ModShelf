@@ -42,13 +42,20 @@ jobs:
         with:
           go-version: '1.25.x'
           cache: true
-          cache-dependency-path: ios-engine/go.sum
+          cache-dependency-path: ios-engine/go.*
 
       - name: Install gomobile
         if: steps.engine-cache.outputs.cache-hit != 'true'
         run: |
           go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      # gomobile bind looks for the gobind binary that init sets up, so this has
+      # to run before the bind even though gomobile is already installed.
+      - name: Initialise gomobile
+        if: steps.engine-cache.outputs.cache-hit != 'true'
+        run: gomobile init
 
       - name: Build the Steam engine
         if: steps.engine-cache.outputs.cache-hit != 'true'
