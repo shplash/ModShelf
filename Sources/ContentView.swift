@@ -231,6 +231,35 @@ enum Fmt {
     }
 }
 
+/// One place that turns Steam's raw wording into a short line someone can act on.
+enum ErrorText {
+    static func friendly(_ raw: String) -> String {
+        let text = raw.lowercased()
+        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "Something went wrong. Try again." }
+        if text.contains("not own") || text.contains("own this game") || text.contains("licen")
+            || text.contains("purchase") || text.contains("subscription") {
+            return "You don't own this game, so its Workshop items can't be downloaded."
+        }
+        if text.contains("private") { return "That Workshop item is private." }
+        if text.contains("not found") || text.contains("does not exist") || text.contains("invalid item")
+            || text.contains("no such") {
+            return "Steam couldn't find that item."
+        }
+        if text.contains("window") && text.contains("item") { return "That item can't be downloaded." }
+        if text.contains("rate limit") || text.contains("too many") { return "Steam is busy. Try again in a minute." }
+        if text.contains("timeout") || text.contains("timed out") || text.contains("network")
+            || text.contains("offline") || text.contains("connection") || text.contains("reach") {
+            return "Couldn't reach Steam. Check your connection."
+        }
+        if text.contains("no space") || text.contains("disk full") || text.contains("not enough space") {
+            return "There isn't enough space on this iPhone."
+        }
+        if text.contains("without a completion event") { return "The download didn't finish. Try again." }
+        if text.contains("cancel") { return "The download was cancelled." }
+        return raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
 final class NetworkWatcher {
     static let shared = NetworkWatcher()
     private let monitor = NWPathMonitor()
@@ -1038,7 +1067,7 @@ final class WorkshopStore: ObservableObject {
         guard isAuthenticated else { operationMessage = "Sign in to Steam to download this item."; showLogin = true; return }
         guard let id = Self.workshopID(from: raw ?? input) else { errorMessage = "Enter a Workshop link or item ID."; return }
         if UserDefaults.standard.bool(forKey: "options.wifiOnly") && NetworkWatcher.shared.isExpensive {
-            errorMessage = "Wi-Fi only is on and you're on cellular."
+            errorMessage = "Wi-Fi only is on. Connect to Wi-Fi to download."
             queue.removeAll()
             return
         }
@@ -1060,8 +1089,9 @@ final class WorkshopStore: ObservableObject {
         let result = engine.downloadWorkshopItem(id, targetDir: staging.path)
         if !result.isEmpty {
             try? FileManager.default.removeItem(at: staging)
-            errorMessage = result; status = result
-            record(id, title: meta.title, result: "Failed", error: result, imageURL: meta.imageURL.isEmpty ? nil : meta.imageURL, game: meta.gameName)
+            let message = ErrorText.friendly(result)
+            errorMessage = message; status = "Download failed"
+            record(id, title: meta.title, result: "Failed", error: message, imageURL: meta.imageURL.isEmpty ? nil : meta.imageURL, game: meta.gameName)
             Haptics.error()
             return
         }
@@ -1151,7 +1181,7 @@ final class WorkshopStore: ObservableObject {
                 saveLibrary()
                 success = true
             } catch {
-                failureText = "Download could not be finalised: \(error.localizedDescription)"
+                failureText = "Couldn't finish the download."
                 errorMessage = failureText
                 try? FileManager.default.removeItem(at: staging)
             }
@@ -1164,7 +1194,9 @@ final class WorkshopStore: ObservableObject {
             lastOutcome = "Download completed"
             Haptics.success()
         } else {
-            let reason = cancelled ? "Download cancelled." : (!error.isEmpty ? error : (!failureText.isEmpty ? failureText : "The download failed before it could be finalised."))
+            let reason = cancelled
+                ? "The download was cancelled."
+                : ErrorText.friendly(!error.isEmpty ? error : (!failureText.isEmpty ? failureText : "The download didn't finish."))
             updateHistory(id: activeID, result: cancelled ? "Cancelled" : "Failed", error: reason)
             if !cancelled { errorMessage = reason }
             lastOutcome = cancelled ? "Download cancelled" : "Download failed"
@@ -1914,25 +1946,30 @@ struct RatingLine: View {
 }
 
 /// One line of text that slides sideways when it doesn't fit, so a long mod name never makes a
-/// grid cell taller than its neighbours. It waits, slides the whole name into view, waits again,
-/// slides back and repeats. The caller restarts it by changing `restartToken`.
+/// grid cell taller than its neighbours. It rests a second, slides the whole name into view, holds
+/// a second, slides back, then rests again before the next pass. Changing `restartToken` (or the
+/// text, or the space it has) starts the cycle over from the beginning.
 struct MarqueeText: View {
     let text: String
     let font: Font
-    var height: CGFloat = 18
-    var speed: CGFloat = 30
+    var height: CGFloat = 17
+    var speed: CGFloat = 26
     var active = true
     var restartToken = 0
 
     @State private var textWidth: CGFloat = 0
     @State private var boxWidth: CGFloat = 0
     @State private var offset: CGFloat = 0
-    @State private var runToken = 0
 
     private var overflow: CGFloat { max(0, textWidth - boxWidth) }
 
+    /// Any change here cancels the running pass and starts a fresh one.
+    private var cycleKey: String {
+        "\(restartToken)|\(active)|\(Int(textWidth.rounded()))|\(Int(boxWidth.rounded()))|\(text)"
+    }
+
     var body: some View {
-        GeometryReader { geo in
+        ZStack(alignment: .leading) {
             label
                 .fixedSize()
                 .background(
@@ -1943,16 +1980,19 @@ struct MarqueeText: View {
                     }
                 )
                 .offset(x: offset)
-                .frame(width: geo.size.width, height: geo.size.height, alignment: .leading)
-                .clipped()
-                .onAppear { setBoxWidth(geo.size.width) }
-                .onChange(of: geo.size.width) { setBoxWidth($0) }
         }
-        .frame(height: height)
-        .onChange(of: restartToken) { _ in restart() }
-        .onChange(of: active) { _ in restart() }
-        .onChange(of: text) { _ in restart() }
-        .task(id: runToken) { await run() }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(height: height, alignment: .leading)
+        .clipped()
+        .background(
+            GeometryReader { g in
+                Color.clear
+                    .onAppear { setBoxWidth(g.size.width) }
+                    .onChange(of: g.size.width) { setBoxWidth($0) }
+            }
+        )
+        .accessibilityLabel(text)
+        .task(id: cycleKey) { await run() }
     }
 
     private var label: some View {
@@ -1962,35 +2002,31 @@ struct MarqueeText: View {
     private func setTextWidth(_ width: CGFloat) {
         guard abs(width - textWidth) > 0.5 else { return }
         textWidth = width
-        runToken += 1
     }
 
     private func setBoxWidth(_ width: CGFloat) {
         guard abs(width - boxWidth) > 0.5 else { return }
         boxWidth = width
-        runToken += 1
-    }
-
-    private func restart() {
-        offset = 0
-        runToken += 1
     }
 
     private func run() async {
         offset = 0
         guard active, overflow > 0.5 else { return }
-        let distance = overflow
-        let travel = max(1.4, Double(distance / max(1, speed)))
         while !Task.isCancelled {
             // A second at rest before setting off.
             try? await Task.sleep(nanoseconds: 1_000_000_000)
             if Task.isCancelled { return }
+
+            let distance = overflow
+            let travel = max(1.2, Double(distance / max(1, speed)))
             withAnimation(.linear(duration: travel)) { offset = -distance }
+            // A second with the end of the name showing.
             try? await Task.sleep(nanoseconds: UInt64((travel + 1.0) * 1_000_000_000))
             if Task.isCancelled { return }
-            withAnimation(.easeOut(duration: 0.35)) { offset = 0 }
-            try? await Task.sleep(nanoseconds: 350_000_000)
-            if Task.isCancelled { return }
+
+            // Slide back quickly and rest, so it reads as a name scrolling and not a carousel.
+            withAnimation(.easeOut(duration: 0.25)) { offset = 0 }
+            try? await Task.sleep(nanoseconds: 1_250_000_000)
         }
     }
 }
@@ -2011,20 +2047,6 @@ struct SelectionWaveDots: View {
             .frame(width: 36, height: 36)
         }
         .accessibilityLabel("Selection actions")
-    }
-}
-
-/// Text with an ellipsis that gains one dot at a time, so a status reads as moving rather than
-/// jumping between the same words with a different number of dots.
-struct DottedLabel: View {
-    let text: String
-    var interval: Double = 0.4
-
-    var body: some View {
-        TimelineView(.periodic(from: .now, by: interval)) { context in
-            let step = Int(abs(context.date.timeIntervalSinceReferenceDate) / interval) % 4
-            Text(text + String(repeating: ".", count: step))
-        }
     }
 }
 
@@ -2502,32 +2524,14 @@ struct ContentView: View {
 
     /// Turns raw engine text into one short line a person can act on.
     private func friendlyError(_ raw: String) -> String {
-        let r = raw.lowercased()
-        if r.contains("not own") || r.contains("own this game") || r.contains("licen") || r.contains("purchase") {
-            return "You don't own this game on Steam, so its Workshop items can't be downloaded."
-        }
-        if r.contains("private") { return "That Workshop item is private." }
-        if r.contains("not found") || r.contains("does not exist") || r.contains("invalid item") {
-            return "Steam couldn't find that item."
-        }
-        if r.contains("window") && r.contains("item") { return "That item isn't allowed to be downloaded." }
-        if r.contains("rate limit") || r.contains("too many") { return "Steam is limiting requests. Try again in a minute." }
-        if r.contains("without a completion event") && r.contains("download") {
-            return "The download didn't finish. Try again."
-        }
-        if r.contains("timeout") || r.contains("timed out") || r.contains("network") || r.contains("offline")
-            || r.contains("connection") || r.contains("reach") {
-            return "Couldn't reach Steam. Check your connection."
-        }
-        if r.contains("cancel") { return "The download was cancelled." }
-        return raw
+        ErrorText.friendly(raw)
     }
 
     /// How far the running download has got, from the engine's transferred bytes.
     private var downloadProgress: Double { min(1, max(0, store.progress)) }
     private var downloadPercent: Int { Int((downloadProgress * 100).rounded()) }
 
-    /// The engine's current step with the trailing dots taken off, so `DottedLabel` can animate them.
+    /// The engine's current step with the trailing dots taken off, so the label sits still.
     private var downloadStep: String {
         var text = store.status
         while let last = text.last, last == "…" || last == "." || last == " " { text.removeLast() }
@@ -2535,16 +2539,19 @@ struct ContentView: View {
     }
 
     private func progressBar(_ fraction: Double) -> some View {
-        GeometryReader { geo in
+        let clamped = min(1, max(0, fraction))
+        return GeometryReader { geo in
             ZStack(alignment: .leading) {
-                Capsule().fill(Color.accentColor.opacity(0.15))
+                Capsule().fill(Color.primary.opacity(0.08))
                 Capsule()
-                    .fill(Color.accentColor)
-                    .frame(width: max(6, geo.size.width * min(1, max(0, fraction))))
+                    .fill(LinearGradient(colors: [Color.accentColor.opacity(0.8), Color.accentColor],
+                                         startPoint: .leading, endPoint: .trailing))
+                    .frame(width: clamped > 0 ? max(8, geo.size.width * clamped) : 0)
             }
         }
-        .frame(height: 8)
-        .animation(.easeOut(duration: 0.35), value: fraction)
+        .frame(height: 7)
+        .animation(.easeOut(duration: 0.3), value: clamped)
+        .accessibilityLabel("Download progress")
     }
 
     @ViewBuilder private var downloadBanner: some View {
@@ -2649,7 +2656,7 @@ struct ContentView: View {
         VStack(spacing: 8) {
             HStack(spacing: 10) {
                 Image(systemName: "link").foregroundStyle(.secondary)
-                TextField("", text: $store.input)
+                TextField("Workshop URL or ID", text: $store.input)
                     .accessibilityLabel("Workshop URL or ID")
                     .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL).submitLabel(.go)
                     .onSubmit { submitLookup() }
@@ -2719,22 +2726,27 @@ struct ContentView: View {
 
     private var progressCard: some View {
         return VStack(alignment: .leading, spacing: 11) {
-            HStack(spacing: 11) {
-                Image(systemName: "arrow.down.circle.fill")
-                    .font(.system(size: 22)).foregroundStyle(Color.accentColor)
+            HStack(spacing: 12) {
+                ZStack {
+                    Circle().fill(Color.accentColor.opacity(0.14)).frame(width: 38, height: 38)
+                    Image(systemName: "arrow.down").font(.system(size: 16, weight: .bold))
+                        .foregroundStyle(Color.accentColor)
+                }
                 VStack(alignment: .leading, spacing: 2) {
                     Text(store.activeTitle.isEmpty ? "Downloading" : store.activeTitle)
                         .font(.system(size: 15, weight: .semibold)).lineLimit(1)
-                    DottedLabel(text: downloadStep)
+                    Text(downloadStep)
                         .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
                 }
-                Spacer(minLength: 6)
+                Spacer(minLength: 8)
                 Text("\(downloadPercent)%")
-                    .font(.system(size: 13, weight: .bold).monospacedDigit())
+                    .font(.system(size: 16, weight: .bold).monospacedDigit())
                     .foregroundStyle(Color.accentColor)
                 Button { Haptics.tap(); store.cancel() } label: {
-                    Image(systemName: "xmark").font(.system(size: 12, weight: .bold)).foregroundStyle(.red)
-                        .frame(width: 30, height: 30).background(Circle().fill(Color.red.opacity(0.12)))
+                    Image(systemName: "xmark").font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 30, height: 30)
+                        .background(Circle().fill(Color.primary.opacity(0.08)))
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Cancel download")
@@ -2742,7 +2754,7 @@ struct ContentView: View {
             progressBar(downloadProgress)
             if !store.currentFile.isEmpty {
                 Text(store.currentFile)
-                    .font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+                    .font(.system(size: 11, design: .monospaced)).foregroundStyle(.tertiary)
                     .lineLimit(1).truncationMode(.middle)
             }
         }
@@ -3062,11 +3074,11 @@ struct ContentView: View {
         } label: {
             HStack(spacing: 5) {
                 Image(systemName: selecting ? "checkmark.circle.fill" : "checkmark.circle")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 13, weight: .semibold))
                 Text(selecting ? "Done" : "Select").font(.system(size: 13, weight: .semibold)).lineLimit(1)
             }
             .foregroundStyle(selecting ? Color.white : Color.primary)
-            .padding(.horizontal, 11).padding(.vertical, 7)
+            .padding(.horizontal, 12).padding(.vertical, 7)
             .background(Capsule().fill(selecting ? Color.accentColor : Color(uiColor: .secondarySystemGroupedBackground)))
         }
         .buttonStyle(.plain)
@@ -3193,9 +3205,9 @@ struct ContentView: View {
             }
 
             Button(action: tap) {
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: 1) {
                     MarqueeText(text: item.displayTitle, font: .system(size: 14, weight: .semibold),
-                                height: 18, active: selectedTab == 2, restartToken: marqueeToken)
+                                height: 17, active: selectedTab == 2, restartToken: marqueeToken)
                     HStack(spacing: 6) {
                         if item.rating != nil {
                             RatingLine(rating: item.rating, count: item.ratingCount, size: 12)
@@ -3205,12 +3217,12 @@ struct ContentView: View {
                                 .foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.6)
                         }
                     }
-                    .frame(height: 16, alignment: .leading)
+                    .frame(height: 15, alignment: .leading)
                     HStack(spacing: 4) {
                         StatusGlyph(status: item.status, size: 11)
                         Text(line.0).font(.system(size: 11, weight: .medium)).foregroundStyle(line.1).lineLimit(1)
                     }
-                    .frame(height: 15, alignment: .leading)
+                    .frame(height: 14, alignment: .leading)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
@@ -3647,13 +3659,11 @@ struct ContentView: View {
                             .font(.system(size: 26)).foregroundStyle(store.isAuthenticated ? Color.green : Color.accentColor)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(store.isAuthenticated ? "Connected to Steam" : "Sign in to Steam").font(.title3.bold())
-                            Text(store.isAuthenticated ? "Your Steam session is active." : "Your password is stored in the Keychain on this device only.")
+                            Text(store.isAuthenticated
+                                 ? "Your Steam session is active."
+                                 : "Your password is stored in the keychain on this device only, ModShelf signs in so Steam will serve workshop mods to your own account.")
                                 .font(.footnote).foregroundStyle(.secondary)
-                            if !store.isAuthenticated {
-                                Text("ModShelf signs in so Steam will serve Workshop downloads to your own account. Your details go to Steam and nowhere else.")
-                                    .font(.footnote).foregroundStyle(.secondary)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                     }
                     if !store.isAuthenticated {
@@ -3979,17 +3989,6 @@ struct MediaCarousel: View {
                         case .video(let id):
                             YouTubePlayerView(videoID: id)
                                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                                .overlay(alignment: .topTrailing) {
-                                    Button { Haptics.tap(); onExpand(item, i) } label: {
-                                        Image(systemName: "arrow.up.left.and.arrow.down.right")
-                                            .font(.system(size: 11, weight: .bold)).foregroundStyle(.white)
-                                            .frame(width: 28, height: 28)
-                                            .background(Circle().fill(Color.black.opacity(0.55)))
-                                    }
-                                    .buttonStyle(.plain)
-                                    .padding(8)
-                                    .accessibilityLabel("Open video larger")
-                                }
                         }
                     }
                     .padding(.horizontal, 2)
@@ -4445,7 +4444,7 @@ struct MoveDestinationSheet: View {
 
 // MARK: - Browser home (custom start page)
 
-struct GameHit: Codable, Identifiable, Equatable {
+struct GameHit: Codable, Identifiable, Equatable, Sendable {
     let id: Int
     let name: String
     let tiny_image: String?
@@ -4453,47 +4452,157 @@ struct GameHit: Codable, Identifiable, Equatable {
 
 struct GameSearchResponse: Codable { let items: [GameHit] }
 
+/// Steam's own list of games that have a Workshop ("Browse All Workshops"). It is downloaded once,
+/// cached, and then searched by name, so only games with a real Workshop are offered.
+final class WorkshopCatalogue {
+    static let shared = WorkshopCatalogue()
+
+    private var entries: [GameHit]?
+    private var loading: Task<[GameHit], Never>?
+
+    private init() {
+        let cached = Self.loadCache()
+        entries = cached.isEmpty ? nil : cached
+    }
+
+    func games() async -> [GameHit] {
+        if let entries { return entries }
+        if let loading { return await loading.value }
+
+        let task = Task { await Self.download() }
+        loading = task
+        let fetched = await task.value
+        loading = nil
+
+        if fetched.isEmpty {
+            let cached = Self.loadCache()
+            if !cached.isEmpty { entries = cached }
+            return cached
+        }
+        entries = fetched
+        Self.saveCache(fetched)
+        return fetched
+    }
+
+    /// The pages are independent, so a few at a time keeps the first search quick.
+    private static func download() async -> [GameHit] {
+        let size = 100
+        guard let first = await page(start: 0, size: size) else { return [] }
+        var games = first.games
+        let total = max(first.total, games.count)
+
+        var starts = Array(stride(from: size, to: max(total, size), by: size))
+        while !starts.isEmpty && !Task.isCancelled {
+            let chunk = Array(starts.prefix(5))
+            starts.removeFirst(chunk.count)
+            let pages = await withTaskGroup(of: [GameHit].self) { group in
+                for start in chunk {
+                    group.addTask { await page(start: start, size: size)?.games ?? [] }
+                }
+                var collected: [GameHit] = []
+                for await result in group { collected.append(contentsOf: result) }
+                return collected
+            }
+            if pages.isEmpty { break }
+            games.append(contentsOf: pages)
+        }
+        return deduplicate(games)
+    }
+
+    private static func page(start: Int, size: Int) async -> (games: [GameHit], total: Int)? {
+        guard let url = URL(string: "https://steamcommunity.com/workshop/ajaxgetworkshops/?start=\(start)&count=\(size)&sort=alpha&l=english") else { return nil }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 20
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let html = root["results_html"] as? String else { return nil }
+        let total = (root["total_count"] as? String).flatMap { Int($0) }
+            ?? (root["total_count"] as? Int) ?? 0
+        return (parse(html), total)
+    }
+
+    private static func parse(_ html: String) -> [GameHit] {
+        var games: [GameHit] = []
+        let blocks = html.components(separatedBy: "onClick=\"top.location.href=")
+        for block in blocks.dropFirst() {
+            guard let idText = firstGroup(#"/app/(\d+)/workshop/"#, in: block), let id = Int(idText) else { continue }
+            let name = firstGroup(#"class="appLogo"[^>]*alt="([^"]*)""#, in: block).map(decodeEntities) ?? ""
+            let image = firstGroup(#"class="appLogo"[^>]*src="([^"]*)""#, in: block)
+            guard !name.isEmpty else { continue }
+            games.append(GameHit(id: id, name: name, tiny_image: image))
+        }
+        return games
+    }
+
+    private static func firstGroup(_ pattern: String, in text: String) -> String? {
+        guard let re = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]) else { return nil }
+        let ns = text as NSString
+        guard let match = re.firstMatch(in: text, range: NSRange(location: 0, length: ns.length)),
+              match.numberOfRanges > 1 else { return nil }
+        return ns.substring(with: match.range(at: 1))
+    }
+
+    private static func decodeEntities(_ text: String) -> String {
+        var value = text
+        for (raw, read) in [("&amp;", "&"), ("&quot;", "\""), ("&#39;", "'"), ("&lt;", "<"), ("&gt;", ">")] {
+            value = value.replacingOccurrences(of: raw, with: read)
+        }
+        return value
+    }
+
+    private static func deduplicate(_ games: [GameHit]) -> [GameHit] {
+        var seen = Set<Int>()
+        var unique: [GameHit] = []
+        for game in games where seen.insert(game.id).inserted { unique.append(game) }
+        return unique.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    private static var cacheURL: URL? {
+        guard let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else { return nil }
+        return dir.appendingPathComponent("modshelf-workshop-games.json")
+    }
+
+    private static func loadCache() -> [GameHit] {
+        guard let url = cacheURL, let data = try? Data(contentsOf: url),
+              let games = try? JSONDecoder().decode([GameHit].self, from: data) else { return [] }
+        return games
+    }
+
+    private static func saveCache(_ games: [GameHit]) {
+        guard let url = cacheURL, let data = try? JSONEncoder().encode(games) else { return }
+        try? data.write(to: url, options: .atomic)
+    }
+}
+
 enum GameSearch {
-    /// Finds games by name with Steam's public store search, then keeps only the ones that have a
-    /// Workshop ("Steam Workshop" is category 30 in the app details), so the browse page never
-    /// offers a game whose Workshop link leads nowhere.
+    /// Steam's own Workshop game list, searched by name, so only games that really have a Workshop
+    /// appear. The catalogue is cached after the first use.
     static func search(_ term: String) async -> [GameHit] {
+        let query = term.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return [] }
+        let catalogue = await WorkshopCatalogue.shared.games()
+        guard !catalogue.isEmpty else { return await storeSearch(query) }
+
+        let lowered = query.lowercased()
+        let matches = catalogue.filter { $0.name.lowercased().contains(lowered) }
+        let ranked = matches.sorted { a, b in
+            let aPrefix = a.name.lowercased().hasPrefix(lowered)
+            let bPrefix = b.name.lowercased().hasPrefix(lowered)
+            if aPrefix != bPrefix { return aPrefix }
+            if a.name.count != b.name.count { return a.name.count < b.name.count }
+            return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
+        }
+        return Array(ranked.prefix(30))
+    }
+
+    /// The catalogue could not be fetched: fall back to Steam's store search rather than nothing.
+    private static func storeSearch(_ term: String) async -> [GameHit] {
         guard let q = term.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
               let url = URL(string: "https://store.steampowered.com/api/storesearch/?term=\(q)&l=english&cc=US"),
               let (data, _) = try? await URLSession.shared.data(from: url),
               let root = try? JSONDecoder().decode(GameSearchResponse.self, from: data) else { return [] }
-        let hits = root.items
-        guard !hits.isEmpty else { return [] }
-        var supported: [Int: Bool] = [:]
-        let ids = hits.map(\.id)
-        var start = 0
-        while start < ids.count {
-            let chunk = Array(ids[start..<min(start + 20, ids.count)])
-            start += 20
-            let found = await workshopSupport(for: chunk)
-            for (app, hasWorkshop) in found { supported[app] = hasWorkshop }
-        }
-        return hits.filter { supported[$0.id] ?? true }
-    }
-
-    /// Whether each of `apps` lists the Steam Workshop category. Apps the details call missing are
-    /// dropped; a request that fails leaves those games in rather than emptying the results.
-    private static func workshopSupport(for apps: [Int]) async -> [Int: Bool] {
-        let list = apps.map(String.init).joined(separator: ",")
-        guard let url = URL(string: "https://store.steampowered.com/api/appdetails?appids=\(list)&filters=categories&l=english"),
-              let (data, _) = try? await URLSession.shared.data(from: url),
-              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }
-        var result: [Int: Bool] = [:]
-        for (key, value) in root {
-            guard let app = Int(key), let entry = value as? [String: Any] else { continue }
-            guard (entry["success"] as? Bool) == true, let details = entry["data"] as? [String: Any] else {
-                result[app] = false
-                continue
-            }
-            let categories = details["categories"] as? [[String: Any]] ?? []
-            result[app] = categories.contains { ($0["id"] as? Int) == 30 }
-        }
-        return result
+        return root.items
     }
 }
 
@@ -4791,7 +4900,7 @@ struct WorkshopBrowserView: View {
     private var addressField: some View {
         Button { copyLink() } label: {
             HStack(spacing: 6) {
-                Text(copied ? "Copied to clipboard" : (showHome ? "Browse Workshop" : addressText))
+                Text(copied ? "Copied to clipboard" : ((showHome || currentURL == nil) ? "…" : addressText))
                     .font(.system(size: 13, weight: copied ? .bold : .regular))
                     .foregroundStyle(copied ? Color.accentColor : Color.secondary)
                     .lineLimit(1)
@@ -4897,24 +5006,35 @@ struct WorkshopWebContainer: UIViewRepresentable {
         UserDefaults.standard.string(forKey: WorkshopBrowserView.lastPageKey).flatMap { URL(string: $0) }
     }
 
-    /// Scales the page inside its own layout, so it stays exactly as wide as the screen. Page zoom
-    /// leaves a gutter beside the content, which is where the bars came from.
+    /// Scales the page and widens it by the same amount, so the content keeps filling the screen
+    /// instead of shrinking away from one edge (which is where the bars came from).
     static func zoomScript(_ zoom: Double) -> String {
-        let value = String(format: "%.3f", zoom)
+        let clamped = max(0.8, min(1.4, zoom))
+        let value = String(format: "%.3f", clamped)
+        let inverse = String(format: "%.3f", 100.0 / clamped)
         return """
         (function(){
           var z = \(value);
+          var w = \(inverse);
           var id = 'ms-zoom';
           var st = document.getElementById(id);
           if (!st) {
             st = document.createElement('style');
             st.id = id;
             document.head.appendChild(st);
+            }
+          if (Math.abs(z - 1) < 0.001) {
+            st.innerHTML = '';
+            return;
           }
           if (window.CSS && CSS.supports && CSS.supports('zoom', '1.5')) {
-            st.innerHTML = 'html{zoom:' + z + ' !important}';
+            st.innerHTML = 'html{zoom:1 !important}' +
+              ' body{zoom:' + z + ' !important; width:' + w + '% !important;' +
+              ' max-width:' + w + '% !important; min-width:0 !important;' +
+              ' margin-left:0 !important; margin-right:0 !important}';
           } else {
-            st.innerHTML = 'html{-webkit-text-size-adjust:' + Math.round(z * 100) + '% !important}';
+            st.innerHTML = 'html, body{-webkit-text-size-adjust:' + Math.round(z * 100) + '% !important;' +
+              ' text-size-adjust:' + Math.round(z * 100) + '% !important}';
           }
         })();
         """
