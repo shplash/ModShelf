@@ -133,36 +133,17 @@ struct MediaViewer: Identifiable {
     let index: Int
 }
 
-/// A folder choice: the shared mod folder, one game's folder, or where moved mods should go.
+/// A folder choice: the shared mod folder, or where moved mods should go.
 enum FolderSheet: Identifiable {
     case shared
-    case game(String)
     case moveDestination
 
     var id: String {
         switch self {
         case .shared: return "shared"
-        case .game(let appID): return "game-" + appID
         case .moveDestination: return "move"
         }
     }
-}
-
-struct RelocateRequest: Identifiable {
-    let id = UUID()
-    let gameName: String
-    let root: URL
-    let folderName: String
-    /// Where the mods live now, shown as "Before" beside the new folder.
-    let previousFolder: String
-    let ids: [String]
-}
-
-/// A place the selected mods can be moved to.
-struct MoveDestination: Identifiable {
-    let id: String
-    let title: String
-    let detail: String
 }
 
 // MARK: - Keychain
@@ -662,10 +643,6 @@ final class WorkshopStore: ObservableObject {
     @Published var activeTitle = ""
     @Published var phases: [String] = []
     @Published var revealFolderURL: URL?
-    /// Folder names chosen per game, keyed by Steam App ID. A game without an entry uses the shared folder.
-    @Published var customGameFolders: [String: String] = [:]
-    /// Games whose saved folder can no longer be opened, so the UI can ask for it again.
-    @Published var unreadableGameFolders: Set<String> = []
 
     private let engine = SteamengineNewEngine()!
     private var poller: Timer?
@@ -675,9 +652,6 @@ final class WorkshopStore: ObservableObject {
     private var didLaunchChecks = false
     private var customRoot: URL?
     private var scopedURL: URL?
-    private var gameRoots: [String: URL] = [:]
-    private var gameScopes: [String: URL] = [:]
-    private var didLoadGameFolders = false
 
     var isAuthenticated: Bool { engine.isAuthenticated() }
     private var documents: URL { FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0] }
@@ -746,6 +720,7 @@ final class WorkshopStore: ObservableObject {
         resolveCustomRoot()
         updateFolderLabel()
         refreshLibraryBytes()
+        resolveGameNames()
         if !username.isEmpty && !password.isEmpty { Task { await signIn(automatic: true) } }
     }
 
@@ -778,14 +753,18 @@ final class WorkshopStore: ObservableObject {
 
     // MARK: download folders
 
-    static let gameFoldersKey = "options.gameFolders"
-
     private func resolveCustomRoot() {
         guard let data = UserDefaults.standard.data(forKey: "options.folderBookmark") else { return }
         var stale = false
         guard let url = try? URL(resolvingBookmarkData: data, options: [],
                                  relativeTo: nil, bookmarkDataIsStale: &stale) else {
-            // A bookmark saved by an older install can no longer resolve; forget it instead of retrying every launch.
+            // The bookmark can stop resolving (a re-signed or rebuilt container). The folder may
+            // still be usable at its last path, so try that before giving up on it.
+            if let path = UserDefaults.standard.string(forKey: "options.folderPath"),
+               let fallback = Self.usableFolder(path) {
+                customRoot = fallback
+                return
+            }
             UserDefaults.standard.removeObject(forKey: "options.folderBookmark")
             return
         }
@@ -797,55 +776,11 @@ final class WorkshopStore: ObservableObject {
         }
     }
 
-    /// Per-game bookmarks are resolved the first time they are needed, so launch stays quick.
-    private func loadGameFolders() {
-        guard !didLoadGameFolders else { return }
-        didLoadGameFolders = true
-        guard let stored = UserDefaults.standard.dictionary(forKey: Self.gameFoldersKey), !stored.isEmpty else { return }
-        var refreshed = stored
-        var unreadable: Set<String> = []
-        for (app, value) in stored {
-            guard let data = value as? Data else {
-                refreshed.removeValue(forKey: app)
-                continue
-            }
-            var stale = false
-            guard let url = try? URL(resolvingBookmarkData: data, options: [],
-                                     relativeTo: nil, bookmarkDataIsStale: &stale) else {
-                // The bookmark went stale (a container that was rebuilt, for example). The folder
-                // itself may still be there, so try the last known path before giving up.
-                if let path = storedGameFolderPath(app), let fallback = Self.usableFolder(path) {
-                    gameRoots[app] = fallback
-                    if let fresh = try? fallback.bookmarkData(options: [],
-                                                              includingResourceValuesForKeys: nil, relativeTo: nil) {
-                        refreshed[app] = fresh
-                    }
-                    continue
-                }
-                // Keep the bookmark: the folder may be reachable again, and silently falling
-                // back to the shared folder would move a mod somewhere the user never picked.
-                unreadable.insert(app)
-                continue
-            }
-            if url.startAccessingSecurityScopedResource() { gameScopes[app] = url }
-            gameRoots[app] = url
-            if stale, let fresh = try? url.bookmarkData(options: [],
-                                                        includingResourceValuesForKeys: nil, relativeTo: nil) {
-                refreshed[app] = fresh
-            }
-        }
-        UserDefaults.standard.set(refreshed, forKey: Self.gameFoldersKey)
-        unreadableGameFolders = unreadable
-        rebuildGameFolderLabels()
+    nonisolated static func displayName(_ url: URL) -> String {
+        (try? url.resourceValues(forKeys: [.localizedNameKey]).localizedName) ?? url.lastPathComponent
     }
 
-    static let gameFolderPathsKey = "options.gameFolders.paths"
-
-    private func storedGameFolderPath(_ app: String) -> String? {
-        (UserDefaults.standard.dictionary(forKey: Self.gameFolderPathsKey) as? [String: String])?[app]
-    }
-
-    /// A folder we can still read and write without a bookmark (its path is unchanged).
+    /// A folder we can still use without a bookmark (its path is unchanged and it is writable).
     nonisolated static func usableFolder(_ path: String) -> URL? {
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue else { return nil }
@@ -855,50 +790,19 @@ final class WorkshopStore: ObservableObject {
         return url
     }
 
-    /// Re-resolves a game folder that was flagged unavailable, in case it came back.
-    func refreshGameFolder(_ app: String) -> URL? {
-        if let existing = gameRoots[app] { return existing }
-        guard let path = storedGameFolderPath(app), let url = Self.usableFolder(path) else { return nil }
-        gameRoots[app] = url
-        unreadableGameFolders.remove(app)
-        rebuildGameFolderLabels()
-        return url
-    }
-
-    private func rebuildGameFolderLabels() {
-        var labels: [String: String] = [:]
-        for (app, url) in gameRoots { labels[app] = Self.displayName(url) }
-        customGameFolders = labels
-    }
-
-    nonisolated static func displayName(_ url: URL) -> String {
-        (try? url.resourceValues(forKeys: [.localizedNameKey]).localizedName) ?? url.lastPathComponent
-    }
-
-    /// The folder new downloads for `appID` go into: that game's own folder when one is set,
-    /// otherwise a folder named after the game inside the shared download folder.
+    /// The folder new downloads for `appID` go into: a folder named after the game inside the
+    /// shared download folder.
     func root(forGame appID: String?) -> URL {
-        if let appID {
-            loadGameFolders()
-            if let custom = gameRoots[appID] {
-                try? FileManager.default.createDirectory(at: custom, withIntermediateDirectories: true)
-                return custom
-            }
-            // The bookmark may have gone stale while the folder itself is still there.
-            if let recovered = refreshGameFolder(appID) {
-                try? FileManager.default.createDirectory(at: recovered, withIntermediateDirectories: true)
-                return recovered
-            }
-            let folder = downloadsRoot.appendingPathComponent(gameFolderName(appID), isDirectory: true)
-            try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            return folder
-        }
-        return downloadsRoot
+        guard let appID else { return downloadsRoot }
+        let folder = downloadsRoot.appendingPathComponent(gameFolderName(appID), isDirectory: true)
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        return folder
     }
 
     /// The folder name a game gets inside the shared download folder.
     func gameFolderName(_ appID: String) -> String {
-        if let name = library.first(where: { $0.appID == appID })?.gameName, !name.isEmpty {
+        if let name = library.first(where: { $0.appID == appID })?.gameName,
+           !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return Self.sanitizedName(name)
         }
         let cache = UserDefaults.standard.dictionary(forKey: "modshelf.gameNames") as? [String: String] ?? [:]
@@ -906,11 +810,41 @@ final class WorkshopStore: ObservableObject {
         return "App \(appID)"
     }
 
-    /// What a game's folder row should show: the picked folder, or the default one inside Downloads.
-    func gameFolderDisplay(_ appID: String) -> String {
-        if let custom = customGameFolders[appID] { return custom }
-        let folder = downloadsRoot.appendingPathComponent(gameFolderName(appID), isDirectory: true)
-        return Self.readablePath(folder)
+    /// Fills in missing game names from Steam, then renames the "App <id>" folders they left.
+    func resolveGameNames() {
+        var missing: [String: String] = [:]
+        for item in library {
+            guard let app = item.appID else { continue }
+            if (item.gameName ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                missing[app] = item.displayTitle
+            }
+        }
+        guard !missing.isEmpty else { return }
+        Task { @MainActor in
+            for app in missing.keys {
+                guard let name = await SteamMeta.gameName(appID: app) else { continue }
+                for i in self.library.indices where self.library[i].appID == app
+                    && (self.library[i].gameName ?? "").isEmpty {
+                    self.library[i].gameName = name
+                }
+                self.saveLibrary()
+                self.renameGameFolder(appID: app, to: name)
+            }
+        }
+    }
+
+    /// Moves an "App <id>" folder to the game's real name and updates the mods inside it.
+    private func renameGameFolder(appID: String, to name: String) {
+        let fm = FileManager.default
+        let old = downloadsRoot.appendingPathComponent("App \(appID)", isDirectory: true)
+        let new = downloadsRoot.appendingPathComponent(Self.sanitizedName(name), isDirectory: true)
+        guard fm.fileExists(atPath: old.path), !fm.fileExists(atPath: new.path) else { return }
+        do { try fm.moveItem(at: old, to: new) } catch { return }
+        for i in library.indices where library[i].folder.hasPrefix(old.path + "/") {
+            library[i].folder = new.path + String(library[i].folder.dropFirst(old.path.count))
+        }
+        saveLibrary()
+        refreshLibraryBytes()
     }
 
     nonisolated static func sanitizedName(_ name: String, fallback: String = "") -> String {
@@ -921,9 +855,11 @@ final class WorkshopStore: ObservableObject {
         return limited.isEmpty ? fallback : limited
     }
 
-    func setCustomFolder(_ url: URL) { setFolder(url, for: nil) }
+    func setCustomFolder(_ url: URL) { setFolder(url) }
 
-    func setFolder(_ url: URL, for game: String?) {
+    /// Picks the shared download folder and moves every mod that already lives in the old one.
+    func setFolder(_ url: URL) {
+        let oldRoot = currentRootURL
         // Access has to be started before the folder can be tested or bookmarked.
         let started = url.startAccessingSecurityScopedResource()
         guard Self.canWrite(into: url) else {
@@ -939,62 +875,82 @@ final class WorkshopStore: ObservableObject {
             Haptics.error()
             return
         }
-        if let game {
-            loadGameFolders()
-            if let previous = gameScopes[game], previous.path != url.path { previous.stopAccessingSecurityScopedResource() }
-            // Picking the folder that is already set must not start a second access to it.
-            if let previous = gameScopes[game], previous.path == url.path {
-                if started { url.stopAccessingSecurityScopedResource() }
-            } else {
-                gameScopes[game] = started ? url : nil
-            }
-            gameRoots[game] = url
-            var stored = UserDefaults.standard.dictionary(forKey: Self.gameFoldersKey) ?? [:]
-            stored[game] = data
-            UserDefaults.standard.set(stored, forKey: Self.gameFoldersKey)
-            // Remember the path too: if the bookmark goes stale, the folder may still be usable.
-            var paths = UserDefaults.standard.dictionary(forKey: Self.gameFolderPathsKey) as? [String: String] ?? [:]
-            paths[game] = url.path
-            UserDefaults.standard.set(paths, forKey: Self.gameFolderPathsKey)
-            unreadableGameFolders.remove(game)
-            rebuildGameFolderLabels()
+        if let previous = scopedURL, previous.path != url.path { previous.stopAccessingSecurityScopedResource() }
+        if let previous = scopedURL, previous.path == url.path {
+            if started { url.stopAccessingSecurityScopedResource() }
         } else {
-            if let previous = scopedURL, previous.path != url.path { previous.stopAccessingSecurityScopedResource() }
-            if let previous = scopedURL, previous.path == url.path {
-                if started { url.stopAccessingSecurityScopedResource() }
-            } else {
-                scopedURL = started ? url : nil
-            }
-            customRoot = url
-            UserDefaults.standard.set(data, forKey: "options.folderBookmark")
-            updateFolderLabel()
-            operationMessage = "New downloads will be saved to \(Self.displayName(url))."
+            scopedURL = started ? url : nil
         }
+        customRoot = url
+        UserDefaults.standard.set(data, forKey: "options.folderBookmark")
+        UserDefaults.standard.set(url.path, forKey: "options.folderPath")
+        updateFolderLabel()
+        moveAllMods(to: url, from: oldRoot)
     }
 
-    func resetCustomFolder() { resetFolder(for: nil) }
+    func resetCustomFolder() {
+        guard let previousRoot = customRoot else { return }
+        scopedURL?.stopAccessingSecurityScopedResource()
+        scopedURL = nil
+        customRoot = nil
+        UserDefaults.standard.removeObject(forKey: "options.folderBookmark")
+        UserDefaults.standard.removeObject(forKey: "options.folderPath")
+        updateFolderLabel()
+        moveAllMods(to: defaultRoot, from: previousRoot)
+    }
 
-    func resetFolder(for game: String?) {
-        if let game {
-            loadGameFolders()
-            gameScopes[game]?.stopAccessingSecurityScopedResource()
-            gameScopes[game] = nil
-            gameRoots[game] = nil
-            var stored = UserDefaults.standard.dictionary(forKey: Self.gameFoldersKey) ?? [:]
-            stored.removeValue(forKey: game)
-            UserDefaults.standard.set(stored, forKey: Self.gameFoldersKey)
-            var paths = UserDefaults.standard.dictionary(forKey: Self.gameFolderPathsKey) as? [String: String] ?? [:]
-            paths.removeValue(forKey: game)
-            UserDefaults.standard.set(paths, forKey: Self.gameFolderPathsKey)
-            unreadableGameFolders.remove(game)
-            rebuildGameFolderLabels()
-            operationMessage = "This game now uses the shared download folder."
-        } else {
-            scopedURL?.stopAccessingSecurityScopedResource(); scopedURL = nil
-            customRoot = nil
-            UserDefaults.standard.removeObject(forKey: "options.folderBookmark")
-            updateFolderLabel()
-            operationMessage = "Download folder reset to the default."
+    /// Moves every mod (and the game folders they sit in) into `newRoot`, keeping the layout.
+    private func moveAllMods(to newRoot: URL, from oldRoot: URL) {
+        guard oldRoot.path != newRoot.path else { return }
+        let entries = library.map { (id: $0.id, title: $0.displayTitle, folder: $0.folder) }
+        guard !entries.isEmpty else { return }
+        operationMessage = "Moving your mods to the new folder…"
+        Task { @MainActor in
+            let outcome = await Task.detached(priority: .userInitiated) { () -> (moved: [(String, String)], failed: [String]) in
+                var moved: [(String, String)] = []
+                var failed: [String] = []
+                let fm = FileManager.default
+                try? fm.createDirectory(at: newRoot, withIntermediateDirectories: true)
+                for entry in entries {
+                    guard entry.folder.hasPrefix(oldRoot.path + "/") else { continue }
+                    let source = URL(fileURLWithPath: entry.folder, isDirectory: true)
+                    guard fm.fileExists(atPath: source.path) else {
+                        failed.append("\(entry.title) (files missing)")
+                        continue
+                    }
+                    let relative = String(entry.folder.dropFirst(oldRoot.path.count)).drop(while: { $0 == "/" })
+                    let wanted = newRoot.appendingPathComponent(String(relative), isDirectory: true)
+                    let parent = wanted.deletingLastPathComponent()
+                    try? fm.createDirectory(at: parent, withIntermediateDirectories: true)
+                    let destination = Self.availableURL(name: wanted.lastPathComponent, id: entry.id, in: parent)
+                    do {
+                        try Self.place(from: source, to: destination)
+                        let arrived = Self.scan(folder: destination.path)
+                        guard arrived.exists, arrived.count > 0 else {
+                            failed.append("\(entry.title) (the copy arrived empty)")
+                            continue
+                        }
+                        moved.append((entry.id, destination.path))
+                    } catch {
+                        failed.append("\(entry.title) (\(error.localizedDescription))")
+                    }
+                }
+                return (moved, failed)
+            }.value
+            for (id, path) in outcome.moved {
+                if let index = self.library.firstIndex(where: { $0.id == id }) {
+                    self.library[index].folder = path
+                    self.library[index].filesBroken = false
+                }
+            }
+            if !outcome.moved.isEmpty { self.saveLibrary(); self.refreshLibraryBytes() }
+            if outcome.failed.isEmpty {
+                self.operationMessage = outcome.moved.isEmpty
+                    ? "New downloads will be saved to \(Self.displayName(newRoot))."
+                    : "Moved \(outcome.moved.count) mod\(outcome.moved.count == 1 ? "" : "s") to \(Self.displayName(newRoot))."
+            } else {
+                self.errorMessage = "Moved \(outcome.moved.count), but \(outcome.failed.count) couldn't move: \(outcome.failed.joined(separator: ", "))"
+            }
         }
     }
 
@@ -1342,6 +1298,7 @@ final class WorkshopStore: ObservableObject {
         if success {
             updateHistory(id: activeID, result: "Downloaded", error: nil)
             refreshLibraryBytes()
+            resolveGameNames()
             if let installed = library.first(where: { $0.id == activeID }) {
                 schedulePlacementCheck([(id: activeID, path: installed.folder)])
             }
@@ -1562,15 +1519,6 @@ final class WorkshopStore: ObservableObject {
         if UserDefaults.standard.object(forKey: "options.confirmDelete") as? Bool ?? true {
             pendingDelete = item; showDeleteConfirmation = true
         } else { remove(item) }
-    }
-
-    /// Mods for `appID` that are installed somewhere other than `root`, e.g. after the game's folder changed.
-    func modsOutside(_ root: URL, forGame appID: String) -> [WorkshopItem] {
-        library.filter { item in
-            guard item.appID == appID else { return false }
-            let parent = URL(fileURLWithPath: item.folder, isDirectory: true).deletingLastPathComponent()
-            return parent.path != root.path
-        }
     }
 
     func move(_ ids: [String], toPicked url: URL, onDone: (([String]) -> Void)? = nil) {
@@ -1903,10 +1851,8 @@ final class WorkshopStore: ObservableObject {
             for url in try FileManager.default.contentsOfDirectory(at: temporaryPath, includingPropertiesForKeys: nil) { try FileManager.default.removeItem(at: url) }
             // Leftover partial downloads and replaced copies from interrupted sessions, in every folder
             // ModShelf writes to.
-            loadGameFolders()
-            var roots = [downloadsRoot]
-            roots.append(contentsOf: gameRoots.values)
-            for root in roots {
+            // Leftover partial downloads and replaced copies from interrupted sessions.
+            for root in [downloadsRoot] {
                 for url in visibleAndHidden(root)
                 where url.lastPathComponent.hasPrefix(".partial-") || url.lastPathComponent.hasPrefix(".modshelf-replacing-") {
                     try? FileManager.default.removeItem(at: url)
@@ -2340,18 +2286,13 @@ struct ContentView: View {
     @State private var tabCollapsed = false
     @State private var scrollAnchor: CGFloat = 0
     @State private var folderSheet: FolderSheet?
-    @State private var moveSheetOpen = false
     @State private var selecting = false
     @State private var selection: Set<String> = []
     @State private var confirmBulkDelete = false
-    @State private var pendingRelocate: RelocateRequest?
     @State private var mediaViewer: MediaViewer?
     @State private var mediaIndex = 0
     @State private var marqueeToken = 0
-    @State private var showFolderTip = false
-    @State private var scrollToGameFolders = 0
     @State private var pendingAutoDownload: String?
-    @AppStorage("options.folderTipShown") private var folderTipShown = false
     @State private var selectedGame: String? = nil
     @State private var selectedTag: String? = nil
     @State private var favouritesOnly = false
@@ -2409,26 +2350,9 @@ struct ContentView: View {
         }
     }
 
-    /// Every game that gets a folder row: the ones in the library plus any game with a chosen folder.
-    private var gamesForFolders: [(id: String, name: String)] {
-        var map: [String: String] = [:]
-        for game in installedGames { map[game.id] = game.name }
-        for id in store.customGameFolders.keys where map[id] == nil {
-            map[id] = store.gameDisplayName(id)
-        }
-        return map.map { (id: $0.key, name: $0.value) }
-            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-    }
-
-    private var moveDestinations: [MoveDestination] {
-        var list: [MoveDestination] = [
-            MoveDestination(id: "shared", title: "Shared mod folder", detail: store.folderLabel)
-        ]
-        for game in gamesForFolders {
-            list.append(MoveDestination(id: game.id, title: "\(game.name) folder",
-                                        detail: store.customGameFolders[game.id] ?? store.folderLabel))
-        }
-        return list
+    private func beginMove() {
+        Haptics.tap()
+        folderSheet = .moveDestination
     }
 
     private func toggleSelection(_ item: WorkshopItem) {
@@ -2443,8 +2367,7 @@ struct ContentView: View {
     }
 
     /// Bulk delete respects the same confirmation setting as deleting one mod.
-    private func requestDeleteSelected() {
-        guard !selection.isEmpty else { return }
+    private func requestDeleteSelected() {        guard !selection.isEmpty else { return }
         if confirmDelete { confirmBulkDelete = true } else { deleteSelected() }
     }
 
@@ -2455,31 +2378,6 @@ struct ContentView: View {
         selection = selection.intersection(liveIDs)
         if selection.isEmpty { selecting = false }
         confirmBulkDelete = false
-    }
-
-    /// After a folder change, mods still in the old place are offered a move rather than silently left behind.
-    private func offerRelocation(for appID: String) {
-        let root = store.root(forGame: appID)
-        let items = store.modsOutside(root, forGame: appID)
-        guard !items.isEmpty else { return }
-        // The folder the mods are in now becomes the "Before" side of the offer.
-        let previous = items.first.map {
-            WorkshopStore.displayName(URL(fileURLWithPath: $0.folder, isDirectory: true).deletingLastPathComponent())
-        } ?? "the old folder"
-        pendingRelocate = RelocateRequest(gameName: store.gameDisplayName(appID),
-                                          root: root,
-                                          folderName: WorkshopStore.displayName(root),
-                                          previousFolder: previous,
-                                          ids: items.map(\.id))
-    }
-
-    private func destinationRoot(_ destination: MoveDestination) -> URL? {
-        if destination.id == "shared" { return store.root(forGame: nil) }
-        if store.unreadableGameFolders.contains(destination.id) {
-            store.operationMessage = "Can't open that game's folder any more. Pick it again in Options → Game folders."
-            return nil
-        }
-        return store.root(forGame: destination.id)
     }
 
     // MARK: body
@@ -2502,14 +2400,8 @@ struct ContentView: View {
             case .shared:
                 FolderPicker(onPick: { url in
                     folderSheet = nil
-                    store.setFolder(url, for: nil)
+                    store.setFolder(url)
                 }, onCancel: { folderSheet = nil }, startURL: store.currentRootURL)
-            case .game(let appID):
-                FolderPicker(onPick: { url in
-                    folderSheet = nil
-                    store.setFolder(url, for: appID)
-                    offerRelocation(for: appID)
-                }, onCancel: { folderSheet = nil }, startURL: store.root(forGame: appID))
             case .moveDestination:
                 FolderPicker(onPick: { url in
                     folderSheet = nil
@@ -2519,24 +2411,6 @@ struct ContentView: View {
                     }
                 }, onCancel: { folderSheet = nil }, startURL: store.currentRootURL)
             }
-        }
-        .sheet(isPresented: $moveSheetOpen) {
-            MoveDestinationSheet(destinations: moveDestinations,
-                                 onPick: { destination in
-                                     moveSheetOpen = false
-                                     let ids = Array(selection)
-                                     guard !ids.isEmpty else { return }
-                                     guard let root = destinationRoot(destination) else { return }
-                                     store.move(ids, toRoot: root, label: destination.title) { moved in
-                                         selection.subtract(moved)
-                                         if selection.isEmpty { selecting = false }
-                                     }
-                                 },
-                                 onChooseFolder: {
-                                     moveSheetOpen = false
-                                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { folderSheet = .moveDestination }
-                                 },
-                                 onCancel: { moveSheetOpen = false })
         }
         .onChange(of: store.shareURL) { showShare = $0 != nil }
         .onChange(of: confirmDelete) { UserDefaults.standard.set($0, forKey: "options.confirmDelete") }
@@ -2563,16 +2437,6 @@ struct ContentView: View {
             let liveIDs = Set(store.library.map(\.id))
             selection = selection.intersection(liveIDs)
             if selection.isEmpty { selecting = false }
-            if let request = pendingRelocate {
-                let remaining = request.ids.filter { liveIDs.contains($0) }
-                pendingRelocate = remaining.isEmpty ? nil
-                    : RelocateRequest(gameName: request.gameName, root: request.root,
-                                      folderName: request.folderName,
-                                      previousFolder: request.previousFolder,
-                                      ids: remaining)
-            }
-            // The first mod that lands is the moment to mention per-game folders.
-            if count == 1, !folderTipShown { withAnimation(.easeOut(duration: 0.2)) { showFolderTip = true } }
         }
         .onChange(of: autoDownload) { on in
             // Auto download starts with its confirmation armed, and off with it off.
@@ -2709,22 +2573,6 @@ struct ContentView: View {
                          cancel: { confirmBulkDelete = false })
                 .padding(30).zIndex(15)
         }
-        if let request = pendingRelocate {
-            Color.black.opacity(0.38).ignoresSafeArea().contentShape(Rectangle())
-                .onTapGesture { pendingRelocate = nil }.zIndex(16)
-            ConfirmPopup(heading: "Move \(request.ids.count) mod\(request.ids.count == 1 ? "" : "s")?",
-                         message: "Before: \(request.previousFolder)\nNow: \(request.folderName)\n\nModShelf can move the existing \(request.gameName) mods to the new folder now, or leave them where they are.",
-                         actionTitle: "Move them",
-                         tint: .accentColor,
-                         confirm: {
-                             let ids = request.ids
-                             let root = request.root
-                             pendingRelocate = nil
-                             store.move(ids, toRoot: root, label: request.folderName)
-                         },
-                         cancel: { pendingRelocate = nil })
-                .padding(30).zIndex(17)
-        }
         if let viewer = mediaViewer {
             ExpandedMediaView(media: viewer.media, startIndex: viewer.index,
                               onIndexChange: { mediaIndex = $0 }) {
@@ -2732,16 +2580,6 @@ struct ContentView: View {
             }
             .transition(.opacity)
             .zIndex(20)
-        }
-        if showFolderTip {
-            Color.black.opacity(0.34).ignoresSafeArea().contentShape(Rectangle())
-                .onTapGesture { dismissFolderTip() }.zIndex(21)
-            FolderTipPopup(onDetails: {
-                dismissFolderTip()
-                selectedTab = 3
-                scrollToGameFolders += 1
-            }, onClose: { dismissFolderTip() })
-                .padding(30).zIndex(22)
         }
         if let id = pendingAutoDownload {
             Color.black.opacity(0.34).ignoresSafeArea().contentShape(Rectangle())
@@ -2768,11 +2606,6 @@ struct ContentView: View {
     /// Popups hold a snapshot; this returns the freshest copy so favourite/status changes show immediately.
     private func currentItem(_ item: WorkshopItem) -> WorkshopItem {
         store.library.first(where: { $0.id == item.id }) ?? item
-    }
-
-    private func dismissFolderTip() {
-        withAnimation(.easeOut(duration: 0.16)) { showFolderTip = false }
-        folderTipShown = true
     }
 
     // MARK: header
@@ -3277,7 +3110,7 @@ struct ContentView: View {
                 Button { selectAllVisible() } label: { Label("Select all", systemImage: "checkmark.circle") }
                 Button { selection.removeAll() } label: { Label("Deselect all", systemImage: "circle.dashed") }
                 Divider()
-                Button { moveSheetOpen = true } label: { Label("Move selected (\(selection.count))", systemImage: "folder") }
+                Button { beginMove() } label: { Label("Move selected (\(selection.count))", systemImage: "folder") }
                     .disabled(selection.isEmpty)
                 Button(role: .destructive) { requestDeleteSelected() } label: {
                     Label("Delete selected (\(selection.count))", systemImage: "trash")
@@ -3704,27 +3537,18 @@ struct ContentView: View {
 
     private var optionsView: some View {
         NavigationStack {
-            ScrollViewReader { proxy in
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 18) {
-                        ScrollSpy(onChange: handleScroll)
-                        Text("Options").font(.system(size: 27, weight: .bold, design: .rounded)).padding(.top, 10)
-                        appearanceSettings
-                        downloadsSettings
-                        browserSettings
-                        gameFoldersSettings
-                            .id("gameFolders")
-                        steamAccountSettings
-                        creditsSettings
-                    }
-                    .padding(.horizontal, 15)
-                    .padding(.bottom, tabBarReserve)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    ScrollSpy(onChange: handleScroll)
+                    Text("Options").font(.system(size: 27, weight: .bold, design: .rounded)).padding(.top, 10)
+                    appearanceSettings
+                    downloadsSettings
+                    browserSettings
+                    steamAccountSettings
+                    creditsSettings
                 }
-                .onChange(of: scrollToGameFolders) { _ in
-                    withAnimation(.easeInOut(duration: 0.3)) {
-                        proxy.scrollTo("gameFolders", anchor: .top)
-                    }
-                }
+                .padding(.horizontal, 15)
+                .padding(.bottom, tabBarReserve)
             }
             .coordinateSpace(name: "scroll")
             .background(Color(uiColor: .systemGroupedBackground))
@@ -3834,7 +3658,7 @@ struct ContentView: View {
                 .padding(.trailing, 12)
                 if store.usingCustomFolder {
                     divider
-                    Button { Haptics.tap(); store.resetFolder(for: nil) } label: {
+                    Button { Haptics.tap(); store.resetCustomFolder() } label: {
                         rowContent("Reset to default folder", symbol: "arrow.uturn.backward", detail: nil, tint: .accentColor)
                     }.buttonStyle(.plain)
                 }
@@ -3842,61 +3666,6 @@ struct ContentView: View {
                 Button { Haptics.tap(); store.clearTemporaryFiles() } label: {
                     rowContent("Clear temporary files", symbol: "trash.slash", detail: nil)
                 }.buttonStyle(.plain)
-            }
-        )
-    }
-
-    private var gameFoldersSettings: AnyView {
-        AnyView(
-            settingsGroup("Game folders") {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Each game can keep its mods in its own folder.")
-                        .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    Text("New downloads for a game go there; mods you already have stay where they are until you move them.")
-                        .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    Text("This is useful for installing mods directly to the games specified mod folder, ensure you select the correct folder if you are going to do so.")
-                        .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 15).padding(.vertical, 11)
-                ForEach(gamesForFolders, id: \.id) { game in
-                    divider
-                    HStack(spacing: 6) {
-                        Button { Haptics.tap(); folderSheet = .game(game.id) } label: {
-                            rowContent(game.name, symbol: "folder",
-                                       detail: store.unreadableGameFolders.contains(game.id)
-                                           ? "Folder unavailable — pick it again"
-                                           : store.gameFolderDisplay(game.id))
-                        }
-                        .buttonStyle(.plain)
-                        Button { Haptics.tap(); store.revealFolder(store.root(forGame: game.id)) } label: {
-                            Image(systemName: "folder")
-                                .font(.system(size: 13, weight: .semibold)).foregroundStyle(.secondary)
-                                .frame(width: 30, height: 30)
-                                .background(Circle().fill(Color.secondary.opacity(0.12)))
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Open \(game.name)'s folder")
-                        if store.customGameFolders[game.id] != nil {
-                            Button { Haptics.tap(); store.resetFolder(for: game.id) } label: {
-                                Image(systemName: "arrow.uturn.backward")
-                                    .font(.system(size: 13, weight: .semibold)).foregroundStyle(.secondary)
-                                    .frame(width: 30, height: 30)
-                                    .background(Circle().fill(Color.secondary.opacity(0.12)))
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("Reset \(game.name)'s folder")
-                        }
-                    }
-                    .padding(.trailing, 12)
-                }
-                if gamesForFolders.isEmpty {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("Games appear here once you have downloaded a mod for them.").font(.system(size: 13)).foregroundStyle(.secondary)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 15).padding(.vertical, 11)
-                }
             }
         )
     }
@@ -4229,43 +3998,6 @@ struct HistoryActionPopup: View {
             }
             .padding(.horizontal, 16).frame(height: 46).contentShape(Rectangle())
         }.buttonStyle(.plain)
-    }
-}
-
-/// A one-time tip after the first successful download, pointing at per-game folders.
-struct FolderTipPopup: View {
-    let onDetails: () -> Void
-    let onClose: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 10) {
-                Image(systemName: "folder.badge.gearshape")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(Color.accentColor)
-                Text("First mod installed").font(.headline)
-            }
-            Text("You can give each game its own mod folder.")
-                .font(.footnote).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            HStack(spacing: 10) {
-                Button(action: onDetails) {
-                    Text("Details").font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
-                        .frame(maxWidth: .infinity).frame(height: 40)
-                        .background(RoundedRectangle(cornerRadius: 11).fill(Color.accentColor))
-                }
-                .buttonStyle(.plain)
-                Button(action: onClose) {
-                    Text("Got it").font(.system(size: 15, weight: .semibold)).foregroundStyle(.primary)
-                        .frame(maxWidth: .infinity).frame(height: 40)
-                        .background(RoundedRectangle(cornerRadius: 11).fill(Color(uiColor: .tertiarySystemFill)))
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(16).frame(maxWidth: 320)
-        .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(Color(uiColor: .secondarySystemGroupedBackground)))
-        .shadow(color: .black.opacity(0.3), radius: 20, y: 8)
     }
 }
 
@@ -4971,38 +4703,6 @@ struct ShareSheet: UIViewControllerRepresentable {
     func makeUIViewController(context: Context) -> UIActivityViewController { UIActivityViewController(activityItems: activityItems, applicationActivities: nil) }
     func updateUIViewController(_ controller: UIActivityViewController, context: Context) { }
 }
-
-struct MoveDestinationSheet: View {
-    let destinations: [MoveDestination]
-    let onPick: (MoveDestination) -> Void
-    let onChooseFolder: () -> Void
-    let onCancel: () -> Void
-
-    var body: some View {
-        NavigationStack {
-            List {
-                Section {
-                    ForEach(destinations) { destination in
-                        Button { onPick(destination) } label: {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(destination.title).font(.system(size: 16)).foregroundStyle(.primary)
-                                Text(destination.detail).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
-                            }
-                        }
-                    }
-                } footer: {
-                    Text("Each mod keeps its folder name. If a folder with that name is already there, the Workshop ID is added.")
-                }
-                Section {
-                    Button { onChooseFolder() } label: { Label("Choose another folder…", systemImage: "folder.badge.plus") }
-                }
-            }
-            .navigationTitle("Move selected")
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { onCancel() } } }
-        }
-    }
-}
-
 
 // MARK: - Browser home (custom start page)
 
