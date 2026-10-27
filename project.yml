@@ -18,6 +18,21 @@ targets:
     platform: iOS
     sources:
       - Sources
+    # A real Info.plist is required here: UIFileSharingEnabled has no INFOPLIST_KEY_ build
+    # setting, so with a generated plist it was silently dropped and ModShelf never showed up
+    # in Files. The empty UILaunchScreen is what stops iOS letterboxing the app at a legacy
+    # resolution (the wrong aspect on newer iPhones).
+    info:
+      path: Sources/Info.plist
+      properties:
+        CFBundleDisplayName: ModShelf
+        CFBundleShortVersionString: "0.1b"
+        CFBundleVersion: "30"
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
     dependencies:
       - framework: SteamEngine.xcframework
         embed: true
@@ -26,10 +41,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.shplash.modshelf
         PRODUCT_NAME: ModShelf
-        INFOPLIST_KEY_CFBundleDisplayName: ModShelf
-        INFOPLIST_KEY_UIFileSharingEnabled: YES
-        INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace: YES
-        INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
+        TARGETED_DEVICE_FAMILY: "1"
         MARKETING_VERSION: "0.1b"
         CURRENT_PROJECT_VERSION: "30"
         GENERATE_INFOPLIST_FILE: YES
