@@ -81,9 +81,7 @@ with a `version.json` the app's update check reads, to the `ios-build` release o
 
 Steam and the Steam Workshop are trademarks of Valve Corporation. ModShelf is not made by or endorsed by Valve.
 
-## Support
-
-<p align="center">
+## Support <p align="center">
   <a href="https://ko-fi.com/shplash"><img src="https://img.shields.io/badge/Support-ko--fi-FF5E5B?style=for-the-badge" alt="Support"></a>
 </p>
 
