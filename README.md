@@ -92,6 +92,6 @@ builds `SteamEngine.xcframework` from `ios-engine/`, packages an ad-hoc signed I
 
 Steam and the Steam Workshop are trademarks of Valve Corporation. ModShelf is not made by or endorsed by Valve.
 
-## Support <a href="https://ko-fi.com/shplash"><img src="https://img.shields.io/badge/Support-ko--fi-FF5E5B?style=for-the-badge" alt="Support"></a>
+## <a href="https://ko-fi.com/shplash"><img src="https://img.shields.io/badge/Support-ko--fi-FF5E5B?style=for-the-badge" alt="Support"></a>
 
 If ModShelf has been useful to you, you can support its development as well as future projects.
