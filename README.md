@@ -67,6 +67,12 @@ Use:
 - TrollStore
 - etc
 
+## Requirements
+
+- iOS 16 or newer
+- A Steam account that can sign in on the device
+- The game in your Steam library: Steam only hands over a game's Workshop items when your account holds its license. Free-to-play games give you that license when you add them to your library once.
+
 ## Where mods go
 
 ```

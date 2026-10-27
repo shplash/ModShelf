@@ -241,7 +241,7 @@ enum ErrorText {
         let r = text.lowercased()
         if r.contains("not own") || r.contains("own this game") || r.contains("don't own")
             || r.contains("no license") || r.contains("licen") || r.contains("not purchased") {
-            return "You don't own this game on Steam, so Steam won't give you its Workshop items."
+            return "Steam needs this game in your library before it will hand over its Workshop items. Free-to-play games give you the license when you add them to your library once."
         }
         if r.contains("private") { return "That Workshop item is private, so it can't be downloaded." }
         if r.contains("not found") || r.contains("doesn't exist") || r.contains("does not exist")
