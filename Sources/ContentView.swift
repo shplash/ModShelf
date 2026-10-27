@@ -672,6 +672,8 @@ final class WorkshopStore: ObservableObject {
     @Published var activeTitle = ""
     @Published var phases: [String] = []
     @Published var revealFolderURL: URL?
+    @Published var appUpdateMessage = ""
+    @Published var isCheckingAppUpdate = false
 
     /// The Go engine. Signing in and downloading need it, so a failure to create it is reported
     /// instead of crashing the app on launch. Its type comes from the generated binding, so it is
@@ -1842,6 +1844,30 @@ final class WorkshopStore: ObservableObject {
         status = "Temporary files cleared"
         operationMessage = "Temporary files cleared."
     }
+    // MARK: app updates
+
+    /// The release the app checks against: the build publishes a tiny version file next to the IPA.
+    nonisolated static let appRepo = "shplash/ModShelf"
+
+    func checkForAppUpdate() {
+        guard !isCheckingAppUpdate else { return }
+        isCheckingAppUpdate = true
+        appUpdateMessage = "Checking for updates…"
+        Task { @MainActor in
+            isCheckingAppUpdate = false
+            guard let url = URL(string: "https://github.com/\(Self.appRepo)/releases/download/ios-build/version.json"),
+                  let (data, _) = try? await URLSession.shared.data(from: url),
+                  let remote = try? JSONDecoder().decode(AppVersion.self, from: data) else {
+                appUpdateMessage = "Couldn't check for updates."
+                return
+            }
+            let installed = Int(modShelfBuild) ?? 0
+            appUpdateMessage = remote.build > installed
+                ? "v\(remote.version) (build \(remote.build)) is available."
+                : "You're on the latest version."
+        }
+    }
+
     func refreshLibraryBytes() {
         let folders = library.map(\.folder)
         Task { @MainActor in
@@ -2271,6 +2297,12 @@ struct ExportPrompt: Identifiable {
     let total: Int
 }
 
+/// The version file published beside the IPA, used by the in-app update check.
+struct AppVersion: Decodable {
+    let version: String
+    let build: Int
+}
+
 struct ContentView: View {
     @StateObject private var store = WorkshopStore()
     @Environment(\.scenePhase) private var scenePhase
@@ -2296,6 +2328,12 @@ struct ContentView: View {
     @State private var contextItem: WorkshopItem?
     @State private var contextHistory: DownloadRecord?
     @State private var searchText = ""
+    /// The filtered and sorted library, rebuilt only when its inputs change. Computing it inside
+    /// the view body meant re-sorting everything on every scroll tick.
+    @State private var visibleItems: [WorkshopItem] = []
+    /// The game and tag options for the filter pills, cached for the same reason.
+    @State private var installedGameOptions: [(id: String, name: String)] = []
+    @State private var installedTagOptions: [String] = []
     @State private var historySearch = ""
     @State private var showingHistory = false
     @State private var inputWasSubmitted = false
@@ -2482,8 +2520,8 @@ struct ContentView: View {
             }
         }
         .onChange(of: store.library.count) { count in
-            if let g = selectedGame, !installedGames.contains(where: { $0.id == g }) { selectedGame = nil }
-            if let t = selectedTag, !installedTags.contains(t) { selectedTag = nil }
+            if let g = selectedGame, !installedGameOptions.contains(where: { $0.id == g }) { selectedGame = nil }
+            if let t = selectedTag, !installedTagOptions.contains(t) { selectedTag = nil }
             // A selection can never keep mods that are no longer in the library.
             let liveIDs = Set(store.library.map(\.id))
             selection = selection.intersection(liveIDs)
@@ -2497,7 +2535,26 @@ struct ContentView: View {
             mediaIndex = 0
             mediaViewer = nil
         }
-        .task { store.runLaunchChecks() }
+        .task {
+            store.runLaunchChecks()
+            rebuildLibraryOptions()
+        }
+        .onChange(of: store.library) { _ in rebuildLibraryOptions() }
+        .onChange(of: searchText) { _ in visibleItems = filteredLibrary }
+        .onChange(of: libraryFilter) { _ in visibleItems = filteredLibrary }
+        .onChange(of: selectedGame) { _ in
+            visibleItems = filteredLibrary
+            installedTagOptions = installedTags
+        }
+        .onChange(of: selectedTag) { _ in visibleItems = filteredLibrary }
+        .onChange(of: sortOrder) { _ in visibleItems = filteredLibrary }
+    }
+
+    /// Rebuilds everything the library screen derives from the collection, in one pass.
+    private func rebuildLibraryOptions() {
+        visibleItems = filteredLibrary
+        installedGameOptions = installedGames
+        installedTagOptions = installedTags
     }
 
     private var mainStack: some View {
@@ -3251,7 +3308,7 @@ struct ContentView: View {
 
             if !store.library.isEmpty { chipRow; filterRow }
 
-            let items = filteredLibrary
+            let items = visibleItems
             if store.library.isEmpty {
                 emptyState("Your library is empty", detail: "Downloaded mods will appear here.", symbol: "square.grid.2x2")
                 Button { selectedTab = 1 } label: {
@@ -3306,26 +3363,26 @@ struct ContentView: View {
         HStack(spacing: 8) {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 9) {
-                    if !installedGames.isEmpty {
+                    if !installedGameOptions.isEmpty {
                         Menu {
                             Button { Haptics.select(); selectedGame = nil; selectedTag = nil } label: {
                                 if selectedGame == nil { Label("All games", systemImage: "checkmark") } else { Text("All games") }
                             }
                             Divider()
-                            ForEach(installedGames, id: \.id) { game in
+                            ForEach(installedGameOptions, id: \.id) { game in
                                 Button { Haptics.select(); selectedGame = game.id; selectedTag = nil } label: {
                                     if selectedGame == game.id { Label(game.name, systemImage: "checkmark") } else { Text(game.name) }
                                 }
                             }
                         } label: { FilterPill(symbol: "gamecontroller.fill", title: selectedGameName ?? "All games", active: selectedGame != nil) }
                     }
-                    if !installedTags.isEmpty {
+                    if !installedTagOptions.isEmpty {
                         Menu {
                             Button { Haptics.select(); selectedTag = nil } label: {
                                 if selectedTag == nil { Label("All tags", systemImage: "checkmark") } else { Text("All tags") }
                             }
                             Divider()
-                            ForEach(installedTags, id: \.self) { tag in
+                            ForEach(installedTagOptions, id: \.self) { tag in
                                 Button { Haptics.select(); selectedTag = tag } label: {
                                     if selectedTag == tag { Label(tag, systemImage: "checkmark") } else { Text(tag) }
                                 }
@@ -3676,6 +3733,7 @@ struct ContentView: View {
                     downloadsSettings
                     browserSettings
                     steamAccountSettings
+                    aboutSettings
                     creditsSettings
                 }
                 .padding(.horizontal, 15)
@@ -3817,6 +3875,56 @@ struct ContentView: View {
                 }
             }
         )
+    }
+
+    private var aboutSettings: AnyView {
+        AnyView(
+            settingsGroup("About") {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 8) {
+                        brandLogo
+                        Spacer(minLength: 8)
+                        Text("v\(modShelfVersion)")
+                            .font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
+                    }
+                    Text("Build \(modShelfBuild) · A native SwiftUI Steam Workshop downloader.")
+                        .font(.system(size: 12)).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 15).padding(.vertical, 12)
+
+                divider
+                linkRow("GitHub", symbol: "chevron.left.forwardslash.chevron.right", detail: WorkshopStore.appRepo,
+                        url: "https://github.com/\(WorkshopStore.appRepo)")
+                divider
+                linkRow("Report a bug", symbol: "ladybug", detail: nil,
+                        url: "https://github.com/\(WorkshopStore.appRepo)/issues/new?labels=bug&title=Bug%3A%20")
+                divider
+                linkRow("Request a feature", symbol: "lightbulb", detail: nil,
+                        url: "https://github.com/\(WorkshopStore.appRepo)/issues/new?labels=enhancement&title=Feature%3A%20")
+                divider
+                linkRow("Support ModShelf", symbol: "heart", detail: "ko-fi.com/shplash", url: "https://ko-fi.com/shplash")
+                divider
+                Button { Haptics.tap(); store.checkForAppUpdate() } label: {
+                    rowContent("Check for app updates", symbol: "arrow.triangle.2.circlepath",
+                               detail: store.appUpdateMessage.isEmpty ? "v\(modShelfVersion) (build \(modShelfBuild))" : store.appUpdateMessage,
+                               chevron: false)
+                }
+                .buttonStyle(.plain)
+                .disabled(store.isCheckingAppUpdate)
+            }
+        )
+    }
+
+    private func linkRow(_ title: String, symbol: String, detail: String?, url: String) -> some View {
+        Button {
+            Haptics.tap()
+            if let link = URL(string: url) { UIApplication.shared.open(link) }
+        } label: {
+            rowContent(title, symbol: symbol, detail: detail)
+        }
+        .buttonStyle(.plain)
     }
 
     private var creditsSettings: AnyView {
