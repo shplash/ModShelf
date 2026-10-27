@@ -5153,32 +5153,31 @@ struct BrowserHome: View {
     }
 
     private var favouritesGrid: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 10) {
-                ForEach(favourites) { hit in favouriteTile(hit) }
-            }
-            .padding(.vertical, 2)
+        LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
+            ForEach(Array(favourites.prefix(4))) { hit in favouriteTile(hit) }
         }
     }
 
-    /// A compact launcher tile: a square cover with the star in its corner, the name underneath.
     private func favouriteTile(_ hit: GameHit) -> some View {
         ZStack(alignment: .topTrailing) {
             Button { openGame(hit) } label: {
-                VStack(spacing: 5) {
-                    CachedImage(urlString: hit.tiny_image, fill: true, maxPixel: 240)
-                        .frame(width: 76, height: 76)
-                        .clipped()
+                VStack(alignment: .leading, spacing: 6) {
+                    Color.clear
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 54)
+                        .overlay(CachedImage(urlString: hit.tiny_image, fill: true, maxPixel: 300))
+                        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                     Text(hit.name)
-                        .font(.system(size: 11, weight: .semibold)).lineLimit(1)
-                        .frame(width: 76)
+                        .font(.system(size: 12, weight: .semibold)).lineLimit(1)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .contentShape(Rectangle())
+                .padding(7)
+                .frame(maxWidth: .infinity)
+                .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color(uiColor: .secondarySystemGroupedBackground)))
             }
             .buttonStyle(.plain)
-            starButton(hit)
+            starButton(hit).padding(2)
         }
-        .frame(width: 76)
     }
 
     private func gameRow(_ hit: GameHit) -> some View {
@@ -5187,6 +5186,7 @@ struct BrowserHome: View {
                 HStack(spacing: 12) {
                     CachedImage(urlString: hit.tiny_image, fill: true, maxPixel: 120)
                         .frame(width: 46, height: 46)
+                        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                     Text(hit.name)
                         .font(.system(size: 15, weight: .semibold)).lineLimit(2)
                         .frame(maxWidth: .infinity, alignment: .leading)
