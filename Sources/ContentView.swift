@@ -2679,7 +2679,7 @@ struct ContentView: View {
 
     private var accountHeader: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 10) {
+            HStack(spacing: 6) {
                 brandLogo
                 versionBadge
                 Spacer()
@@ -2697,7 +2697,7 @@ struct ContentView: View {
         if UIImage(named: name) != nil {
             Image(name)
                 .resizable().scaledToFit()
-                .frame(height: 26)
+                .frame(height: 34)
                 .accessibilityLabel("ModShelf")
         } else {
             HStack(spacing: 10) {
@@ -2709,17 +2709,16 @@ struct ContentView: View {
 
     /// A circled v with the build's version beside it, sitting a title away from the logo.
     private var versionBadge: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: 3) {
             Text("v")
                 .font(.system(size: 9, weight: .bold))
                 .foregroundStyle(.white)
                 .frame(width: 15, height: 15)
-                .background(Circle().fill(Color.accentColor))
+                .background(Circle().fill(Color.secondary))
             Text(modShelfVersion)
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
         }
-        .padding(.leading, 6)
         .accessibilityLabel("Version \(modShelfVersion)")
     }
 

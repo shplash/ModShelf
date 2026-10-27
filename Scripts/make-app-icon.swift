@@ -44,7 +44,9 @@ if let data = try? Data(contentsOf: output),
     writeOpaquePNG { ctx in
         ctx.setFillColor(NSColor.white.cgColor)
         ctx.fill(CGRect(x: 0, y: 0, width: canvas, height: canvas))
-        let ratio = min(canvas / CGFloat(art.width), canvas / CGFloat(art.height))
+        // Filled, not fitted: an icon is square, so the artwork covers the canvas and the small
+        // overhang is cropped instead of leaving bars along two edges.
+        let ratio = max(canvas / CGFloat(art.width), canvas / CGFloat(art.height))
         let width = CGFloat(art.width) * ratio
         let height = CGFloat(art.height) * ratio
         ctx.draw(art, in: CGRect(x: (canvas - width) / 2, y: (canvas - height) / 2, width: width, height: height))
