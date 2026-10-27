@@ -26,7 +26,7 @@ is normal use, so ModShelf reports those as moved out rather than broken.
 The Xcode project is generated with [XcodeGen](https://github.com/yonaskolb/XcodeGen) from `project.yml`:
 
 ```sh
-swift Scripts/make-app-icon.swift   # draws Assets.xcassets/AppIcon.appiconset/AppIcon.png
+swift Scripts/make-app-icon.swift   # fills in a placeholder AppIcon.png only if none is committed
 xcodegen generate
 xcodebuild -project ModShelf.xcodeproj -scheme WorkshopDownloader -sdk iphoneos build
 ```

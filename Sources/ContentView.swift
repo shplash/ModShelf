@@ -13,8 +13,8 @@ struct ModShelfApp: App {
 }
 
 let modShelfInfoFileName = "ModShelf Information.txt"
-let modShelfVersion = "0.2b"
-let modShelfBuild = "88"
+let modShelfVersion = "0.3b"
+let modShelfBuild = "90"
 
 // MARK: - Models
 
@@ -2274,6 +2274,7 @@ struct ExportPrompt: Identifiable {
 struct ContentView: View {
     @StateObject private var store = WorkshopStore()
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.colorScheme) private var colorScheme
     @AppStorage("options.appearance") private var appearance = "System"
     @AppStorage("options.confirmDelete") private var confirmDelete = true
     @AppStorage("options.showIDs") private var showIDs = false
@@ -2679,14 +2680,47 @@ struct ContentView: View {
     private var accountHeader: some View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
-                Image(systemName: "square.grid.2x2.fill").font(.system(size: 19, weight: .semibold)).foregroundStyle(Color.accentColor)
-                Text("ModShelf").font(.system(size: 20, weight: .bold, design: .rounded))
+                brandLogo
+                versionBadge
                 Spacer()
                 signInPill
             }
             .padding(.horizontal, 16).padding(.top, 0).padding(.bottom, 14)
             fadingLine
         }
+    }
+
+    /// The artwork lives in the asset catalogue: a white one for the dark appearance, a black one
+    /// for the light one. Until those images are added, the old mark stands in.
+    @ViewBuilder private var brandLogo: some View {
+        let name = colorScheme == .dark ? "LogoOnDark" : "LogoOnLight"
+        if UIImage(named: name) != nil {
+            Image(name)
+                .resizable().scaledToFit()
+                .frame(height: 26)
+                .accessibilityLabel("ModShelf")
+        } else {
+            HStack(spacing: 10) {
+                Image(systemName: "square.grid.2x2.fill").font(.system(size: 19, weight: .semibold)).foregroundStyle(Color.accentColor)
+                Text("ModShelf").font(.system(size: 20, weight: .bold, design: .rounded))
+            }
+        }
+    }
+
+    /// A circled v with the build's version beside it, sitting a title away from the logo.
+    private var versionBadge: some View {
+        HStack(spacing: 5) {
+            Text("v")
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(.white)
+                .frame(width: 15, height: 15)
+                .background(Circle().fill(Color.accentColor))
+            Text(modShelfVersion)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.leading, 6)
+        .accessibilityLabel("Version \(modShelfVersion)")
     }
 
     private var signInPill: some View {
@@ -3714,7 +3748,10 @@ struct ContentView: View {
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(.secondary).monospacedDigit()
                 }
-                Slider(value: $marqueeSpeed, in: 0...2, step: 0.05)
+                Slider(value: Binding(get: { marqueeSpeed }, set: { value in
+                    // Off is one step below the slowest speed, not a stretch of dead slider.
+                    marqueeSpeed = value < 0.25 ? 0 : max(0.25, value)
+                }), in: 0...2, step: 0.05)
                     .tint(.accentColor)
                     .padding(.leading, 51).padding(.trailing, 15).padding(.bottom, 12)
             }
@@ -3736,7 +3773,7 @@ struct ContentView: View {
             settingsGroup("Downloads") {
                 toggleRow("Confirm before deleting", symbol: "trash", isOn: $confirmDelete)
                 divider
-                toggleRow("Check updates on launch", symbol: "arrow.clockwise", isOn: $autoCheck)
+                toggleRow("Check mod updates on launch", symbol: "arrow.clockwise", isOn: $autoCheck)
                 divider
                 toggleRow("Wi-Fi only downloads", symbol: "wifi", isOn: $wifiOnly)
                 divider

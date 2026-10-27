@@ -27,8 +27,8 @@ targets:
       path: Sources/Info.plist
       properties:
         CFBundleDisplayName: ModShelf
-        CFBundleShortVersionString: "0.2b"
-        CFBundleVersion: "88"
+        CFBundleShortVersionString: "0.3b"
+        CFBundleVersion: "90"
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
         UILaunchScreen: {}
@@ -43,8 +43,8 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.shplash.modshelf
         PRODUCT_NAME: ModShelf
         TARGETED_DEVICE_FAMILY: "1"
-        MARKETING_VERSION: "0.2b"
-        CURRENT_PROJECT_VERSION: "88"
+        MARKETING_VERSION: "0.3b"
+        CURRENT_PROJECT_VERSION: "90"
         # The icon is drawn by Scripts/make-app-icon.swift, so no binary lives in the repository.
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         GENERATE_INFOPLIST_FILE: YES
