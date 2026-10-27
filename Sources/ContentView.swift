@@ -13,8 +13,8 @@ struct ModShelfApp: App {
 }
 
 let modShelfInfoFileName = "ModShelf Information.txt"
-let modShelfVersion = "0.1b"
-let modShelfBuild = "30"
+let modShelfVersion = "0.2b"
+let modShelfBuild = "88"
 
 // MARK: - Models
 
@@ -670,14 +670,16 @@ final class WorkshopStore: ObservableObject {
     @Published var phases: [String] = []
     @Published var revealFolderURL: URL?
 
-    private let engine = SteamengineNewEngine()!
+    /// The Go engine. Signing in and downloading need it, so a failure to create it is reported
+    /// instead of crashing the app on launch.
+    private let engine: SteamengineNewEngine? = SteamengineNewEngine()
     private var poller: Timer?
     private var activeID = ""
     private var activeMeta: WorkshopMetadata?
     private var queue: [String] = []
     private var didLaunchChecks = false
 
-    var isAuthenticated: Bool { engine.isAuthenticated() }
+    var isAuthenticated: Bool { engine?.isAuthenticated() ?? false }
     private var documents: URL { FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0] }
     private var defaultRoot: URL {
         let url = documents.appendingPathComponent("Downloaded Mods", isDirectory: true)
@@ -694,15 +696,16 @@ final class WorkshopStore: ObservableObject {
     /// install, or LiveContainer's chain when the app is running inside it.
     nonisolated static func readablePath(_ url: URL) -> String {
         let path = url.path
-        if let range = path.range(of: "LiveContainer/", options: [.caseInsensitive]) {
-            return String(path[range.lowerBound...])
+        let name = (Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
+            ?? (Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String)
+            ?? "ModShelf"
+        // Report the real folder the way Files shows it: from the app's own Documents folder down,
+        // which also hides the UUID that LiveContainer wraps the app in.
+        if let docs = path.range(of: "/Documents") {
+            return name + String(path[docs.upperBound...])
         }
-        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].path
-        if path.hasPrefix(documents) {
-            let name = (Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
-                ?? (Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String)
-                ?? "ModShelf"
-            return name + String(path.dropFirst(documents.count))
+        if let range = path.range(of: "LiveContainer/", options: [.caseInsensitive]) {
+            return String(path[range.upperBound...])
         }
         var stripped = path
         for prefix in ["/private/var/mobile/Containers/", "/var/mobile/Containers/",
@@ -751,7 +754,7 @@ final class WorkshopStore: ObservableObject {
     private var temporaryPath: URL { documents.appendingPathComponent("ModShelfTemporary", isDirectory: true) }
 
     init() {
-        library = Self.load([WorkshopItem].self, key: "library") ?? []
+        library = Self.loadLibrary()
         let oldHistory = Self.load([String].self, key: "history") ?? []
         history = Self.load([DownloadRecord].self, key: "modshelf.history") ?? oldHistory.map {
             DownloadRecord(workshopID: $0, title: "Workshop item \($0)", date: Date(), result: "Attempted")
@@ -764,7 +767,7 @@ final class WorkshopStore: ObservableObject {
             fixed = true
         }
         if fixed { saveHistory() }
-        status = engine.status()
+        status = engine?.status() ?? "Ready"
         _ = NetworkWatcher.shared
         _ = sessionPath
         migrateRecords()
@@ -791,7 +794,29 @@ final class WorkshopStore: ObservableObject {
     private func save<T: Encodable>(_ value: T, key: String) {
         if let data = try? JSONEncoder().encode(value) { UserDefaults.standard.set(data, forKey: key) }
     }
-    private func saveLibrary() { save(library, key: "library") }
+    private func saveLibrary() {
+        guard let data = try? JSONEncoder().encode(library) else { return }
+        try? data.write(to: Self.libraryFileURL, options: .atomic)
+    }
+    /// The library lives in its own JSON file: a big collection has no place in the small
+    /// UserDefaults budget. Older builds kept it under the "library" key, so that is carried over.
+    private static var libraryFileURL: URL {
+        let fm = FileManager.default
+        let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("ModShelf", isDirectory: true)
+        try? fm.createDirectory(at: base, withIntermediateDirectories: true)
+        return base.appendingPathComponent("library.json")
+    }
+    private static func loadLibrary() -> [WorkshopItem] {
+        if let data = try? Data(contentsOf: libraryFileURL),
+           let items = try? JSONDecoder().decode([WorkshopItem].self, from: data) { return items }
+        let legacy = load([WorkshopItem].self, key: "library") ?? []
+        if !legacy.isEmpty, let data = try? JSONEncoder().encode(legacy) {
+            try? data.write(to: libraryFileURL, options: .atomic)
+            UserDefaults.standard.removeObject(forKey: "library")
+        }
+        return legacy
+    }
     private func saveHistory() { save(history, key: "modshelf.history") }
     private func record(_ id: String, title: String, result: String, error: String? = nil, imageURL: String? = nil, game: String? = nil) {
         let attempt = history.filter { $0.workshopID == id }.count + 1
@@ -899,12 +924,6 @@ final class WorkshopStore: ObservableObject {
         return limited.isEmpty ? fallback : limited
     }
 
-    func gameDisplayName(_ appID: String) -> String {
-        if let name = library.first(where: { $0.appID == appID })?.gameName { return name }
-        let cache = UserDefaults.standard.dictionary(forKey: "modshelf.gameNames") as? [String: String] ?? [:]
-        return cache[appID] ?? "this game"
-    }
-
     func revealInFiles(_ item: WorkshopItem) {
         let path = item.folder
         guard FileManager.default.fileExists(atPath: path) else {
@@ -999,7 +1018,7 @@ final class WorkshopStore: ObservableObject {
             let code = guardCode.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !code.isEmpty else { loginError = "Enter the Steam Guard code."; return }
             Haptics.tap()
-            engine.submitGuardCode(code)
+            engine?.submitGuardCode(code)
             guardCode = ""
             status = "Checking code…"
             return
@@ -1009,27 +1028,32 @@ final class WorkshopStore: ObservableObject {
             if !automatic { showLogin = true; loginError = "Enter your username and password." }
             return
         }
+        guard let activeEngine = engine else {
+            loginError = "The Steam engine didn't start. Reinstall ModShelf."
+            status = "Ready"
+            if !automatic { showLogin = true }
+            return
+        }
         isBusy = true; status = "Signing in to Steam…"; needsGuardCode = false
         startPolling()
         let user = username.trimmingCharacters(in: .whitespacesAndNewlines)
         let pass = password
         let code = guardCode.trimmingCharacters(in: .whitespacesAndNewlines)
         let path = sessionPath
-        let activeEngine = engine
         let result = await Task.detached(priority: .userInitiated) {
             activeEngine.login(user, password: pass, guardCode: code, cachePath: path)
         }.value
         isBusy = false
         stopPolling()
-        status = engine.status()
-        if engine.isAuthenticated() {
+        status = engine?.status() ?? "Ready"
+        if engine?.isAuthenticated() == true {
             Keychain.write(user, key: "steam.username")
             Keychain.write(pass, key: "steam.password")
             guardCode = ""; showLogin = false; status = "Signed in to Steam"
             loginError = ""
             Haptics.success()
         } else {
-            let raw = result.isEmpty ? engine.lastError() : result
+            let raw = result.isEmpty ? (engine?.lastError() ?? "") : result
             loginError = Self.signInMessage(raw)
             if raw.localizedCaseInsensitiveContains("guard") || raw.localizedCaseInsensitiveContains("code") {
                 status = "Steam Guard code required"
@@ -1072,7 +1096,7 @@ final class WorkshopStore: ObservableObject {
     }
     func signOut() {
         guard !isBusy else { errorMessage = "Finish or cancel the download first."; return }
-        engine.logout(); Keychain.delete("steam.password"); password = ""; guardCode = ""
+        engine?.logout(); Keychain.delete("steam.password"); password = ""; guardCode = ""
         status = "Signed out"
     }
 
@@ -1082,6 +1106,10 @@ final class WorkshopStore: ObservableObject {
         errorMessage = ""
         guard !isBusy else { errorMessage = "Something is already running. Wait for it to finish."; return }
         guard isAuthenticated else { operationMessage = "Sign in to Steam to download this item."; showLogin = true; return }
+        guard let engine else {
+            errorMessage = "The Steam engine didn't start. Reinstall ModShelf."
+            return
+        }
         guard let id = Self.workshopID(from: raw ?? input) else { errorMessage = "Enter a Workshop link or item ID."; return }
         if UserDefaults.standard.bool(forKey: "options.wifiOnly") && NetworkWatcher.shared.isExpensive {
             errorMessage = "Wi-Fi only is on. Connect to Wi-Fi to download."
@@ -1146,11 +1174,11 @@ final class WorkshopStore: ObservableObject {
     }
 
     func refreshState() {
-        let nextStatus = engine.status()
+        let nextStatus = engine?.status() ?? ""
         // Each new step Steam reports becomes its own segment of the progress bar.
         if isDownloading, !nextStatus.isEmpty, phases.last != nextStatus { phases.append(nextStatus) }
-        let nextProgress = min(1, max(0, engine.progress()))
-        let nextFile = engine.currentFile()
+        let nextProgress = min(1, max(0, engine?.progress() ?? 0))
+        let nextFile = engine?.currentFile() ?? ""
         let waitingForCode = nextStatus == "Steam Guard code required"
         if waitingForCode != needsGuardCode { needsGuardCode = waitingForCode }
         if waitingForCode && !showLogin { showLogin = true }
@@ -1167,7 +1195,7 @@ final class WorkshopStore: ObservableObject {
         let stagingPath = UserDefaults.standard.string(forKey: "modshelf.activeStaging") ?? ""
         UserDefaults.standard.removeObject(forKey: "modshelf.activeStaging")
         let staging = URL(fileURLWithPath: stagingPath, isDirectory: true)
-        let error = engine.lastError()
+        let error = engine?.lastError() ?? ""
         let successStatus = s.contains("download complete")
         let cancelled = s.contains("download cancelled")
         let meta = activeMeta ?? WorkshopMetadata(id: activeID, title: activeTitle, author: "", description: "", imageURL: "", updatedAt: 0)
@@ -1235,7 +1263,7 @@ final class WorkshopStore: ObservableObject {
             if let m = activeMeta, m.id == id, !m.imageURL.isEmpty { history[index].imageURL = m.imageURL }
         } else { record(id, title: activeTitle, result: result, error: error) }
     }
-    func cancel() { queue.removeAll(); engine.cancelDownload(); status = "Cancelling download…" }
+    func cancel() { queue.removeAll(); engine?.cancelDownload(); status = "Cancelling download…" }
 
     // MARK: finalising a download (flatten Steam's <id>/mods/<mod> layout, write info file)
 
@@ -1294,10 +1322,11 @@ final class WorkshopStore: ObservableObject {
         }
         let name = singleMod ? sanitize(payload.lastPathComponent, fallback: id) : sanitize(meta.title, fallback: id)
 
-        // An update replaces the installation in the folder it already lives in; a new download goes into
-        // the folder set for its game.
+        // An update replaces the installation in the folder it already lives in; a new download, or one
+        // whose files were moved into a game, goes into the game's folder inside ModShelf.
         let destination: URL
-        if let existing, fm.fileExists(atPath: existing.folder) {
+        if let existing, fm.fileExists(atPath: existing.folder),
+           Self.isInsideAppStorage(URL(fileURLWithPath: existing.folder, isDirectory: true)) {
             destination = URL(fileURLWithPath: existing.folder, isDirectory: true)
         } else {
             destination = Self.availableURL(name: name, id: id, in: root(forGame: meta.appID))
@@ -1377,11 +1406,22 @@ final class WorkshopStore: ObservableObject {
         return (true, count, bytes)
     }
 
-    nonisolated static func folderName(_ path: String) -> String {
-        URL(fileURLWithPath: path, isDirectory: true).lastPathComponent
-    }
-
     // MARK: library actions
+
+    /// Partial downloads and replaced copies left behind inside any game folder by a session that
+    /// was interrupted, found however deep they sit.
+    nonisolated static func partialLeftovers(in root: URL) -> [URL] {
+        let fm = FileManager.default
+        guard let en = fm.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey], options: []) else { return [] }
+        var found: [URL] = []
+        for case let url as URL in en {
+            let name = url.lastPathComponent
+            guard name.hasPrefix(".partial-") || name.hasPrefix(".modshelf-replacing-") else { continue }
+            found.append(url)
+            en.skipDescendants()
+        }
+        return found
+    }
 
     func remove(_ item: WorkshopItem) {
         // A mod moved out of ModShelf belongs to wherever the user put it: only forget the entry.
@@ -1440,36 +1480,17 @@ final class WorkshopStore: ObservableObject {
     }
     func export(_ item: WorkshopItem) {
         let source = URL(fileURLWithPath: item.folder, isDirectory: true)
-        guard FileManager.default.fileExists(atPath: source.path) else { errorMessage = "Those files are missing. Download the mod again."; return }
-        let zip = FileManager.default.temporaryDirectory.appendingPathComponent("\(item.displayTitle.replacingOccurrences(of: "/", with: "-")).zip")
+        guard FileManager.default.fileExists(atPath: source.path) else {
+            errorMessage = item.filesMoved || !item.isInsideModShelf
+                ? "\(item.displayTitle)'s files were moved out of ModShelf, so there's nothing to export here."
+                : "Those files are missing. Download the mod again."
+            return
+        }
+        let name = Self.sanitizedName(item.displayTitle, fallback: item.id)
+        let zip = FileManager.default.temporaryDirectory.appendingPathComponent("\(name).zip")
         do { try? FileManager.default.removeItem(at: zip); try FileManager.default.zipItem(at: source, to: zip, shouldKeepParent: true); shareURL = zip }
         catch { errorMessage = "Couldn't build the ZIP." }
     }
-    func exportAll() {
-        guard !library.isEmpty else { operationMessage = "Your library is empty."; return }
-        let staging = FileManager.default.temporaryDirectory.appendingPathComponent("ModShelf-Library", isDirectory: true)
-        let zip = FileManager.default.temporaryDirectory.appendingPathComponent("ModShelf-Library.zip")
-        let entries = library.map { ($0.folder, $0.displayTitle) }
-        operationMessage = "Building ZIP of your library…"
-        Task { @MainActor in
-            let ok: Bool = await Task.detached(priority: .utility) { () -> Bool in
-                let fm = FileManager.default
-                try? fm.removeItem(at: staging); try? fm.removeItem(at: zip)
-                do {
-                    try fm.createDirectory(at: staging, withIntermediateDirectories: true)
-                    for (folder, _) in entries where fm.fileExists(atPath: folder) {
-                        let src = URL(fileURLWithPath: folder, isDirectory: true)
-                        try fm.copyItem(at: src, to: staging.appendingPathComponent(src.lastPathComponent, isDirectory: true))
-                    }
-                    try fm.zipItem(at: staging, to: zip, shouldKeepParent: false)
-                    try? fm.removeItem(at: staging)
-                    return true
-                } catch { return false }
-            }.value
-            if ok { operationMessage = ""; shareURL = zip } else { operationMessage = "Couldn't build the library ZIP." }
-        }
-    }
-
     /// Zips just the chosen mods, so part of a library can be shared without exporting all of it.
     func export(_ ids: [String]) {
         let wanted = Set(ids)
@@ -1489,11 +1510,12 @@ final class WorkshopStore: ObservableObject {
             ? "Preparing the ZIP…"
             : "Preparing \(folders.count) mods as one ZIP…"
         Task { @MainActor in
-            let result = await Task.detached(priority: .utility) { () -> (ok: Bool, skipped: Int) in
+            let result = await Task.detached(priority: .utility) { () -> (ok: Bool, copied: Int, skipped: Int) in
                 let fm = FileManager.default
                 try? fm.removeItem(at: staging); try? fm.removeItem(at: zip)
                 do {
                     try fm.createDirectory(at: staging, withIntermediateDirectories: true)
+                    var copied = 0
                     var skipped = 0
                     for folder in folders {
                         let source = URL(fileURLWithPath: folder, isDirectory: true)
@@ -1503,20 +1525,25 @@ final class WorkshopStore: ObservableObject {
                         let destination = fm.fileExists(atPath: target.path)
                             ? staging.appendingPathComponent("\(source.lastPathComponent) \(UUID().uuidString.prefix(4))", isDirectory: true)
                             : target
-                        if (try? fm.copyItem(at: source, to: destination)) == nil { skipped += 1 }
+                        if (try? fm.copyItem(at: source, to: destination)) == nil { skipped += 1 } else { copied += 1 }
+                    }
+                    // An archive with nothing in it helps no one.
+                    guard copied > 0 else {
+                        try? fm.removeItem(at: staging)
+                        return (false, 0, skipped)
                     }
                     try fm.zipItem(at: staging, to: zip, shouldKeepParent: false)
                     try? fm.removeItem(at: staging)
-                    return (true, skipped)
-                } catch { return (false, 0) }
+                    return (true, copied, skipped)
+                } catch { return (false, 0, 0) }
             }.value
             guard result.ok else {
-                operationMessage = "Couldn't build the ZIP."
+                operationMessage = "None of those mods' files are in ModShelf any more, so there was nothing to zip."
                 return
             }
             operationMessage = result.skipped == 0
                 ? ""
-                : "Skipped \(result.skipped) mod\(result.skipped == 1 ? "" : "s") whose files are no longer in ModShelf."
+                : "Exported \(result.copied) mod\(result.copied == 1 ? "" : "s") and left out \(result.skipped) whose files are outside ModShelf."
             shareURL = zip
         }
     }
@@ -1762,19 +1789,15 @@ final class WorkshopStore: ObservableObject {
         do {
             try FileManager.default.createDirectory(at: temporaryPath, withIntermediateDirectories: true)
             for url in try FileManager.default.contentsOfDirectory(at: temporaryPath, includingPropertiesForKeys: nil) { try FileManager.default.removeItem(at: url) }
-            // Leftover partial downloads and replaced copies from interrupted sessions.
-            for url in visibleAndHidden(downloadsRoot)
-            where url.lastPathComponent.hasPrefix(".partial-") || url.lastPathComponent.hasPrefix(".modshelf-replacing-") {
+            // Leftover partial downloads and replaced copies from interrupted sessions, in any game
+            // folder they were left in.
+            for url in Self.partialLeftovers(in: downloadsRoot) {
                 try? FileManager.default.removeItem(at: url)
             }
             status = "Temporary files cleared"
             operationMessage = "Temporary files cleared."
         } catch { errorMessage = "Couldn't clear temporary files." }
     }
-    private func visibleAndHidden(_ url: URL) -> [URL] {
-        (try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil, options: [])) ?? []
-    }
-
     func refreshLibraryBytes() {
         let folders = library.map(\.folder)
         Task { @MainActor in
@@ -2196,6 +2219,14 @@ struct DottedLabel: View {
 
 // MARK: - Main view
 
+/// Which mods a ZIP export would really contain, and how many have to be left out.
+struct ExportPrompt: Identifiable {
+    let id = UUID()
+    let ids: [String]
+    let missing: Int
+    let total: Int
+}
+
 struct ContentView: View {
     @StateObject private var store = WorkshopStore()
     @Environment(\.scenePhase) private var scenePhase
@@ -2228,6 +2259,7 @@ struct ContentView: View {
     @State private var selecting = false
     @State private var selection: Set<String> = []
     @State private var confirmBulkDelete = false
+    @State private var exportPrompt: ExportPrompt?
     @State private var mediaViewer: MediaViewer?
     @State private var mediaIndex = 0
     @State private var marqueeToken = 0
@@ -2240,7 +2272,7 @@ struct ContentView: View {
     @State private var sortOpen = false
     @State private var confirmClearHistory = false
     @State private var lastScrollY: CGFloat = 0
-    @State private var libraryFilter = "All"
+    @AppStorage("options.libraryFilter") private var libraryFilter = "All"
     @State private var upwardRun: CGFloat = 0
     @State private var browserHomeToken = 0
     @State private var lastWorkshopTap = Date.distantPast
@@ -2248,7 +2280,7 @@ struct ContentView: View {
     /// Space reserved under every tab for the tab bar, so content can always scroll clear of it.
     private var tabBarReserve: CGFloat { tabStyle == "bar" ? 84 : 100 }
 
-    private let sortOrders = ["Recently added", "Oldest added", "Name", "Updates first", "Highest rated", "Favourites first"]
+    private let sortOrders = ["Recently added", "Oldest added", "Name", "Game", "Updates first", "Highest rated", "Favourites first"]
 
     // MARK: derived library data
 
@@ -2281,6 +2313,13 @@ struct ContentView: View {
         }
         switch sortOrder {
         case "Name": return filtered.sorted { $0.displayTitle.localizedCaseInsensitiveCompare($1.displayTitle) == .orderedAscending }
+        case "Game": return filtered.sorted { a, b in
+            let ga = a.gameName ?? "", gb = b.gameName ?? ""
+            if ga.localizedCaseInsensitiveCompare(gb) == .orderedSame {
+                return a.displayTitle.localizedCaseInsensitiveCompare(b.displayTitle) == .orderedAscending
+            }
+            return ga.localizedCaseInsensitiveCompare(gb) == .orderedAscending
+        }
         case "Updates first": return filtered.sorted { $0.updateAvailable && !$1.updateAvailable }
         case "Oldest added": return filtered.sorted { $0.addedAt < $1.addedAt }
         case "Highest rated": return filtered.sorted { ($0.rating ?? -1) > ($1.rating ?? -1) }
@@ -2294,13 +2333,32 @@ struct ContentView: View {
         Haptics.tap()
         selection.removeAll()
         selecting = true
-        store.operationMessage = "Pick the mods to export, then choose Export selected from this menu."
+        store.operationMessage = "Pick the mods to export, then choose Export selected from the three dot menu."
     }
 
     private func exportSelection() {
         guard !selection.isEmpty else { return }
         Haptics.tap()
-        store.export(Array(selection))
+        beginExport(all: false)
+    }
+
+    /// Only mods whose files are still in ModShelf can go into a ZIP, so say so before starting.
+    private func beginExport(all: Bool) {
+        let pool = all ? store.library : store.library.filter { selection.contains($0.id) }
+        guard !pool.isEmpty else { return }
+        let present = pool.filter { FileManager.default.fileExists(atPath: $0.folder) }
+        guard !present.isEmpty else {
+            store.errorMessage = all
+                ? "None of your mods' files are in ModShelf any more, so there's nothing to export."
+                : "Those mods' files aren't in ModShelf any more, so there's nothing to export."
+            return
+        }
+        let missing = pool.count - present.count
+        guard missing > 0 else {
+            store.export(present.map(\.id))
+            return
+        }
+        exportPrompt = ExportPrompt(ids: present.map(\.id), missing: missing, total: pool.count)
     }
 
     private func toggleSelection(_ item: WorkshopItem) {
@@ -2502,6 +2560,20 @@ struct ContentView: View {
                              deleteSelected()
                          },
                          cancel: { confirmBulkDelete = false })
+                .padding(30).zIndex(15)
+        }
+        if let prompt = exportPrompt {
+            Color.black.opacity(0.38).ignoresSafeArea().contentShape(Rectangle())
+                .onTapGesture { exportPrompt = nil }.zIndex(14)
+            ConfirmPopup(heading: "Some mods can't be exported",
+                         message: "\(prompt.missing) of \(prompt.total) mod\(prompt.total == 1 ? "" : "s") have files outside ModShelf, so they'd be left out. Export the \(prompt.ids.count) still here?",
+                         actionTitle: prompt.ids.count == 1 ? "Export 1 mod" : "Export \(prompt.ids.count) mods",
+                         tint: .accentColor,
+                         confirm: {
+                             store.export(prompt.ids)
+                             exportPrompt = nil
+                         },
+                         cancel: { exportPrompt = nil })
                 .padding(30).zIndex(15)
         }
         if let viewer = mediaViewer {
@@ -3055,7 +3127,7 @@ struct ContentView: View {
                     .disabled(pending == 0 || store.isBusy)
                 Button { startExportSelection() } label: { Label("Select and export as ZIP", systemImage: "square.and.arrow.up.on.square") }
                     .disabled(store.library.isEmpty)
-                Button { store.exportAll() } label: { Label("Export all as ZIP", systemImage: "square.and.arrow.up") }
+                Button { beginExport(all: true) } label: { Label("Export all as ZIP", systemImage: "square.and.arrow.up") }
                     .disabled(store.library.isEmpty)
             }
         } label: { iconLabel("ellipsis", waving: selecting) }
@@ -3197,6 +3269,8 @@ struct ContentView: View {
         }
         .coordinateSpace(name: "scroll")
         .scrollDismissesKeyboard(.interactively)
+        // Pull the grid down to check every mod's Workshop state.
+        .refreshable { store.checkAllUpdates() }
     }
 
     private func listContent(_ items: [WorkshopItem]) -> some View {
@@ -3234,6 +3308,8 @@ struct ContentView: View {
         .scrollContentBackground(.hidden)
         .background(Color(uiColor: .systemGroupedBackground))
         .scrollDismissesKeyboard(.interactively)
+        // Pull the list down to check every mod's Workshop state.
+        .refreshable { store.checkAllUpdates() }
     }
 
     private func dateLine(_ item: WorkshopItem) -> (String, Color) {
@@ -3799,20 +3875,17 @@ struct ItemDetailPopup: View {
         VStack(alignment: .leading, spacing: 13) {
             HStack(alignment: .top, spacing: 12) {
                 CachedImage(urlString: item.imageURL, fill: true, maxPixel: 300)
-                    .frame(width: 92, height: 92).clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                VStack(alignment: .leading, spacing: 5) {
+                    .frame(width: 84, height: 84).clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                VStack(alignment: .leading, spacing: 4) {
                     Text(item.displayTitle).font(.headline).lineLimit(2)
                     RatingLine(rating: item.rating, count: item.ratingCount, size: 13)
                     if let game = item.gameName { Text(game).font(.footnote).foregroundStyle(.secondary).lineLimit(1) }
-                    // The name sits at the top of the artwork and the state at its bottom, so the
-                    // two read as one block.
-                    Spacer(minLength: 4)
-                    HStack(spacing: 7) {
+                    HStack(spacing: 6) {
                         StatusGlyph(status: item.status, size: 15)
-                        Text(statusText).font(.system(size: 13, weight: .semibold)).lineLimit(1).minimumScaleFactor(0.8)
+                        Text(statusText).font(.system(size: 13, weight: .semibold)).lineLimit(1).minimumScaleFactor(0.7)
                     }
+                    .padding(.top, 1)
                 }
-                .frame(minHeight: 92, alignment: .top)
                 Spacer(minLength: 0)
                 Button(action: onClose) { Image(systemName: "xmark.circle.fill").font(.title2).foregroundStyle(.secondary) }
                     .accessibilityLabel("Close")
@@ -3862,7 +3935,7 @@ struct ItemDetailPopup: View {
         switch item.status {
         case .upToDate: return "Up to date"
         case .needsUpdate: return "Update available"
-        case .moved: return "Up to date, files elsewhere"
+        case .moved: return "Files elsewhere"
         case .notChecked: return item.checkFailed ? "Couldn't reach Steam" : "Not checked yet"
         case .broken: return "Files don't match Steam"
         }

@@ -18,6 +18,7 @@ targets:
     platform: iOS
     sources:
       - Sources
+      - Assets.xcassets
     # A real Info.plist is required here: UIFileSharingEnabled has no INFOPLIST_KEY_ build
     # setting, so with a generated plist it was silently dropped and ModShelf never showed up
     # in Files. The empty UILaunchScreen is what stops iOS letterboxing the app at a legacy
@@ -26,8 +27,8 @@ targets:
       path: Sources/Info.plist
       properties:
         CFBundleDisplayName: ModShelf
-        CFBundleShortVersionString: "0.1b"
-        CFBundleVersion: "30"
+        CFBundleShortVersionString: "0.2b"
+        CFBundleVersion: "88"
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
         UILaunchScreen: {}
@@ -42,8 +43,10 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.shplash.modshelf
         PRODUCT_NAME: ModShelf
         TARGETED_DEVICE_FAMILY: "1"
-        MARKETING_VERSION: "0.1b"
-        CURRENT_PROJECT_VERSION: "30"
+        MARKETING_VERSION: "0.2b"
+        CURRENT_PROJECT_VERSION: "88"
+        # The icon is drawn by Scripts/make-app-icon.swift, so no binary lives in the repository.
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         GENERATE_INFOPLIST_FILE: YES
         CODE_SIGNING_ALLOWED: NO
 

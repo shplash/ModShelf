@@ -2,6 +2,9 @@ name: Build ModShelf IPA
 
 on:
   workflow_dispatch:
+  # Every push to main builds and republishes the IPA, so the download link is always current.
+  push:
+    branches: [main]
 
 permissions:
   contents: write
@@ -91,6 +94,10 @@ jobs:
 
       - name: Install XcodeGen
         run: brew install xcodegen
+
+      # The icon is drawn rather than committed, so it is generated before the project is made.
+      - name: Generate the app icon
+        run: swift Scripts/make-app-icon.swift
 
       - name: Verify the source files
         run: |
