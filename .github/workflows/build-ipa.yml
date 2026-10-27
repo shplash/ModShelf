@@ -29,6 +29,9 @@ jobs:
     steps:
       - name: Check out the repository
         uses: actions/checkout@v7
+        with:
+          # Full history: the build number is the commit count, so a shallow clone would start at 1.
+          fetch-depth: 0
 
       # The Go bind is the slowest part of this job, so the framework it
       # produces is reused until ios-engine changes.

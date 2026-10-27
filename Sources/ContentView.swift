@@ -2752,9 +2752,6 @@ struct ContentView: View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
                 brandLogo
-                    .overlay(alignment: .bottomLeading) {
-                        versionBadge
-                    }
                 Spacer()
                 signInPill
             }
@@ -2770,7 +2767,12 @@ struct ContentView: View {
         if UIImage(named: name) != nil {
             Image(name)
                 .resizable().scaledToFit()
-                .frame(height: 34)
+                .frame(height: logoHeight)
+                // The version sits under the wordmark: clear of the mark on the left, on the same
+                // baseline as the bottom of that mark, starting at the "M" of ModShelf.
+                .overlay(alignment: .bottomLeading) {
+                    versionBadge.padding(.leading, logoWidth * 0.29)
+                }
                 .accessibilityLabel("ModShelf")
         } else {
             HStack(spacing: 10) {
@@ -2780,16 +2782,20 @@ struct ContentView: View {
         }
     }
 
-    /// "v1.0" tucked under the wordmark, centred inside the logo's width.
+    /// "v1.0" sits under the wordmark, aligned with the bottom of the mark beside it.
     private var versionBadge: some View {
         Text("v\(modShelfVersion)")
             .font(.system(size: 8, weight: .semibold))
             .foregroundStyle(.secondary)
             .lineLimit(1)
             .fixedSize()
-            .offset(y: 2)
             .accessibilityLabel("Version \(modShelfVersion)")
     }
+
+    /// The logo's size, so the version can be placed relative to the artwork inside it.
+    private let logoHeight: CGFloat = 34
+    private let logoAspect: CGFloat = 1121.0 / 317.0
+    private var logoWidth: CGFloat { logoHeight * logoAspect }
 
     private var signInPill: some View {
         Button {
