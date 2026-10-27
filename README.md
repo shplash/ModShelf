@@ -79,7 +79,7 @@ Use:
 On My iPhone → ModShelf → Downloaded Mods → <game name> → <mod>
 ```
 
-Moving a mod into its game is normal use, so ModShelf shows those as moved out rather than broken, and keeps the install record for update checks.
+Moving a mod into its game is normal use, so ModShelf shows those as moved out and keeps the install record for update checks.
 
 ## Build
 
