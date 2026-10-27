@@ -388,27 +388,32 @@ struct CachedImage: View {
     private var animate: Bool { isDownloadPreview ? gifDownloads : gifLibrary }
 
     var body: some View {
-        ZStack {
-            if let image {
-                if image.images != nil {
-                    AnimatedUIImageView(image: image, fill: fill, loops: 5)
-                } else if fill {
-                    Image(uiImage: image).resizable().scaledToFill()
-                } else {
-                    Image(uiImage: image).resizable().scaledToFit()
-                }
-            } else {
-                Color(uiColor: .tertiarySystemFill)
-                Image(systemName: "shippingbox").font(.title2).foregroundStyle(.tertiary)
+        // A clear base takes whatever size the parent offers, and the picture is drawn on top of it:
+        // a wide landscape image can then never decide the layout and blow a cell or row apart.
+        Color.clear
+            .overlay { picture }
+            .clipped()
+            .task(id: (urlString ?? "") + (animate ? "|1" : "|0")) {
+                guard let s = urlString, !s.isEmpty, let url = URL(string: s) else { image = nil; return }
+                if let hit = ImageStore.shared.cached(url, animate: animate) { image = hit; return }
+                image = await ImageStore.shared.load(url, maxPixel: maxPixel, animate: animate)
             }
-        }
-        // A filled image is scaled up to cover its frame, so anything outside that frame has to be
-        // cut off or it spills over neighbouring rows and cards.
-        .clipped()
-        .task(id: (urlString ?? "") + (animate ? "|1" : "|0")) {
-            guard let s = urlString, !s.isEmpty, let url = URL(string: s) else { image = nil; return }
-            if let hit = ImageStore.shared.cached(url, animate: animate) { image = hit; return }
-            image = await ImageStore.shared.load(url, maxPixel: maxPixel, animate: animate)
+    }
+
+    @ViewBuilder private var picture: some View {
+        if let image {
+            if image.images != nil {
+                AnimatedUIImageView(image: image, fill: fill, loops: 5)
+            } else if fill {
+                // Filled to cover and centred, so a landscape preview is cropped to the same square
+                // as a square one.
+                Image(uiImage: image).resizable().scaledToFill()
+            } else {
+                Image(uiImage: image).resizable().scaledToFit()
+            }
+        } else {
+            Color(uiColor: .tertiarySystemFill)
+            Image(systemName: "shippingbox").font(.title2).foregroundStyle(.tertiary)
         }
     }
 }
