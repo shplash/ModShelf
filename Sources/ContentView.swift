@@ -2383,7 +2383,7 @@ struct ContentView: View {
         ["Recently added", "Recently updated", "Oldest added"],
         ["Name", "Game"],
         ["Largest first", "Smallest first"],
-        ["Updates first", "Highest rated", "Favourites first"]
+        ["Updates first", "Highest rated", "Most ratings", "Favourites first"]
     ]
     private var sortOrders: [String] { sortGroups.flatMap { $0 } }
 
@@ -2431,6 +2431,11 @@ struct ContentView: View {
         case "Oldest added": return filtered.sorted { $0.addedAt < $1.addedAt }
         case "Largest first": return filtered.sorted { ($0.byteCount ?? 0) > ($1.byteCount ?? 0) }
         case "Smallest first": return filtered.sorted { ($0.byteCount ?? Int64.max) < ($1.byteCount ?? Int64.max) }
+        case "Most ratings": return filtered.sorted { a, b in
+            let ca = a.ratingCount ?? 0, cb = b.ratingCount ?? 0
+            if ca != cb { return ca > cb }
+            return (a.rating ?? 0) > (b.rating ?? 0)
+        }
         case "Highest rated": return filtered.sorted { a, b in
             let ra = a.rating ?? -1, rb = b.rating ?? -1
             if ra != rb { return ra > rb }

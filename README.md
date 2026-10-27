@@ -97,7 +97,9 @@ access can see it, and releases are published by hand from that build.
 
 ## License
 
-Licensed under MPL-2.0.
+ModShelf is licensed under MPL-2.0.
+
+It bundles [go-steam](https://github.com/BirknerAlex/go-steam) by Alexander Birkner, which is MIT licensed; its notice is kept in the app's Credits section. MPL-2.0 and MIT combine without any extra licensing: MIT only asks that its copyright and permission notice stay with the code, and the two files simply keep their own licences.
 
 ## Notes
 
