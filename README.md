@@ -81,20 +81,6 @@ On My iPhone → ModShelf → Downloaded Mods → <game name> → <mod>
 
 Moving a mod into its game is normal use, so ModShelf shows those as moved out and keeps the install record for update checks.
 
-## Build
-
-The Xcode project is generated with [XcodeGen](https://github.com/yonaskolb/XcodeGen) from `project.yml`:
-
-```sh
-xcodegen generate
-xcodebuild -project ModShelf.xcodeproj -scheme WorkshopDownloader -sdk iphoneos build
-```
-
-The Steam engine is a Go module bound to iOS with `gomobile`. `.github/workflows/build-ipa.yml`
-builds `SteamEngine.xcframework` from `ios-engine/`, packages an ad-hoc signed IPA and attaches it to a
-private draft release ("ModShelf builds") that keeps only the latest build; only people with write
-access can see it, and releases are published by hand from that build.
-
 ## Notes & License
 
 Steam and the Steam Workshop are trademarks of Valve Corporation. ModShelf is not made by or endorsed by Valve.
