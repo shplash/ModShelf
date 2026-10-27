@@ -812,6 +812,16 @@ final class WorkshopStore: ObservableObject {
             var stale = false
             guard let url = try? URL(resolvingBookmarkData: data, options: [],
                                      relativeTo: nil, bookmarkDataIsStale: &stale) else {
+                // The bookmark went stale (a container that was rebuilt, for example). The folder
+                // itself may still be there, so try the last known path before giving up.
+                if let path = storedGameFolderPath(app), let fallback = Self.usableFolder(path) {
+                    gameRoots[app] = fallback
+                    if let fresh = try? fallback.bookmarkData(options: [],
+                                                              includingResourceValuesForKeys: nil, relativeTo: nil) {
+                        refreshed[app] = fresh
+                    }
+                    continue
+                }
                 // Keep the bookmark: the folder may be reachable again, and silently falling
                 // back to the shared folder would move a mod somewhere the user never picked.
                 unreadable.insert(app)
@@ -829,6 +839,32 @@ final class WorkshopStore: ObservableObject {
         rebuildGameFolderLabels()
     }
 
+    static let gameFolderPathsKey = "options.gameFolders.paths"
+
+    private func storedGameFolderPath(_ app: String) -> String? {
+        (UserDefaults.standard.dictionary(forKey: Self.gameFolderPathsKey) as? [String: String])?[app]
+    }
+
+    /// A folder we can still read and write without a bookmark (its path is unchanged).
+    nonisolated static func usableFolder(_ path: String) -> URL? {
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue else { return nil }
+        let url = URL(fileURLWithPath: path, isDirectory: true)
+        guard canWrite(into: url) else { return nil }
+        _ = url.startAccessingSecurityScopedResource()
+        return url
+    }
+
+    /// Re-resolves a game folder that was flagged unavailable, in case it came back.
+    func refreshGameFolder(_ app: String) -> URL? {
+        if let existing = gameRoots[app] { return existing }
+        guard let path = storedGameFolderPath(app), let url = Self.usableFolder(path) else { return nil }
+        gameRoots[app] = url
+        unreadableGameFolders.remove(app)
+        rebuildGameFolderLabels()
+        return url
+    }
+
     private func rebuildGameFolderLabels() {
         var labels: [String: String] = [:]
         for (app, url) in gameRoots { labels[app] = Self.displayName(url) }
@@ -839,7 +875,8 @@ final class WorkshopStore: ObservableObject {
         (try? url.resourceValues(forKeys: [.localizedNameKey]).localizedName) ?? url.lastPathComponent
     }
 
-    /// The folder new downloads for `appID` go into: that game's own folder when one is set.
+    /// The folder new downloads for `appID` go into: that game's own folder when one is set,
+    /// otherwise a folder named after the game inside the shared download folder.
     func root(forGame appID: String?) -> URL {
         if let appID {
             loadGameFolders()
@@ -847,8 +884,41 @@ final class WorkshopStore: ObservableObject {
                 try? FileManager.default.createDirectory(at: custom, withIntermediateDirectories: true)
                 return custom
             }
+            // The bookmark may have gone stale while the folder itself is still there.
+            if let recovered = refreshGameFolder(appID) {
+                try? FileManager.default.createDirectory(at: recovered, withIntermediateDirectories: true)
+                return recovered
+            }
+            let folder = downloadsRoot.appendingPathComponent(gameFolderName(appID), isDirectory: true)
+            try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            return folder
         }
         return downloadsRoot
+    }
+
+    /// The folder name a game gets inside the shared download folder.
+    func gameFolderName(_ appID: String) -> String {
+        if let name = library.first(where: { $0.appID == appID })?.gameName, !name.isEmpty {
+            return Self.sanitizedName(name)
+        }
+        let cache = UserDefaults.standard.dictionary(forKey: "modshelf.gameNames") as? [String: String] ?? [:]
+        if let name = cache[appID], !name.isEmpty { return Self.sanitizedName(name) }
+        return "App \(appID)"
+    }
+
+    /// What a game's folder row should show: the picked folder, or the default one inside Downloads.
+    func gameFolderDisplay(_ appID: String) -> String {
+        if let custom = customGameFolders[appID] { return custom }
+        let folder = downloadsRoot.appendingPathComponent(gameFolderName(appID), isDirectory: true)
+        return Self.readablePath(folder)
+    }
+
+    nonisolated static func sanitizedName(_ name: String, fallback: String = "") -> String {
+        let bad = CharacterSet(charactersIn: "/\\:?%*|\"<>")
+        let cleaned = name.components(separatedBy: bad).joined(separator: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let limited = String(cleaned.prefix(80))
+        return limited.isEmpty ? fallback : limited
     }
 
     func setCustomFolder(_ url: URL) { setFolder(url, for: nil) }
@@ -882,6 +952,11 @@ final class WorkshopStore: ObservableObject {
             var stored = UserDefaults.standard.dictionary(forKey: Self.gameFoldersKey) ?? [:]
             stored[game] = data
             UserDefaults.standard.set(stored, forKey: Self.gameFoldersKey)
+            // Remember the path too: if the bookmark goes stale, the folder may still be usable.
+            var paths = UserDefaults.standard.dictionary(forKey: Self.gameFolderPathsKey) as? [String: String] ?? [:]
+            paths[game] = url.path
+            UserDefaults.standard.set(paths, forKey: Self.gameFolderPathsKey)
+            unreadableGameFolders.remove(game)
             rebuildGameFolderLabels()
         } else {
             if let previous = scopedURL, previous.path != url.path { previous.stopAccessingSecurityScopedResource() }
@@ -908,6 +983,10 @@ final class WorkshopStore: ObservableObject {
             var stored = UserDefaults.standard.dictionary(forKey: Self.gameFoldersKey) ?? [:]
             stored.removeValue(forKey: game)
             UserDefaults.standard.set(stored, forKey: Self.gameFoldersKey)
+            var paths = UserDefaults.standard.dictionary(forKey: Self.gameFolderPathsKey) as? [String: String] ?? [:]
+            paths.removeValue(forKey: game)
+            UserDefaults.standard.set(paths, forKey: Self.gameFolderPathsKey)
+            unreadableGameFolders.remove(game)
             rebuildGameFolderLabels()
             operationMessage = "This game now uses the shared download folder."
         } else {
@@ -1263,6 +1342,9 @@ final class WorkshopStore: ObservableObject {
         if success {
             updateHistory(id: activeID, result: "Downloaded", error: nil)
             refreshLibraryBytes()
+            if let installed = library.first(where: { $0.id == activeID }) {
+                schedulePlacementCheck([(id: activeID, path: installed.folder)])
+            }
             lastOutcome = "Download completed"
             Haptics.success()
         } else {
@@ -1298,10 +1380,7 @@ final class WorkshopStore: ObservableObject {
         return all.filter { !$0.lastPathComponent.hasPrefix(".") }
     }
     private func sanitize(_ name: String, fallback: String) -> String {
-        let bad = CharacterSet(charactersIn: "/\\:?%*|\"<>")
-        let cleaned = name.components(separatedBy: bad).joined(separator: "-").trimmingCharacters(in: .whitespacesAndNewlines)
-        let limited = String(cleaned.prefix(80))
-        return limited.isEmpty ? fallback : limited
+        Self.sanitizedName(name, fallback: fallback)
     }
     /// A free folder under `root`: the plain name, then the name with the Workshop ID, then a unique one.
     nonisolated static func availableURL(name: String, id: String, in root: URL) -> URL {
@@ -1561,6 +1640,7 @@ final class WorkshopStore: ObservableObject {
                 movedIDs.append(id)
             }
             if !movedIDs.isEmpty { self.saveLibrary(); self.refreshLibraryBytes() }
+            self.schedulePlacementCheck(outcome.moved.map { (id: $0.0, path: $0.1) })
             onDone?(movedIDs)
             if outcome.failed.isEmpty {
                 operationMessage = movedIDs.isEmpty
@@ -1605,6 +1685,20 @@ final class WorkshopStore: ObservableObject {
         } else {
             errorMessage = "Couldn't delete \(failed.count) mod\(failed.count == 1 ? "" : "s"): \(failed.joined(separator: ", "))"
             Haptics.error()
+        }
+    }
+
+    /// Another app's container can accept a write and then drop it. Checking again a few seconds
+    /// later turns that silent loss into a clear message instead of a mod that quietly vanishes.
+    private func schedulePlacementCheck(_ folders: [(id: String, path: String)]) {
+        let external = folders.filter { !Self.isInsideAppStorage(URL(fileURLWithPath: $0.path)) }
+        guard !external.isEmpty else { return }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            let lost = external.filter { Self.scan(folder: $0.path).count == 0 }
+            guard !lost.isEmpty else { return }
+            for (id, _) in lost { self.applyCheck(id, broken: true) }
+            self.errorMessage = "The game's folder didn't keep the files ModShelf wrote, so that folder can't be written to from here. Pick a different folder, or copy the mod into the game with Files."
         }
     }
 
@@ -3772,7 +3866,7 @@ struct ContentView: View {
                             rowContent(game.name, symbol: "folder",
                                        detail: store.unreadableGameFolders.contains(game.id)
                                            ? "Folder unavailable — pick it again"
-                                           : (store.customGameFolders[game.id] ?? "Shared folder"))
+                                           : store.gameFolderDisplay(game.id))
                         }
                         .buttonStyle(.plain)
                         Button { Haptics.tap(); store.revealFolder(store.root(forGame: game.id)) } label: {
