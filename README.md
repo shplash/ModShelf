@@ -5,7 +5,7 @@
 <h1 align="center">ModShelf</h1>
 
 <p align="center">
-  Native Steam Workshop downloader for iPhone
+  Steam Workshop downloader for iPhone
 </p>
 
 <p align="center">
@@ -86,14 +86,12 @@ xcodebuild -project ModShelf.xcodeproj -scheme WorkshopDownloader -sdk iphoneos 
 ```
 
 The Steam engine is a Go module bound to iOS with `gomobile`. `.github/workflows/build-ipa.yml`
-builds `SteamEngine.xcframework` from `ios-engine/`, packages an ad-hoc signed IPA and publishes it as
-a versioned release on every push to `main` — which is also what the in-app update check reads.
-`engine.yml` runs the Go tests, and `prune-runs.yml` clears old workflow runs on demand.
+builds `SteamEngine.xcframework` from `ios-engine/`, packages an ad-hoc signed IPA and publishes it.
 
 ## Notes
 
 Steam and the Steam Workshop are trademarks of Valve Corporation. ModShelf is not made by or endorsed by Valve.
 
-## Support <a href="https://ko-fi.com/shplash"><img src="https://img.shields.io/badge/Support-ko--fi-FF5E5B?style=for-the-badge" alt="Support"></a>
+## <a href="https://ko-fi.com/shplash"><img src="https://img.shields.io/badge/Support-ko--fi-FF5E5B?style=for-the-badge" alt="Support"></a>
 
 If ModShelf has been useful to you, you can support its development as well as future projects.
