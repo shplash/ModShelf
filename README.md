@@ -95,15 +95,13 @@ builds `SteamEngine.xcframework` from `ios-engine/`, packages an ad-hoc signed I
 private draft release ("ModShelf builds") that keeps only the latest build; only people with write
 access can see it, and releases are published by hand from that build.
 
-## License
+## Notes & License
+
+Steam and the Steam Workshop are trademarks of Valve Corporation. ModShelf is not made by or endorsed by Valve.
 
 ModShelf is licensed under MPL-2.0.
 
-It bundles [go-steam](https://github.com/BirknerAlex/go-steam) by Alexander Birkner, which is MIT licensed; its notice is kept in the app's Credits section. MPL-2.0 and MIT combine without any extra licensing: MIT only asks that its copyright and permission notice stay with the code, and the two files simply keep their own licences.
-
-## Notes
-
-Steam and the Steam Workshop are trademarks of Valve Corporation. ModShelf is not made by or endorsed by Valve.
+It bundles [go-steam](https://github.com/BirknerAlex/go-steam) by Alexander Birkner, which is MIT licensed.
 
 ## <a href="https://ko-fi.com/shplash"><img src="https://img.shields.io/badge/Support-ko--fi-FF5E5B?style=for-the-badge" alt="Support"></a>
 
