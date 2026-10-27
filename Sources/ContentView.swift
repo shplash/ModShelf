@@ -271,34 +271,38 @@ enum Fmt {
     }
 }
 
-/// One place that turns Steam's raw wording into a short line someone can act on.
+/// One place that turns Steam's raw wording into a short line someone can act on. The wording stays
+/// calm on purpose: a failed download is a small thing, not an alarm.
 enum ErrorText {
     static func friendly(_ raw: String) -> String {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return "Something went wrong. Try again." }
+        guard !text.isEmpty else { return "That didn't go through just now. Try it again." }
         let r = text.lowercased()
-        if r.contains("not own") || r.contains("own this game") || r.contains("don't own")
+        if r.contains("own this game") || r.contains("not own") || r.contains("don't own")
             || r.contains("no license") || r.contains("licen") || r.contains("not purchased") {
-            return "Steam needs this game in your library before it will hand over its Workshop items. Free-to-play games give you the license when you add them to your library once."
+            return "Steam only hands over a game's Workshop items when the game is in your library. Free-to-play games are covered once you add them."
         }
-        if r.contains("private") { return "That Workshop item is private, so it can't be downloaded." }
+        if r.contains("removed") || r.contains("banned") || r.contains("violat") {
+            return "Steam has taken this item down, so it can't be downloaded any more."
+        }
+        if r.contains("private") { return "This item is private, so Steam won't hand it over." }
         if r.contains("not found") || r.contains("doesn't exist") || r.contains("does not exist")
             || r.contains("invalid item") || r.contains("no such item") {
-            return "Steam couldn't find that item. It may have been deleted."
+            return "Steam can't find that item any more. It may have been deleted."
         }
         if r.contains("window") && r.contains("item") { return "Steam doesn't allow this item to be downloaded." }
         if r.contains("rate limit") || r.contains("too many") {
-            return "Steam is limiting requests. Wait a minute and try again."
+            return "Steam is asking us to slow down. Give it a minute and try again."
         }
-        if r.contains("without a completion event") { return "The download stopped before it finished. Try again." }
+        if r.contains("without a completion event") { return "The download stopped early. Nothing was replaced." }
         if r.contains("timeout") || r.contains("timed out") || r.contains("network")
             || r.contains("offline") || r.contains("connection") || r.contains("reach") {
-            return "Couldn't reach Steam. Check your internet connection."
+            return "We couldn't reach Steam just now. Check the connection and try again."
         }
         if r.contains("no space") || r.contains("disk full") || r.contains("not enough space") {
-            return "There isn't enough free space on this device."
+            return "There isn't quite enough free space for this one."
         }
-        if r.contains("cancel") { return "The download was cancelled." }
+        if r.contains("cancel") { return "That download was cancelled." }
         return text
     }
 }
@@ -741,6 +745,17 @@ final class WorkshopStore: ObservableObject {
     @Published var queueRows: [DownloadQueueRow] = []
     private var queueFailed = 0
     private var devTask: Task<Void, Never>?
+    // Progress is drawn from the mod's size and an estimated speed rather than Steam's byte
+    // counters, which it does not expose reliably.
+    @Published var isDownloadStalled = false
+    private var downloadActiveSeconds: Double = 0
+    private var lastTickAt: Date?
+    private var lastEngineSeen: Double = -1
+    private var lastStatusSeen = ""
+    private var lastMovementAt: Date?
+    private var downloadExpectedBytes: Int64 = 0
+    private var downloadBytesPerSecond: Double = 0
+    private var lastProgressSample: (Date, Double)?
     private var didLaunchChecks = false
 
     var isAuthenticated: Bool { engine?.isAuthenticated() ?? false }
@@ -1069,7 +1084,7 @@ final class WorkshopStore: ObservableObject {
             if let result {
                 preview = result
             } else {
-                errorMessage = "Couldn't load item \(id). It may be private, deleted or unavailable."
+                errorMessage = "We couldn't load that item just now. It may be private or gone."
                 preview = WorkshopMetadata(id: id, title: "Workshop item \(id)", author: "", description: "Metadata was unavailable. Downloading may still work if this item is accessible to your Steam account.", imageURL: "", updatedAt: 0)
             }
             isFetching = false
@@ -1161,7 +1176,7 @@ final class WorkshopStore: ObservableObject {
         return text
     }
     func signOut() {
-        guard !isBusy else { errorMessage = "Finish or cancel the download first."; return }
+        guard !isBusy else { errorMessage = "Let the current download finish first."; return }
         engine?.logout(); Keychain.delete("steam.password"); password = ""; guardCode = ""
         status = "Signed out"
     }
@@ -1170,15 +1185,16 @@ final class WorkshopStore: ObservableObject {
 
     func download(_ raw: String? = nil, meta override: WorkshopMetadata? = nil) {
         errorMessage = ""
-        guard !isBusy else { errorMessage = "Something is already running. Wait for it to finish."; return }
-        guard isAuthenticated else { operationMessage = "Sign in to Steam to download this item."; showLogin = true; return }
+        guard devTask == nil else { errorMessage = "A simulated run is on screen. Let it finish first."; return }
+        guard !isBusy else { errorMessage = "One thing at a time — let this finish first."; return }
+        guard isAuthenticated else { operationMessage = "Sign in to Steam and this download can start."; showLogin = true; return }
         guard let engine else {
-            errorMessage = "The Steam engine didn't start. Reinstall ModShelf."
+            errorMessage = "The Steam engine didn't start. Reopening the app usually sorts it."
             return
         }
         guard let id = Self.workshopID(from: raw ?? input) else { errorMessage = "Enter a Workshop link or item ID."; return }
         if UserDefaults.standard.bool(forKey: "options.wifiOnly") && NetworkWatcher.shared.isExpensive {
-            errorMessage = "Wi-Fi only is on. Connect to Wi-Fi to download."
+            errorMessage = "Wi-Fi only is on, so this will wait until you're on Wi-Fi."
             queue.removeAll()
             return
         }
@@ -1187,6 +1203,17 @@ final class WorkshopStore: ObservableObject {
         let meta: WorkshopMetadata = override ?? ((preview?.id == id ? preview : nil) ?? fallback)
         activeMeta = meta
         activeTitle = meta.title
+        downloadActiveSeconds = 0
+        lastTickAt = nil
+        lastEngineSeen = -1
+        lastStatusSeen = ""
+        lastMovementAt = nil
+        isDownloadStalled = false
+        downloadExpectedBytes = meta.fileSize > 0
+            ? meta.fileSize
+            : (library.first(where: { $0.id == id })?.byteCount ?? 0)
+        downloadBytesPerSecond = 0
+        lastProgressSample = nil
         // However a download starts (library update, history retry, auto download), the download
         // screen shows that item rather than whatever was looked up last.
         if preview?.id != id {
@@ -1200,7 +1227,7 @@ final class WorkshopStore: ObservableObject {
         do {
             try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
         } catch {
-            errorMessage = "Couldn't create the download folder."
+            errorMessage = "We couldn't make a place for that download."
             record(id, title: meta.title, result: "Failed", error: errorMessage, game: meta.gameName)
             return
         }
@@ -1212,6 +1239,14 @@ final class WorkshopStore: ObservableObject {
             record(id, title: meta.title, result: "Failed", error: message, imageURL: meta.imageURL.isEmpty ? nil : meta.imageURL, game: meta.gameName)
             Haptics.error()
             return
+        }
+        // A single download gets a row of its own, so it uses the same progress line as a batch.
+        if queueRows.isEmpty {
+            queueRows = [DownloadQueueRow(id: id, title: meta.title,
+                                          imageURL: meta.imageURL.isEmpty ? nil : meta.imageURL,
+                                          state: .downloading)]
+            queueStep = 1
+            queueTotal = 1
         }
         isBusy = true
         isDownloading = true
@@ -1250,6 +1285,7 @@ final class WorkshopStore: ObservableObject {
         preview = meta
     }
     func updateAll() {
+        guard devTask == nil else { operationMessage = "A simulated run is on screen. Let it finish first."; return }
         let picks = library.filter { $0.updateAvailable }
         guard !picks.isEmpty else { operationMessage = "Everything is up to date."; return }
         queue = picks.map(\.id)
@@ -1292,23 +1328,88 @@ final class WorkshopStore: ObservableObject {
         queueStep = 0; queueTotal = 0; queueFailed = 0
         queueRows.removeAll()
         guard total > 0 else { return }
-        let noun = total == 1 ? "mod" : "mods"
+        if total == 1 {
+            operationMessage = cancelled ? "Download cancelled." : (failed > 0 ? "That one didn't finish." : "Downloaded.")
+            return
+        }
         if cancelled {
             operationMessage = "Updates cancelled after \(min(done, total)) of \(total)."
         } else if done == 0 {
-            operationMessage = "None of the \(total) \(noun) could be updated."
+            operationMessage = "None of the \(total) mods could be updated."
         } else if failed == 0 {
-            operationMessage = done >= total ? "Updated all \(total) \(noun)." : "Updated \(done) of \(total) \(noun)."
+            operationMessage = done >= total ? "Updated all \(total) mods." : "Updated \(done) of \(total) mods."
         } else {
-            operationMessage = "Updated \(max(0, done - min(failed, done))) of \(total) \(noun); \(failed) failed."
+            operationMessage = "Updated \(max(0, done - min(failed, done))) of \(total) mods; \(failed) failed."
         }
+    }
+
+    /// Progress worked out from the mod's size and an estimated speed, in whole percent steps. It
+    /// slows down near the end if a download runs long, and only shows 100% when it is really done.
+    private func simulatedProgress(engineValue: Double) -> Double {
+        guard isDownloading else { return engineValue }
+        let now = Date()
+        if let sample = lastProgressSample {
+            let dt = now.timeIntervalSince(sample.0)
+            if dt > 0.5 {
+                let gained = engineValue - sample.1
+                if gained > 0, downloadExpectedBytes > 0 {
+                    let measured = gained * Double(downloadExpectedBytes) / dt
+                    downloadBytesPerSecond = downloadBytesPerSecond > 0
+                        ? downloadBytesPerSecond * 0.7 + measured * 0.3
+                        : measured
+                }
+                lastProgressSample = (now, engineValue)
+            }
+        } else {
+            lastProgressSample = (now, engineValue)
+        }
+        let elapsed = downloadActiveSeconds
+        return Self.pacedProgress(elapsed: elapsed, expectedBytes: downloadExpectedBytes,
+                                  bytesPerSecond: downloadBytesPerSecond, engineValue: engineValue)
+    }
+
+    /// The pacing itself, kept separate so the curve is easy to reason about.
+    nonisolated static func pacedProgress(elapsed: TimeInterval, expectedBytes: Int64,
+                                          bytesPerSecond: Double, engineValue: Double) -> Double {
+        var value = max(0, engineValue)
+        let duration: Double
+        if expectedBytes > 0 {
+            let speed = bytesPerSecond > 0 ? bytesPerSecond : 3_500_000
+            duration = max(1.5, Double(expectedBytes) / speed)
+        } else {
+            duration = 25
+        }
+        if elapsed <= duration {
+            value = max(value, elapsed / duration * 0.9)
+        } else {
+            let past = (elapsed - duration) / duration
+            value = max(value, 0.9 + 0.08 * (1 - exp(-past)))
+        }
+        return min(0.99, (min(1, max(0, value)) * 100).rounded(.down) / 100)
     }
 
     func refreshState() {
         let nextStatus = engine?.status() ?? ""
         // Each new step Steam reports becomes its own segment of the progress bar.
         if isDownloading, !nextStatus.isEmpty, phases.last != nextStatus { phases.append(nextStatus) }
-        let nextProgress = min(1, max(0, engine?.progress() ?? 0))
+        let engineValue = min(1, max(0, engine?.progress() ?? 0))
+        let now = Date()
+        let statusChanged = nextStatus != lastStatusSeen
+        let valueChanged = engineValue != lastEngineSeen
+        lastStatusSeen = nextStatus
+        lastEngineSeen = engineValue
+        if statusChanged || valueChanged { lastMovementAt = now }
+        let dt = lastTickAt.map { max(0, min(1.5, now.timeIntervalSince($0))) } ?? 0
+        lastTickAt = now
+        if isDownloading {
+            // Only the part of this tick before Steam last reported anything counts: once a transfer
+            // stops talking, the bar stops moving instead of counting a stall as progress.
+            let quiet = lastMovementAt.map { max(0, now.timeIntervalSince($0)) } ?? 0
+            downloadActiveSeconds += max(0, dt - min(dt, quiet))
+        }
+        let stalled = isDownloading && (lastMovementAt.map { now.timeIntervalSince($0) > 6 } ?? false)
+        if isDownloadStalled != stalled { isDownloadStalled = stalled }
+        let nextProgress = simulatedProgress(engineValue: engineValue)
         let nextFile = engine?.currentFile() ?? ""
         let waitingForCode = nextStatus == "Steam Guard code required"
         if waitingForCode != needsGuardCode { needsGuardCode = waitingForCode }
@@ -1326,6 +1427,7 @@ final class WorkshopStore: ObservableObject {
         guard ["download complete", "download failed", "download cancelled"].contains(where: { s.contains($0) }) else { return }
         isBusy = false
         isDownloading = false
+        isDownloadStalled = false
         stopPolling()
         let stagingPath = UserDefaults.standard.string(forKey: "modshelf.activeStaging") ?? ""
         UserDefaults.standard.removeObject(forKey: "modshelf.activeStaging")
@@ -1384,6 +1486,7 @@ final class WorkshopStore: ObservableObject {
             // the version that really landed, and the info file is rewritten with it.
             refreshInstalledMetadata(id: activeID)
             updateRow(activeID, progress: 1, state: .done)
+            progress = 1
             lastOutcome = "Download completed"
             Haptics.success()
         } else {
@@ -1482,21 +1585,13 @@ final class WorkshopStore: ObservableObject {
                 }
                 let ok = failEvery == 0 || (index + 1) % failEvery != 0
                 if ok {
+                    // Simulation only: the library itself is left exactly as it was.
                     updateRow(id, progress: 1, state: .done)
-                    if let i = library.firstIndex(where: { $0.id == id }) {
-                        library[i].updateAvailable = false
-                        library[i].publishedUpdatedAt = Int(Date().timeIntervalSince1970)
-                        library[i].lastCheckedAt = Date()
-                        library[i].checkFailed = false
-                        library[i].filesBroken = false
-                    }
                 } else {
                     updateRow(id, state: .failed)
                     queueFailed += 1
                 }
             }
-            saveLibrary()
-            refreshLibraryBytes()
             devTask = nil
             finishQueue()
         }
@@ -1588,6 +1683,17 @@ final class WorkshopStore: ObservableObject {
         }
         if changed > 0 { saveLibrary() }
         return "\(changed) mod\(changed == 1 ? "" : "s") reset."
+    }
+
+    /// Clears the update badges a simulated run or a previous check may have left on real mods.
+    func devClearUpdateFlags() -> String {
+        var cleared = 0
+        for i in library.indices where library[i].updateAvailable {
+            library[i].updateAvailable = false
+            cleared += 1
+        }
+        if cleared > 0 { saveLibrary() }
+        return "\(cleared) update flag\(cleared == 1 ? "" : "s") cleared."
     }
 
     func devResetSettings() -> String {
@@ -2047,7 +2153,7 @@ final class WorkshopStore: ObservableObject {
             return
         }
         do { if FileManager.default.fileExists(atPath: item.folder) { try FileManager.default.removeItem(atPath: item.folder) } }
-        catch { errorMessage = "Couldn't delete those files."; return }
+        catch { errorMessage = "Those files wouldn't delete."; return }
         library.removeAll { $0.id == item.id }; saveLibrary(); refreshLibraryBytes()
     }
     func requestDelete(_ item: WorkshopItem) {
@@ -2105,7 +2211,7 @@ final class WorkshopStore: ObservableObject {
         let name = Self.sanitizedName(item.displayTitle, fallback: item.id)
         let zip = FileManager.default.temporaryDirectory.appendingPathComponent("\(name).zip")
         do { try? FileManager.default.removeItem(at: zip); try FileManager.default.zipItem(at: source, to: zip, shouldKeepParent: true); shareURL = zip }
-        catch { errorMessage = "Couldn't build the ZIP." }
+        catch { errorMessage = "The ZIP didn't build." }
     }
     /// Zips just the chosen mods, so part of a library can be shared without exporting all of it.
     func export(_ ids: [String]) {
@@ -2254,7 +2360,7 @@ final class WorkshopStore: ObservableObject {
             case .ok:
                 operationMessage = "\(latest.displayTitle) matches Steam."
             case .mismatch:
-                operationMessage = "\(latest.displayTitle) doesn't match Steam. Download it again to repair it."
+                operationMessage = "\(latest.displayTitle) differs from Steam's copy. Downloading it again puts that right."
             case .moved:
                 operationMessage = "\(latest.displayTitle) isn't in ModShelf any more, so its files were probably moved into the game."
             case .unknown:
@@ -2307,7 +2413,7 @@ final class WorkshopStore: ObservableObject {
             let success = await refreshMetadata(for: item, full: true)
             isCheckingUpdates = false
             guard success, let latest = library.first(where: { $0.id == item.id }) else {
-                operationMessage = "Couldn't check this mod with Steam."
+                operationMessage = "Steam didn't answer for that one."
                 return
             }
             operationMessage = latest.updateAvailable
@@ -2338,6 +2444,12 @@ final class WorkshopStore: ObservableObject {
         }
         if installedStamp == 0 {
             library[index].publishedUpdatedAt = meta.updatedAt   // legacy entry: treat the current version as installed
+            library[index].updateAvailable = false
+        } else if installedStamp > meta.updatedAt, meta.updatedAt > 0 {
+            // A stored version newer than Steam's own can't be real (an old simulated run, or a clock
+            // change), so Steam's date is taken as the installed one and future updates show again.
+            installedStamp = meta.updatedAt
+            library[index].publishedUpdatedAt = installedStamp
             library[index].updateAvailable = false
         } else {
             library[index].updateAvailable = meta.updatedAt > installedStamp   // installed stamp is only changed by a real download
@@ -2380,7 +2492,7 @@ final class WorkshopStore: ObservableObject {
             if silent {
                 operationMessage = updated > 0 ? "\(updated) mod update\(updated == 1 ? "" : "s") available." : ""
             } else if checked == 0 {
-                operationMessage = "Couldn't check for updates."
+                operationMessage = "Steam didn't answer just now."
             } else {
                 var parts: [String] = [updated > 0 ? "\(updated) update\(updated == 1 ? "" : "s") available" : "Everything is up to date"]
                 if failed > 0 { parts.append("\(failed) couldn't be checked") }
@@ -2959,6 +3071,7 @@ struct ContentView: View {
     @State private var browserHomeToken = 0
     @State private var lastWorkshopTap = Date.distantPast
     @State private var showDeveloperMenu = false
+    @AppStorage("dev.unlocked") private var devUnlocked = false
     @State private var logoTapCount = 0
     @State private var lastLogoTap = Date.distantPast
 
@@ -3352,6 +3465,17 @@ struct ContentView: View {
                 brandLogo
                     .contentShape(Rectangle())
                     .onTapGesture { logoTapped() }
+                if devUnlocked {
+                    Button { showDeveloperMenu = true } label: {
+                        Image(systemName: "wrench.and.screwdriver")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 26, height: 26)
+                            .background(Circle().fill(Color.primary.opacity(0.06)))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Developer")
+                }
                 Spacer()
                 signInPill
             }
@@ -3429,26 +3553,30 @@ struct ContentView: View {
         if (!store.errorMessage.isEmpty && !store.showLogin) || !store.operationMessage.isEmpty {
             let isError = !store.errorMessage.isEmpty && !store.showLogin
             let text = isError ? friendlyError(store.errorMessage) : store.operationMessage
+            let tint: Color = isError ? .orange : Color.accentColor
             HStack(alignment: .top, spacing: 10) {
-                Image(systemName: isError ? "exclamationmark.triangle.fill" : "info.circle.fill")
-                    .font(.system(size: 18)).foregroundStyle(.white)
+                Image(systemName: isError ? "exclamationmark.circle" : "info.circle")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(tint)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(isError ? "Couldn't finish that" : bannerTitle).font(.system(size: 14, weight: .bold)).foregroundStyle(.white)
-                    Text(text).font(.system(size: 13)).foregroundStyle(.white.opacity(0.95))
+                    Text(isError ? "That didn't finish" : bannerTitle)
+                        .font(.system(size: 14, weight: .semibold)).foregroundStyle(.primary)
+                    Text(text).font(.system(size: 13)).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 0)
                 Button {
                     if isError { store.errorMessage = "" } else { store.operationMessage = "" }
                 } label: {
-                    Image(systemName: "xmark").font(.system(size: 12, weight: .bold)).foregroundStyle(.white.opacity(0.9))
+                    Image(systemName: "xmark").font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.tertiary)
                         .frame(width: 28, height: 28)
                 }
                 .accessibilityLabel("Dismiss")
             }
             .padding(12)
-            .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(isError ? Color.red : Color.accentColor))
-            .shadow(color: (isError ? Color.red : Color.accentColor).opacity(0.35), radius: 10, y: 4)
+            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .shadow(color: .black.opacity(0.06), radius: 8, y: 3)
             .padding(.horizontal, 14).padding(.top, 8).padding(.bottom, 4)
             .transition(.move(edge: .top).combined(with: .opacity))
         }
@@ -3467,19 +3595,6 @@ struct ContentView: View {
         if store.isBusy { return "Please wait" }
         return "Status"
     }
-
-    /// How far the download has gone, shown in the three steps Steam reports: the manifest, the
-    /// chunk download, then the install.
-    private var downloadPercent: Int {
-        guard store.isDownloading else { return 100 }
-        switch store.phases.count {
-        case 0: return 0
-        case 1: return 33
-        default: return 66
-        }
-    }
-
-    private var downloadProgress: Double { Double(downloadPercent) / 100 }
 
     private func progressBar(_ fraction: Double) -> some View {
         let clamped = min(1, max(0, fraction))
@@ -3506,7 +3621,7 @@ struct ContentView: View {
                     Text(store.activeTitle.isEmpty ? "Downloading" : store.activeTitle)
                         .font(.footnote.weight(.semibold)).lineLimit(1)
                     Spacer(minLength: 6)
-                    Text("\(downloadPercent)%")
+                    Text("\(Int(store.progress * 100))%")
                         .font(.footnote.monospacedDigit().weight(.semibold))
                         .foregroundStyle(Color.accentColor)
                     Button { store.cancel() } label: {
@@ -3514,7 +3629,7 @@ struct ContentView: View {
                     }
                     .accessibilityLabel("Cancel download")
                 }
-                progressBar(downloadProgress)
+                progressBar(store.progress)
             }
             .padding(10)
             .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
@@ -3578,10 +3693,14 @@ struct ContentView: View {
                         if store.isFetching {
                             HStack(spacing: 10) { ProgressView(); Text("Loading Workshop details…").font(.subheadline).foregroundStyle(.secondary) }.padding(.vertical, 2)
                         }
-                        if let item = store.preview { metadataCard(item) }
-                        if !store.queueRows.isEmpty { queueCard }
-                        else if store.isDownloading { progressCard }
-                        else if let item = store.preview { downloadButton(item) }
+                        if !store.isDownloading, store.queueRows.isEmpty, let item = store.preview {
+                            metadataCard(item)
+                        }
+                        if !store.queueRows.isEmpty {
+                            queueCard
+                        } else if let item = store.preview {
+                            downloadButton(item)
+                        }
                         if store.preview == nil && !store.isDownloading { browseRow }
                     }
                     .padding(.horizontal, 15).padding(.top, 10).padding(.bottom, tabBarReserve)
@@ -3602,6 +3721,7 @@ struct ContentView: View {
         logoTapCount += 1
         if logoTapCount >= 20 {
             logoTapCount = 0
+            devUnlocked = true
             showDeveloperMenu = true
         }
     }
@@ -3610,7 +3730,9 @@ struct ContentView: View {
     private var queueCard: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) {
-                Text("Downloading \(min(store.queueStep, store.queueTotal)) of \(store.queueTotal)")
+                Text(store.queueTotal > 1
+                     ? "Downloading \(min(store.queueStep, store.queueTotal)) of \(store.queueTotal)"
+                     : "Downloading")
                     .font(.system(size: 16, weight: .bold, design: .rounded))
                 Spacer(minLength: 8)
                 Button { Haptics.tap(); store.cancel() } label: {
@@ -3666,9 +3788,15 @@ struct ContentView: View {
             Image(systemName: "clock")
                 .font(.system(size: 12, weight: .semibold)).foregroundStyle(.tertiary)
         case .downloading:
-            Text("\(Int(row.progress * 100))%")
-                .font(.system(size: 12, weight: .semibold).monospacedDigit())
-                .foregroundStyle(Color.accentColor)
+            if store.isDownloadStalled {
+                Text("Waiting")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("\(Int(row.progress * 100))%")
+                    .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                    .foregroundStyle(Color.accentColor)
+            }
         case .done:
             Image(systemName: "checkmark.circle.fill")
                 .font(.system(size: 15, weight: .semibold)).foregroundStyle(.green)
@@ -3750,42 +3878,6 @@ struct ContentView: View {
             Button { store.operationMessage = "" } label: { Image(systemName: "xmark").font(.caption.bold()).foregroundStyle(.secondary) }.accessibilityLabel("Dismiss status")
         }
         .padding(11).background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
-    }
-
-    private var progressCard: some View {
-        return VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 12) {
-                ZStack {
-                    Circle().fill(Color.accentColor.opacity(0.14)).frame(width: 44, height: 44)
-                    Image(systemName: "arrow.down")
-                        .font(.system(size: 18, weight: .bold))
-                        .foregroundStyle(Color.accentColor)
-                }
-                DottedLabel(text: "Downloading")
-                    .font(.system(size: 20, weight: .semibold))
-                    .lineLimit(1)
-                Spacer(minLength: 8)
-                Text("\(downloadPercent)%")
-                    .font(.system(size: 16, weight: .bold).monospacedDigit())
-                    .foregroundStyle(Color.accentColor)
-                Button { Haptics.tap(); store.cancel() } label: {
-                    Image(systemName: "xmark").font(.system(size: 12, weight: .bold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 32, height: 32)
-                        .background(Circle().fill(Color.primary.opacity(0.08)))
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Cancel download")
-            }
-            progressBar(downloadProgress)
-            if store.queueTotal > 1 {
-                Text("Update \(store.queueStep) of \(store.queueTotal)")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .padding(14)
-        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
     }
 
     private func downloadButton(_ item: WorkshopMetadata) -> some View {
@@ -4838,7 +4930,7 @@ struct ItemDetailPopup: View {
                     .accessibilityLabel("Close")
             }
             if let d = item.description, !d.isEmpty {
-                ScrollView { ExpandableDescription(text: d, lineLimit: 9) }.frame(maxHeight: 215)
+                ScrollView { ExpandableDescription(text: d, lineLimit: 18) }.frame(maxHeight: 360)
             }
             if !item.tags.isEmpty {
                 Text("Tags: " + item.tags.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary).lineLimit(2)
@@ -6059,9 +6151,11 @@ struct BrowserHome: View {
         HStack(spacing: 0) {
             Button { openGame(hit) } label: {
                 HStack(spacing: 12) {
-                    CachedImage(urlString: hit.tiny_image, fill: true, maxPixel: 160)
-                        .frame(width: 56, height: 56)
-                        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    ZStack {
+                        CachedImage(urlString: hit.tiny_image, fill: false, maxPixel: 200)
+                    }
+                    .frame(width: 56, height: 56)
+                    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                     Text(hit.name)
                         .font(.system(size: 15, weight: .semibold)).lineLimit(2)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -6553,6 +6647,7 @@ struct DeveloperMenuView: View {
                         report = "Download history cleared."
                     }
                     Button("Reset moved and broken flags") { report = store.devResetFlags() }
+                    Button("Clear update badges") { report = store.devClearUpdateFlags() }
                     Button("Reset all settings", role: .destructive) { report = store.devResetSettings() }
                 }
 
