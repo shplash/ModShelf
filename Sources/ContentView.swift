@@ -2322,7 +2322,13 @@ struct ContentView: View {
     /// Space reserved under every tab for the tab bar, so content can always scroll clear of it.
     private var tabBarReserve: CGFloat { tabStyle == "bar" ? 84 : 100 }
 
-    private let sortOrders = ["Recently added", "Oldest added", "Name", "Game", "Largest first", "Updates first", "Highest rated", "Favourites first"]
+    private let sortGroups: [[String]] = [
+        ["Recently added", "Recently updated", "Oldest added"],
+        ["Name", "Game"],
+        ["Largest first"],
+        ["Updates first", "Highest rated", "Favourites first"]
+    ]
+    private var sortOrders: [String] { sortGroups.flatMap { $0 } }
 
     // MARK: derived library data
 
@@ -2351,6 +2357,7 @@ struct ContentView: View {
             if searchText.isEmpty { return true }
             if item.displayTitle.localizedCaseInsensitiveContains(searchText) { return true }
             if item.id.contains(searchText) { return true }
+            if item.tags.contains(where: { $0.localizedCaseInsensitiveContains(searchText) }) { return true }
             return (item.gameName ?? "").localizedCaseInsensitiveContains(searchText)
         }
         switch sortOrder {
@@ -2363,6 +2370,7 @@ struct ContentView: View {
             return ga.localizedCaseInsensitiveCompare(gb) == .orderedAscending
         }
         case "Updates first": return filtered.sorted { $0.updateAvailable && !$1.updateAvailable }
+        case "Recently updated": return filtered.sorted { ($0.publishedUpdatedAt ?? 0) > ($1.publishedUpdatedAt ?? 0) }
         case "Oldest added": return filtered.sorted { $0.addedAt < $1.addedAt }
         case "Largest first": return filtered.sorted { ($0.byteCount ?? 0) > ($1.byteCount ?? 0) }
         case "Highest rated": return filtered.sorted { ($0.rating ?? -1) > ($1.rating ?? -1) }
@@ -2541,7 +2549,9 @@ struct ContentView: View {
 
     @ViewBuilder private var overlays: some View {
         if let item = popupItem {
-            Color.black.opacity(0.34).ignoresSafeArea().contentShape(Rectangle())
+            Rectangle().fill(.ultraThinMaterial)
+                .overlay(Color.black.opacity(0.45))
+                .ignoresSafeArea().contentShape(Rectangle())
                 .onTapGesture { withAnimation(.easeOut(duration: 0.16)) { popupItem = nil } }
             ItemDetailPopup(item: currentItem(item), store: store, showIDs: showIDs,
                             onClose: { withAnimation(.easeOut(duration: 0.16)) { popupItem = nil } },
@@ -3140,11 +3150,14 @@ struct ContentView: View {
 
     private var sortMenu: some View {
         Menu {
-            ForEach(sortOrders, id: \.self) { order in
-                Button {
-                    Haptics.select(); sortOrder = order
-                } label: {
-                    if order == sortOrder { Label(order, systemImage: "checkmark") } else { Text(order) }
+            ForEach(Array(sortGroups.enumerated()), id: \.offset) { index, group in
+                if index > 0 { Divider() }
+                ForEach(group, id: \.self) { order in
+                    Button {
+                        Haptics.select(); sortOrder = order
+                    } label: {
+                        if order == sortOrder { Label(order, systemImage: "checkmark") } else { Text(order) }
+                    }
                 }
             }
         } label: { iconLabel("arrow.up.arrow.down") }
@@ -3257,6 +3270,7 @@ struct ContentView: View {
                             Button { Haptics.select(); selectedGame = nil; selectedTag = nil } label: {
                                 if selectedGame == nil { Label("All games", systemImage: "checkmark") } else { Text("All games") }
                             }
+                            Divider()
                             ForEach(installedGames, id: \.id) { game in
                                 Button { Haptics.select(); selectedGame = game.id; selectedTag = nil } label: {
                                     if selectedGame == game.id { Label(game.name, systemImage: "checkmark") } else { Text(game.name) }
@@ -3269,6 +3283,7 @@ struct ContentView: View {
                             Button { Haptics.select(); selectedTag = nil } label: {
                                 if selectedTag == nil { Label("All tags", systemImage: "checkmark") } else { Text("All tags") }
                             }
+                            Divider()
                             ForEach(installedTags, id: \.self) { tag in
                                 Button { Haptics.select(); selectedTag = tag } label: {
                                     if selectedTag == tag { Label(tag, systemImage: "checkmark") } else { Text(tag) }
@@ -3976,7 +3991,7 @@ struct ItemDetailPopup: View {
                 ScrollView { ExpandableDescription(text: d, lineLimit: 7) }.frame(maxHeight: 170)
             }
             if !item.tags.isEmpty {
-                Text(item.tags.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                Text("Tags: " + item.tags.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary).lineLimit(2)
             }
             VStack(alignment: .leading, spacing: 2) {
                 Text(installedLine)
@@ -4201,12 +4216,34 @@ struct ExpandableDescription: View {
     }
 }
 
+/// A video in the media strip: its YouTube thumbnail with a play mark. YouTube's embedded player
+/// cannot be restyled, so the video only plays in the full-screen viewer, where its own progress
+/// bar and controls live.
+struct VideoPoster: View {
+    let videoID: String
+
+    var body: some View {
+        ZStack {
+            CachedImage(urlString: "https://img.youtube.com/vi/\(videoID)/hqdefault.jpg", fill: true, maxPixel: 800)
+            Color.black.opacity(0.25)
+            Image(systemName: "play.circle.fill")
+                .font(.system(size: 52, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.95))
+                .shadow(color: .black.opacity(0.45), radius: 10, y: 4)
+        }
+        .contentShape(Rectangle())
+        .accessibilityLabel("Play video")
+    }
+}
+
 struct MediaCarousel: View {
     let media: [MediaItem]
     @Binding var index: Int
     var onExpand: (MediaItem, Int) -> Void = { _, _ in }
     /// The page that was showing before the swipe, so only a video being left is paused.
     @State private var lastIndex = 0
+    /// A video started from its poster plays in place, with YouTube's own controls.
+    @State private var playingVideo: String?
 
     init(media: [MediaItem], index: Binding<Int>, onExpand: @escaping (MediaItem, Int) -> Void = { _, _ in }) {
         self.media = media
@@ -4229,8 +4266,17 @@ struct MediaCarousel: View {
                             })
                             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                         case .video(let id):
-                            YouTubePlayerView(videoID: id)
-                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            if playingVideo == id {
+                                YouTubePlayerView(videoID: id)
+                                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            } else {
+                                // The embedded player's own chrome stays out of the strip until it is
+                                // asked for: a poster with a play mark starts it in place.
+                                Button { Haptics.tap(); playingVideo = id } label: {
+                                    VideoPoster(videoID: id)
+                                }
+                                .buttonStyle(.plain)
+                            }
                         }
                     }
                     .padding(.horizontal, 2)
@@ -4244,6 +4290,8 @@ struct MediaCarousel: View {
                 if media.indices.contains(lastIndex), case .video = media[lastIndex] {
                     YouTubePlayers.shared.pause()
                 }
+                // Leaving a page stops its video, so coming back shows the poster again.
+                if playingVideo != nil { playingVideo = nil }
                 lastIndex = newIndex
             }
             if media.count > 1 {
@@ -4627,6 +4675,7 @@ final class YouTubePlayers {
         view.scrollView.pinchGestureRecognizer?.isEnabled = false
         view.scrollView.isMultipleTouchEnabled = false
         view.navigationDelegate = links
+        view.uiDelegate = links
         view.loadHTMLString(Self.page(id), baseURL: URL(string: Self.origin))
         webView = view
         loadedID = id
@@ -4667,23 +4716,41 @@ final class YouTubeHostView: UIView {
     }
 }
 
-/// Opens "Watch on YouTube" and similar links in the YouTube app instead of inside the player.
-final class YouTubeLinkHandler: NSObject, WKNavigationDelegate {
+/// Opens "Watch on YouTube", the video's logo and similar links in the YouTube app instead of
+/// inside the player. The logo opens a new window, so the UI delegate answers that too.
+final class YouTubeLinkHandler: NSObject, WKNavigationDelegate, WKUIDelegate {
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-        if let url = navigationAction.request.url,
-           navigationAction.navigationType == .linkActivated || navigationAction.targetFrame == nil,
-           Self.isYouTube(url) {
-            UIApplication.shared.open(url)
+        if let url = navigationAction.request.url, Self.shouldLeavePlayer(url) {
+            Self.open(url)
             decisionHandler(.cancel)
             return
         }
         decisionHandler(.allow)
     }
 
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                 for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        if let url = navigationAction.request.url, Self.isYouTube(url) { Self.open(url) }
+        return nil
+    }
+
     static func isYouTube(_ url: URL) -> Bool {
         let host = url.host?.lowercased() ?? ""
         return host == "youtu.be" || host == "youtube.com" || host.hasSuffix(".youtube.com")
+    }
+
+    /// A YouTube page that is not the player itself: the video page, a channel, the logo's link.
+    static func shouldLeavePlayer(_ url: URL) -> Bool {
+        guard isYouTube(url) else { return false }
+        let host = url.host?.lowercased() ?? ""
+        if host.contains("consent") || host.contains("nocookie") { return false }
+        if url.path.contains("/embed") { return false }
+        return true
+    }
+
+    static func open(_ url: URL) {
+        UIApplication.shared.open(url, options: [:], completionHandler: nil)
     }
 }
 
@@ -5132,24 +5199,23 @@ struct BrowserHome: View {
     }
 
     private func favouriteTile(_ hit: GameHit) -> some View {
-        ZStack(alignment: .topTrailing) {
-            Button { openGame(hit) } label: {
-                VStack(alignment: .leading, spacing: 6) {
-                    Color.clear
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 54)
-                        .overlay(CachedImage(urlString: hit.tiny_image, fill: true, maxPixel: 300))
-                    Text(hit.name)
-                        .font(.system(size: 12, weight: .semibold)).lineLimit(1)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .padding(7)
-                .frame(maxWidth: .infinity)
-                .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color(uiColor: .secondarySystemGroupedBackground)))
+        Button { openGame(hit) } label: {
+            VStack(alignment: .leading, spacing: 6) {
+                Color.clear
+                    .aspectRatio(1, contentMode: .fit)
+                    .overlay(CachedImage(urlString: hit.tiny_image, fill: true, maxPixel: 300))
+                    .overlay(alignment: .topTrailing) { starButton(hit).padding(4) }
+                Text(hit.name)
+                    .font(.system(size: 12, weight: .semibold)).lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .multilineTextAlignment(.leading)
             }
-            .buttonStyle(.plain)
-            starButton(hit).padding(2)
+            .padding(7)
+            .frame(maxWidth: .infinity)
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color(uiColor: .secondarySystemGroupedBackground)))
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
     }
 
     private func gameRow(_ hit: GameHit) -> some View {
