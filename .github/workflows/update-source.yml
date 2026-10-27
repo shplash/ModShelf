@@ -1,0 +1,81 @@
+name: Update AltSource
+
+# Keeps the ModShelf entry in shplash-repo/apps.json in step with a published release, the same way
+# IPAID does it. Needs a SOURCE_REPO_TOKEN secret with write access to shplash/shplash-repo.
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  update-source:
+    name: Update the source entry
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the source repository
+        uses: actions/checkout@v7
+        with:
+          repository: shplash/shplash-repo
+          token: ${{ secrets.SOURCE_REPO_TOKEN }}
+
+      - name: Update apps.json
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          NOTES: ${{ github.event.release.body }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+          from datetime import date
+
+          tag = os.environ.get("TAG", "").strip()
+          notes = os.environ.get("NOTES", "").strip()
+          if not tag.startswith("v"):
+              print("No release tag on this run; nothing to do.")
+              sys.exit(0)
+
+          version = tag.lstrip("v")
+          today = date.today().isoformat()
+          download = f"https://github.com/shplash/ModShelf/releases/download/{tag}/ModShelf.ipa"
+
+          with open("apps.json", encoding="utf-8") as handle:
+              data = json.load(handle)
+
+          for app in data.get("apps", []):
+              if app.get("bundleIdentifier") != "com.shplash.modshelf":
+                  continue
+              app["version"] = version
+              app["versionDate"] = today
+              app["downloadURL"] = download
+              if notes:
+                  app["versionDescription"] = notes
+              versions = [v for v in app.get("versions", []) if v.get("version") != version]
+              versions.insert(0, {
+                  "version": version,
+                  "date": today,
+                  "localizedDescription": notes,
+                  "downloadURL": download,
+                  "size": 0,
+              })
+              app["versions"] = versions
+
+          with open("apps.json", "w", encoding="utf-8") as handle:
+              json.dump(data, handle, indent=2, ensure_ascii=False)
+              handle.write("\n")
+          PY
+
+      - name: Commit the change
+        run: |
+          set -euo pipefail
+          git config user.name "shplash-bot"
+          git config user.email "actions@github.com"
+          git add apps.json
+          git commit -m "Update ModShelf to ${{ github.event.release.tag_name }}" || exit 0
+          git push

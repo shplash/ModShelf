@@ -173,27 +173,8 @@ jobs:
           shasum -a 256 ModShelf.ipa
           ls -lh ModShelf.ipa
 
-      - name: Read the version
-        id: version
-        run: |
-          set -euo pipefail
-          PLIST="build/Build/Products/Release-iphoneos/ModShelf.app/Info.plist"
-          VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$PLIST")
-          BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$PLIST")
-          echo "short=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "build=$BUILD" >> "$GITHUB_OUTPUT"
-          echo "ModShelf $VERSION ($BUILD)"
-
-      - name: Read the release notes
-        id: notes
-        run: |
-          set -euo pipefail
-          {
-            echo "body<<RELEASE_NOTES_END"
-            cat .github/release-notes.md
-            echo "RELEASE_NOTES_END"
-          } >> "$GITHUB_OUTPUT"
-
+      # As in IPAID, a build is a private artifact of the run. Releases are made by hand from it, so
+      # nothing is published, and no prerelease channel is created.
       - name: Upload the IPA
         uses: actions/upload-artifact@v7
         with:
@@ -201,33 +182,5 @@ jobs:
           path: ModShelf.ipa
           if-no-files-found: error
           compression-level: 0
-
-      # A version is released once. Later pushes at the same version keep their IPA as an artifact
-      # only, so a release is never replaced by an identical build.
-      - name: Check whether this version is released
-        id: released
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          if gh release view "v${{ steps.version.outputs.short }}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "v${{ steps.version.outputs.short }} is already released; nothing to publish."
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      # A versioned, non-prerelease tag, so releases/latest points at this build and the app's
-      # update check has a version to compare against. The prerelease channel is left alone.
-      - name: Publish the release
-        if: steps.released.outputs.exists == 'false'
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: v${{ steps.version.outputs.short }}
-          name: ModShelf ${{ steps.version.outputs.short }}
-          body: ${{ steps.notes.outputs.body }}
-          prerelease: false
-          files: ModShelf.ipa
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          retention-days: 7
 

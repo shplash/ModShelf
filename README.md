@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/appicon.png" width="220" alt="ModShelf Icon">
+  <img src="assets/appicon.png" width="187" alt="ModShelf Icon">
 </p>
 
 <h1 align="center">ModShelf</h1>
@@ -86,7 +86,8 @@ xcodebuild -project ModShelf.xcodeproj -scheme WorkshopDownloader -sdk iphoneos 
 ```
 
 The Steam engine is a Go module bound to iOS with `gomobile`. `.github/workflows/build-ipa.yml`
-builds `SteamEngine.xcframework` from `ios-engine/`, packages an ad-hoc signed IPA and publishes it.
+builds `SteamEngine.xcframework` from `ios-engine/`, packages an ad-hoc signed IPA and leaves it as a
+7-day artifact of the run; releases are published by hand from that build.
 
 ## Notes
 
