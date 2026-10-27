@@ -28,6 +28,16 @@ extension ModStatus {
     /// Whether a mod deserves a look in the library: its files are missing or changed, or ModShelf
     /// has never managed to check it.
     var needsAttention: Bool { self == .broken || self == .notChecked }
+
+    /// The colour of a status text, the same as its icon: only a pending update or files that don't
+    /// match Steam are worth colour; everything else is calm grey.
+    var textColor: Color {
+        switch self {
+        case .upToDate, .moved, .notChecked: return .secondary
+        case .needsUpdate: return .accentColor
+        case .broken: return .yellow
+        }
+    }
 }
 
 struct WorkshopItem: Identifiable, Codable, Equatable {
@@ -3493,7 +3503,7 @@ struct ContentView: View {
     private func dateLine(_ item: WorkshopItem) -> (String, Color) {
         switch item.status {
         case .broken: return ("Files don't match Steam", Color.yellow)
-        case .needsUpdate: return ("New update available", Color.orange)
+        case .needsUpdate: return ("New update available", Color.accentColor)
         case .notChecked: return (item.checkFailed ? "Couldn't reach Steam" : "Not checked yet", Color.secondary)
         case .upToDate, .moved: break
         }
@@ -4143,7 +4153,9 @@ struct ItemDetailPopup: View {
                     if let game = item.gameName { Text(game).font(.footnote).foregroundStyle(.secondary).lineLimit(1) }
                     HStack(spacing: 6) {
                         StatusGlyph(status: item.status, size: 15)
-                        Text(statusText).font(.system(size: 13, weight: .semibold)).lineLimit(1).minimumScaleFactor(0.7)
+                        Text(statusText).font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(item.status.textColor)
+                            .lineLimit(1).minimumScaleFactor(0.7)
                     }
                     .padding(.top, 1)
                 }
