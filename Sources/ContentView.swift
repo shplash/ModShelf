@@ -5,7 +5,6 @@ import Security
 import ZIPFoundation
 import Network
 import ImageIO
-import UniformTypeIdentifiers
 import SteamEngine
 
 @main
@@ -49,6 +48,9 @@ struct WorkshopItem: Identifiable, Codable, Equatable {
     var ratingCount: Int? = nil
     var checkFailed: Bool = false
     var filesBroken: Bool = false
+    /// The files are no longer where they were installed, which normally means the user moved the
+    /// mod into the game. That is ordinary use, so it counts as moved out rather than as damage.
+    var filesMoved: Bool = false
     var fileCount: Int? = nil
     var byteCount: Int64? = nil
     /// The last time ModShelf could actually read this mod's files on disk.
@@ -86,6 +88,7 @@ struct WorkshopItem: Identifiable, Codable, Equatable {
         ratingCount = try c.decodeIfPresent(Int.self, forKey: .ratingCount)
         checkFailed = try c.decodeIfPresent(Bool.self, forKey: .checkFailed) ?? false
         filesBroken = try c.decodeIfPresent(Bool.self, forKey: .filesBroken) ?? false
+        filesMoved = try c.decodeIfPresent(Bool.self, forKey: .filesMoved) ?? false
         fileCount = try c.decodeIfPresent(Int.self, forKey: .fileCount)
         byteCount = try c.decodeIfPresent(Int64.self, forKey: .byteCount)
         lastVerifiedAt = try c.decodeIfPresent(Date.self, forKey: .lastVerifiedAt)
@@ -104,10 +107,10 @@ struct WorkshopItem: Identifiable, Codable, Equatable {
     }
 
     var status: ModStatus {
-        if isInsideModShelf && filesBroken { return .broken }
+        if filesBroken { return .broken }
         if updateAvailable { return .needsUpdate }
         if checkFailed || lastCheckedAt == nil { return .notChecked }
-        if !isInsideModShelf { return .moved }
+        if !isInsideModShelf || filesMoved { return .moved }
         return .upToDate
     }
 }
@@ -158,13 +161,6 @@ struct MediaViewer: Identifiable {
     let id = UUID()
     let media: [MediaItem]
     let index: Int
-}
-
-/// Where the selected mods should be moved to.
-enum FolderSheet: Identifiable {
-    case moveDestination
-
-    var id: String { "move" }
 }
 
 // MARK: - Keychain
@@ -806,10 +802,6 @@ final class WorkshopStore: ObservableObject {
 
     // MARK: download folders
 
-    nonisolated static func displayName(_ url: URL) -> String {
-        (try? url.resourceValues(forKeys: [.localizedNameKey]).localizedName) ?? url.lastPathComponent
-    }
-
     /// Where the files for a game belong: a folder named after it inside ModShelf's download folder.
     func root(forGame appID: String?) -> URL {
         guard let appID else { return downloadsRoot }
@@ -915,16 +907,21 @@ final class WorkshopStore: ObservableObject {
 
     func revealInFiles(_ item: WorkshopItem) {
         let path = item.folder
+        guard FileManager.default.fileExists(atPath: path) else {
+            // Files that were moved into a game aren't here to open, and ModShelf can't know where
+            // the game keeps them, so it says what happened instead of opening nothing.
+            operationMessage = item.filesMoved || !item.isInsideModShelf
+                ? "\(item.displayTitle)'s files were moved out of ModShelf, so there's no folder to open here."
+                : "That mod's folder is missing. Download the mod again."
+            return
+        }
         if path.hasPrefix(documents.path + "/") {
             // Inside ModShelf's own storage: Files can open it directly.
             let encoded = path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? path
             guard let url = URL(string: "shareddocuments://" + encoded) else { return }
             UIApplication.shared.open(url)
-        } else if FileManager.default.fileExists(atPath: path) {
-            // A folder you picked: show the Files browser opened at the mod's folder.
-            revealFolderURL = URL(fileURLWithPath: path, isDirectory: true)
         } else {
-            operationMessage = "That mod's folder is missing. Download it again."
+            revealFolderURL = URL(fileURLWithPath: path, isDirectory: true)
         }
     }
 
@@ -947,22 +944,16 @@ final class WorkshopStore: ObservableObject {
         }
     }
 
-    /// A mod keeps the folder it already lives in, so an update replaces it in place.
+    /// A mod keeps the folder it already lives in, so an update replaces it in place. A mod whose
+    /// files were moved into a game is installed fresh in ModShelf's own storage instead.
     private func installRoot(for item: WorkshopItem?, appID: String?) -> URL {
         if let item, FileManager.default.fileExists(atPath: item.folder) {
-            let parent = URL(fileURLWithPath: item.folder, isDirectory: true).deletingLastPathComponent()
+            let folder = URL(fileURLWithPath: item.folder, isDirectory: true)
+            guard Self.isInsideAppStorage(folder) else { return root(forGame: appID) }
+            let parent = folder.deletingLastPathComponent()
             if (try? parent.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true { return parent }
         }
         return root(forGame: appID)
-    }
-
-    nonisolated static func canWrite(into url: URL) -> Bool {
-        let probe = url.appendingPathComponent(".modshelf-write-test-\(UUID().uuidString)")
-        do {
-            try Data("ok".utf8).write(to: probe)
-            try? FileManager.default.removeItem(at: probe)
-            return true
-        } catch { return false }
     }
 
     // MARK: lookup
@@ -1103,11 +1094,8 @@ final class WorkshopStore: ObservableObject {
         activeMeta = meta
         activeTitle = meta.title
         // Updates stage next to the current installation, so the swap is a rename rather than a copy.
-        // A game folder in another app's container is never written to directly: downloads land in
-        // ModShelf's own storage and are then copied in under a file coordinator.
         let targetRoot = installRoot(for: library.first(where: { $0.id == id }), appID: meta.appID)
-        let stagingRoot = Self.isInsideAppStorage(targetRoot) ? targetRoot : downloadsRoot
-        let staging = stagingRoot.appendingPathComponent(".partial-\(id)-\(UUID().uuidString)", isDirectory: true)
+        let staging = targetRoot.appendingPathComponent(".partial-\(id)-\(UUID().uuidString)", isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
         } catch {
@@ -1200,6 +1188,7 @@ final class WorkshopStore: ObservableObject {
                 item.updateAvailable = false
                 item.checkFailed = false
                 item.filesBroken = false
+                item.filesMoved = false
                 item.appID = meta.appID ?? item.appID
                 item.gameName = meta.gameName ?? item.gameName
                 if !meta.tags.isEmpty { item.tags = meta.tags }
@@ -1224,9 +1213,6 @@ final class WorkshopStore: ObservableObject {
             updateHistory(id: activeID, result: "Downloaded", error: nil)
             refreshLibraryBytes()
             resolveGameNames()
-            if let installed = library.first(where: { $0.id == activeID }) {
-                schedulePlacementCheck([(id: activeID, path: installed.folder)])
-            }
             lastOutcome = "Download completed"
             Haptics.success()
         } else {
@@ -1275,53 +1261,15 @@ final class WorkshopStore: ObservableObject {
     }
 
     /// Renames when both folders share a volume, which is instant, and copies when they do not.
-    /// A copy is only accepted once the destination really holds files, and the original is only
-    /// removed after that, so a move can never leave the mod in neither place.
+    /// Everything ModShelf installs lives in its own storage, so a plain move is enough.
     nonisolated static func place(from source: URL, to destination: URL) throws {
-        let fm = FileManager.default
-        // A folder inside another app's container needs a file coordinator, or its provider can
-        // quietly drop writes that reported success.
-        let external = !isInsideAppStorage(destination)
-        if !external {
-            do {
-                try fm.moveItem(at: source, to: destination)
-                return
-            } catch {
-                // Different volume: fall through to a copy.
-            }
-        }
-        try coordinatedCopy(from: source, to: destination)
-        // Give a document provider a moment to materialise the copy before trusting it.
-        if external { Thread.sleep(forTimeInterval: 0.4) }
-        let arrived = scan(folder: destination.path)
-        guard arrived.exists, arrived.count > 0 else {
-            try? fm.removeItem(at: destination)
-            throw NSError(domain: "ModShelf", code: 4,
-                          userInfo: [NSLocalizedDescriptionKey: "The copy arrived empty."])
-        }
-        try? fm.removeItem(at: source)
+        try FileManager.default.moveItem(at: source, to: destination)
     }
 
     /// Whether a URL lives in ModShelf's own storage, where plain file operations are enough.
     nonisolated static func isInsideAppStorage(_ url: URL) -> Bool {
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].path
         return url.path == documents || url.path.hasPrefix(documents + "/")
-    }
-
-    /// Copies under a file coordinator, which is what document providers require.
-    nonisolated static func coordinatedCopy(from source: URL, to destination: URL) throws {
-        let fm = FileManager.default
-        var coordinationError: NSError?
-        var thrown: Error?
-        NSFileCoordinator().coordinate(writingItemAt: destination, options: [], error: &coordinationError) { target in
-            do {
-                try fm.copyItem(at: source, to: target)
-            } catch let copyError {
-                thrown = copyError
-            }
-        }
-        if let coordinationError { throw coordinationError }
-        if let thrown { throw thrown }
     }
 
     /// Installs a finished download. The old installation is moved aside first and only removed once
@@ -1452,90 +1400,6 @@ final class WorkshopStore: ObservableObject {
         } else { remove(item) }
     }
 
-    func move(_ ids: [String], toPicked url: URL, onDone: (([String]) -> Void)? = nil) {
-        let started = url.startAccessingSecurityScopedResource()
-        move(ids, toRoot: url, label: Self.displayName(url), scope: started ? url : nil, onDone: onDone)
-    }
-
-    /// Moves whole installations, keeping each mod's folder name. Only mods whose files really moved get
-    /// their recorded path changed, so a failure never leaves a library entry pointing at nothing.
-    func move(_ ids: [String], toRoot root: URL, label: String, scope: URL? = nil, onDone: (([String]) -> Void)? = nil) {
-        let wanted = Set(ids)
-        guard !wanted.isEmpty else { return }
-        let entries = library.filter { wanted.contains($0.id) }.map { (id: $0.id, folder: $0.folder, title: $0.displayTitle) }
-        guard !entries.isEmpty else { scope?.stopAccessingSecurityScopedResource(); return }
-        do {
-            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        } catch {
-            scope?.stopAccessingSecurityScopedResource()
-            errorMessage = "Couldn't use that folder."
-            Haptics.error()
-            return
-        }
-        guard Self.canWrite(into: root) else {
-            scope?.stopAccessingSecurityScopedResource()
-            errorMessage = "Can't save to \(label). Pick another folder."
-            Haptics.error()
-            return
-        }
-        operationMessage = "Moving \(entries.count) mod\(entries.count == 1 ? "" : "s") to \(label)…"
-
-        Task { @MainActor in
-            let outcome = await Task.detached(priority: .userInitiated) { () -> (moved: [(String, String)], failed: [String]) in
-                var moved: [(String, String)] = []
-                var failed: [String] = []
-                let fm = FileManager.default
-                for entry in entries {
-                    let source = URL(fileURLWithPath: entry.folder, isDirectory: true)
-                    guard fm.fileExists(atPath: source.path) else {
-                        failed.append("\(entry.title) (files missing)")
-                        continue
-                    }
-                    if source.deletingLastPathComponent().path == root.path { continue }
-                    let destination = Self.availableURL(name: source.lastPathComponent, id: entry.id, in: root)
-                    do {
-                        try Self.place(from: source, to: destination)
-                        // Only count it as moved when the destination really holds the files.
-                        let arrived = Self.scan(folder: destination.path)
-                        guard arrived.exists, arrived.count > 0 else {
-                            try? fm.removeItem(at: destination)
-                            failed.append("\(entry.title) (the copy arrived empty)")
-                            continue
-                        }
-                        moved.append((entry.id, destination.path))
-                    } catch {
-                        failed.append("\(entry.title) (\(error.localizedDescription))")
-                    }
-                }
-                return (moved, failed)
-            }.value
-
-            scope?.stopAccessingSecurityScopedResource()
-            var movedIDs: [String] = []
-            for (id, path) in outcome.moved {
-                guard let index = self.library.firstIndex(where: { $0.id == id }) else { continue }
-                self.library[index].folder = path
-                self.library[index].filesBroken = false
-                movedIDs.append(id)
-            }
-            if !movedIDs.isEmpty { self.saveLibrary(); self.refreshLibraryBytes() }
-            self.schedulePlacementCheck(outcome.moved.map { (id: $0.0, path: $0.1) })
-            onDone?(movedIDs)
-            if outcome.failed.isEmpty {
-                operationMessage = movedIDs.isEmpty
-                    ? "Those mods are already in \(label)."
-                    : "Moved \(movedIDs.count) mod\(movedIDs.count == 1 ? "" : "s") to \(label)."
-                Haptics.success()
-            } else if movedIDs.isEmpty {
-                errorMessage = "Nothing was moved. \(outcome.failed.joined(separator: ", "))"
-                Haptics.error()
-            } else {
-                errorMessage = "Moved \(movedIDs.count), but \(outcome.failed.count) failed: \(outcome.failed.joined(separator: ", "))"
-                Haptics.error()
-            }
-        }
-    }
-
     /// Deletes several installations. An entry stays in the library when its files can't be removed.
     func remove(_ ids: [String]) {
         guard !ids.isEmpty else { return }
@@ -1565,20 +1429,6 @@ final class WorkshopStore: ObservableObject {
         } else {
             errorMessage = "Couldn't delete \(failed.count) mod\(failed.count == 1 ? "" : "s"): \(failed.joined(separator: ", "))"
             Haptics.error()
-        }
-    }
-
-    /// Another app's container can accept a write and then drop it. Checking again a few seconds
-    /// later turns that silent loss into a clear message instead of a mod that quietly vanishes.
-    private func schedulePlacementCheck(_ folders: [(id: String, path: String)]) {
-        let external = folders.filter { !Self.isInsideAppStorage(URL(fileURLWithPath: $0.path)) }
-        guard !external.isEmpty else { return }
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 4_000_000_000)
-            let lost = external.filter { Self.scan(folder: $0.path).count == 0 }
-            guard !lost.isEmpty else { return }
-            for (id, _) in lost { self.applyCheck(id, broken: true) }
-            self.errorMessage = "The folder ModShelf wrote to dropped the files, so it can't be written to from here. Copy the mod in with the Files app instead."
         }
     }
 
@@ -1689,6 +1539,17 @@ final class WorkshopStore: ObservableObject {
         library[i].lastVerifiedFiles = files
         library[i].lastVerifiedBytes = bytes
         library[i].filesBroken = false
+        library[i].filesMoved = false
+        saveLibrary()
+    }
+
+    /// Files aren't where they were installed any more. That is what happens when a mod is moved
+    /// into a game, so the mod counts as moved out rather than as damaged.
+    private func markMoved(_ id: String) {
+        guard let i = library.firstIndex(where: { $0.id == id }) else { return }
+        guard library[i].filesMoved != true || library[i].filesBroken else { return }
+        library[i].filesMoved = true
+        library[i].filesBroken = false
         saveLibrary()
     }
 
@@ -1713,15 +1574,15 @@ final class WorkshopStore: ObservableObject {
         if changed { saveLibrary() }
     }
 
-    private enum FileCheck { case ok, mismatch, missing, unknown }
+    private enum FileCheck { case ok, mismatch, moved, unknown }
 
     /// Reads a mod's files and compares them with the size Steam has. `.unknown` means Steam no
     /// longer reports a size, so the files were readable but nothing could be compared.
     private func checkFiles(id: String, folder: String) async -> FileCheck {
         let scan = await Task.detached(priority: .utility) { Self.scan(folder: folder) }.value
         guard scan.exists, scan.count > 0 else {
-            applyCheck(id, broken: true)
-            return .missing
+            markMoved(id)
+            return .moved
         }
         guard let meta = await SteamMeta.fetch(id: id, includePage: false), meta.fileSize > 0 else {
             recordVerified(id, files: scan.count, bytes: scan.bytes)
@@ -1749,8 +1610,8 @@ final class WorkshopStore: ObservableObject {
                 operationMessage = "\(item.displayTitle) matches Steam."
             case .mismatch:
                 operationMessage = "\(item.displayTitle) doesn't match Steam. Download it again to repair it."
-            case .missing:
-                operationMessage = "\(item.displayTitle) has no files in its folder. Download it again."
+            case .moved:
+                operationMessage = "\(item.displayTitle) isn't in ModShelf any more, so its files were probably moved into the game."
             case .unknown:
                 operationMessage = "\(item.displayTitle) is still there, but Steam has no size to compare."
             }
@@ -1764,7 +1625,6 @@ final class WorkshopStore: ObservableObject {
         let entries = library.map { (id: $0.id, title: $0.displayTitle, folder: $0.folder, inside: $0.isInsideModShelf) }
         Task { @MainActor in
             var ok = 0
-            var missing = 0
             var unknown = 0
             var moved = 0
             var changed: [String] = []
@@ -1773,7 +1633,7 @@ final class WorkshopStore: ObservableObject {
                 operationMessage = "Validating \(index + 1) of \(entries.count)…"
                 switch await checkFiles(id: entry.id, folder: entry.folder) {
                 case .ok: ok += 1
-                case .missing: missing += 1
+                case .moved: moved += 1
                 case .unknown: unknown += 1
                 case .mismatch: changed.append(entry.title)
                 }
@@ -1785,7 +1645,6 @@ final class WorkshopStore: ObservableObject {
             if !changed.isEmpty {
                 parts.append(changed.count == 1 ? "1 doesn't match" : "\(changed.count) don't match")
             }
-            if missing > 0 { parts.append(missing == 1 ? "1 has no files" : "\(missing) have no files") }
             if unknown > 0 { parts.append(unknown == 1 ? "1 couldn't be compared" : "\(unknown) couldn't be compared") }
             if moved > 0 { parts.append(moved == 1 ? "1 moved out of ModShelf" : "\(moved) moved out of ModShelf") }
             operationMessage = parts.isEmpty ? "Nothing to validate." : parts.joined(separator: ", ") + "."
@@ -1808,7 +1667,7 @@ final class WorkshopStore: ObservableObject {
             operationMessage = latest.updateAvailable
                 ? "An update is available for \(latest.displayTitle)."
                 : "\(latest.displayTitle) is up to date."
-            if !latest.isInsideModShelf {
+            if !latest.isInsideModShelf || latest.filesMoved {
                 operationMessage += "\nIts files are outside ModShelf, so only the Workshop version was checked."
             }
         }
@@ -1857,7 +1716,7 @@ final class WorkshopStore: ObservableObject {
                     checked += 1
                     if let current = library.first(where: { $0.id == item.id }) {
                         if current.updateAvailable { updated += 1 }
-                        if !current.isInsideModShelf || current.filesBroken { unverified += 1 }
+                        if !current.isInsideModShelf || current.filesBroken || current.filesMoved { unverified += 1 }
                     }
                 } else { failed += 1 }
                 if checked + failed < entries.count { try? await Task.sleep(nanoseconds: 300_000_000) }
@@ -1883,13 +1742,11 @@ final class WorkshopStore: ObservableObject {
         var changed = false
         let fm = FileManager.default
         for i in library.indices {
-            // A mod the user moved out of ModShelf has no files here to look at, and that is not an error.
-            guard library[i].isInsideModShelf else {
-                if library[i].filesBroken { library[i].filesBroken = false; changed = true }
-                continue
-            }
-            let missing = !fm.fileExists(atPath: library[i].folder)
-            if library[i].filesBroken != missing { library[i].filesBroken = missing; changed = true }
+            // Files that were moved into a game are simply not here any more, which is normal use:
+            // that counts as moved out, never as a problem.
+            let movedAway = !library[i].isInsideModShelf || !fm.fileExists(atPath: library[i].folder)
+            if library[i].filesMoved != movedAway { library[i].filesMoved = movedAway; changed = true }
+            if movedAway, library[i].filesBroken { library[i].filesBroken = false; changed = true }
         }
         if changed { saveLibrary() }
         if UserDefaults.standard.object(forKey: "options.autoCheck") as? Bool ?? true { checkAllUpdates(silent: true) }
@@ -2161,7 +2018,7 @@ struct StatusGlyph: View {
         case .moved: return "Up to date, files outside ModShelf"
         case .needsUpdate: return "Update available"
         case .notChecked: return "Not checked yet"
-        case .broken: return "Files missing or changed"
+        case .broken: return "Files don't match Steam"
         }
     }
 }
@@ -2368,7 +2225,6 @@ struct ContentView: View {
     @State private var pendingDeleteItem: WorkshopItem?
     @State private var tabCollapsed = false
     @State private var scrollAnchor: CGFloat = 0
-    @State private var folderSheet: FolderSheet?
     @State private var selecting = false
     @State private var selection: Set<String> = []
     @State private var confirmBulkDelete = false
@@ -2433,11 +2289,6 @@ struct ContentView: View {
         }
     }
 
-    private func beginMove() {
-        Haptics.tap()
-        folderSheet = .moveDestination
-    }
-
     /// "Select and export as ZIP" turns on selection so a subset can be picked, then exported.
     private func startExportSelection() {
         Haptics.tap()
@@ -2490,18 +2341,6 @@ struct ContentView: View {
                                     set: { if !$0 { store.revealFolderURL = nil } })) {
             if let folder = store.revealFolderURL {
                 FolderContentsSheet(url: folder) { store.revealFolderURL = nil }
-            }
-        }
-        .sheet(item: $folderSheet) { sheet in
-            switch sheet {
-            case .moveDestination:
-                FolderPicker(onPick: { url in
-                    folderSheet = nil
-                    store.move(Array(selection), toPicked: url) { moved in
-                        selection.subtract(moved)
-                        if selection.isEmpty { selecting = false }
-                    }
-                }, onCancel: { folderSheet = nil })
             }
         }
         .onChange(of: store.shareURL) { showShare = $0 != nil }
@@ -3206,8 +3045,6 @@ struct ContentView: View {
                     Label(selection.isEmpty ? "Export as ZIP" : "Export selected (\(selection.count)) as ZIP", systemImage: "square.and.arrow.up")
                 }
                 .disabled(selection.isEmpty)
-                Button { beginMove() } label: { Label("Move selected (\(selection.count))", systemImage: "folder") }
-                    .disabled(selection.isEmpty)
                 Button(role: .destructive) { requestDeleteSelected() } label: {
                     Label("Delete selected (\(selection.count))", systemImage: "trash")
                 }
@@ -3401,7 +3238,7 @@ struct ContentView: View {
 
     private func dateLine(_ item: WorkshopItem) -> (String, Color) {
         switch item.status {
-        case .broken: return ("Files missing or changed", Color.yellow)
+        case .broken: return ("Files don't match Steam", Color.yellow)
         case .needsUpdate: return ("New update available", Color.orange)
         case .notChecked: return (item.checkFailed ? "Couldn't reach Steam" : "Not checked yet", Color.secondary)
         case .upToDate, .moved: break
@@ -4006,6 +3843,10 @@ struct ItemDetailPopup: View {
                             .background(RoundedRectangle(cornerRadius: 11).fill(Color.orange))
                     }.buttonStyle(.plain)
                 }
+                Button { Haptics.tap(); store.revealInFiles(item) } label: {
+                    Image(systemName: "folder").font(.system(size: 15, weight: .semibold)).foregroundStyle(Color.accentColor)
+                        .frame(width: 42, height: 42).background(RoundedRectangle(cornerRadius: 11).fill(Color.accentColor.opacity(0.12)))
+                }.buttonStyle(.plain).accessibilityLabel("Reveal in Files")
                 Button(role: .destructive, action: onDelete) {
                     Image(systemName: "trash").font(.system(size: 15, weight: .semibold)).foregroundStyle(.red)
                         .frame(width: 42, height: 42).background(RoundedRectangle(cornerRadius: 11).fill(Color.red.opacity(0.12)))
@@ -4023,7 +3864,7 @@ struct ItemDetailPopup: View {
         case .needsUpdate: return "Update available"
         case .moved: return "Up to date, files elsewhere"
         case .notChecked: return item.checkFailed ? "Couldn't reach Steam" : "Not checked yet"
-        case .broken: return "Files missing or changed"
+        case .broken: return "Files don't match Steam"
         }
     }
 }
@@ -4776,32 +4617,6 @@ struct FolderContentsSheet: View {
             let aDir = isDirectory(a), bDir = isDirectory(b)
             if aDir != bDir { return aDir }
             return a.lastPathComponent.localizedCaseInsensitiveCompare(b.lastPathComponent) == .orderedAscending
-        }
-    }
-}
-
-struct FolderPicker: UIViewControllerRepresentable {
-    let onPick: (URL) -> Void
-    var onCancel: () -> Void = { }
-    var startURL: URL? = nil
-    func makeCoordinator() -> Coordinator { Coordinator(onPick: onPick, onCancel: onCancel) }
-    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
-        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [UTType.folder], asCopy: false)
-        picker.allowsMultipleSelection = false
-        picker.directoryURL = startURL
-        picker.delegate = context.coordinator
-        return picker
-    }
-    func updateUIViewController(_ controller: UIDocumentPickerViewController, context: Context) { }
-    final class Coordinator: NSObject, UIDocumentPickerDelegate {
-        let onPick: (URL) -> Void
-        let onCancel: () -> Void
-        init(onPick: @escaping (URL) -> Void, onCancel: @escaping () -> Void) { self.onPick = onPick; self.onCancel = onCancel }
-        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
-            if let url = urls.first { onPick(url) } else { onCancel() }
-        }
-        func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
-            onCancel()
         }
     }
 }
