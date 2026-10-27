@@ -28,7 +28,7 @@ jobs:
     timeout-minutes: 35
     steps:
       - name: Check out the repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # The Go bind is the slowest part of this job, so the framework it
       # produces is reused until ios-engine changes.
