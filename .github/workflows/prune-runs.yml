@@ -43,12 +43,11 @@ jobs:
           echo "Keeping runs $kept (newest two of $total)."
 
           tail -n +3 runs.tsv | while IFS=$'\t' read -r id status created; do
-            case "$status" in
-              in_progress|queued|requested|waiting|pending)
-                echo "Skipping $id: $status"
-                continue
-                ;;
-            esac
+            # Only finished runs are deleted: removing a queued or running one would cancel it.
+            if [ "$status" != "completed" ]; then
+              echo "Skipping $id: $status"
+              continue
+            fi
             echo "Deleting $id ($created, $status)"
             gh api -X DELETE "repos/$REPO/actions/runs/$id" >/dev/null || echo "  could not delete $id"
           done
