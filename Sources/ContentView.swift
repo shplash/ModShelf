@@ -2679,9 +2679,11 @@ struct ContentView: View {
 
     private var accountHeader: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 6) {
-                brandLogo
-                versionBadge
+            HStack(spacing: 10) {
+                HStack(alignment: .bottom, spacing: 3) {
+                    brandLogo
+                    versionBadge
+                }
                 Spacer()
                 signInPill
             }
@@ -2707,19 +2709,13 @@ struct ContentView: View {
         }
     }
 
-    /// A circled v with the build's version beside it, sitting a title away from the logo.
+    /// "v0.3b" tucked just under the end of the logo, a hair above its baseline.
     private var versionBadge: some View {
-        HStack(spacing: 3) {
-            Text("v")
-                .font(.system(size: 9, weight: .bold))
-                .foregroundStyle(.white)
-                .frame(width: 15, height: 15)
-                .background(Circle().fill(Color.secondary))
-            Text(modShelfVersion)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.secondary)
-        }
-        .accessibilityLabel("Version \(modShelfVersion)")
+        Text("v\(modShelfVersion)")
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(.secondary)
+            .padding(.bottom, 2)
+            .accessibilityLabel("Version \(modShelfVersion)")
     }
 
     private var signInPill: some View {
