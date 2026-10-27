@@ -10,8 +10,7 @@
 
 <p align="center">
   <a href="https://github.com/shplash/ModShelf/stargazers"><img src="https://img.shields.io/github/stars/shplash/ModShelf?style=for-the-badge&label=stars&color=729864" alt="Stars"></a> <a href="https://github.com/shplash/ModShelf/issues"><img src="https://img.shields.io/github/issues/shplash/ModShelf?style=for-the-badge&label=open%20issues&color=6E7681" alt="Issues"></a><br>
-  <a href="https://github.com/shplash/ModShelf/releases/tag/ios-build"><img src="https://img.shields.io/github/v/release/shplash/ModShelf?style=for-the-badge&label=release&color=0A84FF" alt="Release"></a> <a href="https://github.com/shplash/ModShelf/releases/download/ios-build/ModShelf.ipa"><img src="https://img.shields.io/badge/Download-IPA-0A84FF?style=for-the-badge" alt="Download IPA"></a><br>
-  <a href="https://ko-fi.com/shplash"><img src="https://img.shields.io/badge/Support-ko--fi-FF5E5B?style=for-the-badge" alt="Support"></a>
+  <a href="https://github.com/shplash/ModShelf/releases/tag/ios-build"><img src="https://img.shields.io/github/v/release/shplash/ModShelf?style=for-the-badge&label=release&color=0A84FF" alt="Release"></a> <a href="https://github.com/shplash/ModShelf/releases/download/ios-build/ModShelf.ipa"><img src="https://img.shields.io/badge/Download-IPA-0A84FF?style=for-the-badge" alt="Download IPA"></a>
 </p>
 
 <p align="center">
@@ -84,8 +83,8 @@ Steam and the Steam Workshop are trademarks of Valve Corporation. ModShelf is no
 
 ## Support
 
-If ModShelf has been useful to you, you can support its development as well as future projects.
-
 <p align="center">
   <a href="https://ko-fi.com/shplash"><img src="https://img.shields.io/badge/Support-ko--fi-FF5E5B?style=for-the-badge" alt="Support"></a>
 </p>
+
+If ModShelf has been useful to you, you can support its development as well as future projects.
