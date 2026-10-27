@@ -58,7 +58,6 @@ If you found ModShelf useful, a GitHub star is always appreciated.
 
 1. Download `ModShelf.ipa` from the [latest release](https://github.com/shplash/ModShelf/releases/latest).
 2. Install it with a sideloading tool that signs for your device.
-
 Use:
 - SideStore
 - AltStore
@@ -86,9 +85,7 @@ xcodebuild -project ModShelf.xcodeproj -scheme WorkshopDownloader -sdk iphoneos 
 ```
 
 The Steam engine is a Go module bound to iOS with `gomobile`. `.github/workflows/build-ipa.yml`
-builds `SteamEngine.xcframework` from `ios-engine/`, packages an ad-hoc signed IPA and publishes it as
-a versioned release on every push to `main` — which is also what the in-app update check reads.
-`engine.yml` runs the Go tests, and `prune-runs.yml` clears old workflow runs on demand.
+builds `SteamEngine.xcframework` from `ios-engine/`, packages an ad-hoc signed IPA and publishes it.
 
 ## Notes
 
