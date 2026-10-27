@@ -975,14 +975,18 @@ final class WorkshopStore: ObservableObject {
     /// in-app listing (iOS has no way to hand the Files app a folder inside someone else's container).
     func revealFolder(_ url: URL) {
         let path = url.path
-        if path.hasPrefix(documents.path + "/") {
-            let encoded = path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? path
-            guard let shared = URL(string: "shareddocuments://" + encoded) else { return }
-            UIApplication.shared.open(shared)
-        } else if FileManager.default.fileExists(atPath: path) {
-            revealFolderURL = url
-        } else {
+        guard FileManager.default.fileExists(atPath: path) else {
             operationMessage = "That folder doesn't exist any more."
+            return
+        }
+        guard let encoded = path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+              let shared = URL(string: "shareddocuments://" + encoded) else {
+            revealFolderURL = url
+            return
+        }
+        UIApplication.shared.open(shared, options: [:]) { opened in
+            // Files only understands folders it manages; anything else gets the list instead.
+            if !opened { Task { @MainActor in self.revealFolderURL = url } }
         }
     }
 
@@ -1142,8 +1146,11 @@ final class WorkshopStore: ObservableObject {
         activeMeta = meta
         activeTitle = meta.title
         // Updates stage next to the current installation, so the swap is a rename rather than a copy.
+        // A game folder in another app's container is never written to directly: downloads land in
+        // ModShelf's own storage and are then copied in under a file coordinator.
         let targetRoot = installRoot(for: library.first(where: { $0.id == id }), appID: meta.appID)
-        let staging = targetRoot.appendingPathComponent(".partial-\(id)-\(UUID().uuidString)", isDirectory: true)
+        let stagingRoot = Self.isInsideAppStorage(targetRoot) ? targetRoot : downloadsRoot
+        let staging = stagingRoot.appendingPathComponent(".partial-\(id)-\(UUID().uuidString)", isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
         } catch {
@@ -1311,18 +1318,20 @@ final class WorkshopStore: ObservableObject {
     /// removed after that, so a move can never leave the mod in neither place.
     nonisolated static func place(from source: URL, to destination: URL) throws {
         let fm = FileManager.default
-        do {
-            try fm.moveItem(at: source, to: destination)
-            return
-        } catch {
-            // Different volume, or a document provider that cannot rename across containers.
+        // A folder inside another app's container needs a file coordinator, or its provider can
+        // quietly drop writes that reported success.
+        let external = !isInsideAppStorage(destination)
+        if !external {
+            do {
+                try fm.moveItem(at: source, to: destination)
+                return
+            } catch {
+                // Different volume: fall through to a copy.
+            }
         }
-        do {
-            try fm.copyItem(at: source, to: destination)
-        } catch let copyError {
-            try? fm.removeItem(at: destination)
-            throw copyError
-        }
+        try coordinatedCopy(from: source, to: destination)
+        // Give a document provider a moment to materialise the copy before trusting it.
+        if external { Thread.sleep(forTimeInterval: 0.4) }
         let arrived = scan(folder: destination.path)
         guard arrived.exists, arrived.count > 0 else {
             try? fm.removeItem(at: destination)
@@ -1330,6 +1339,28 @@ final class WorkshopStore: ObservableObject {
                           userInfo: [NSLocalizedDescriptionKey: "The copy arrived empty."])
         }
         try? fm.removeItem(at: source)
+    }
+
+    /// Whether a URL lives in ModShelf's own storage, where plain file operations are enough.
+    nonisolated static func isInsideAppStorage(_ url: URL) -> Bool {
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].path
+        return url.path == documents || url.path.hasPrefix(documents + "/")
+    }
+
+    /// Copies under a file coordinator, which is what document providers require.
+    nonisolated static func coordinatedCopy(from source: URL, to destination: URL) throws {
+        let fm = FileManager.default
+        var coordinationError: NSError?
+        var thrown: Error?
+        NSFileCoordinator().coordinate(writingItemAt: destination, options: [], error: &coordinationError) { target in
+            do {
+                try fm.copyItem(at: source, to: target)
+            } catch let copyError {
+                thrown = copyError
+            }
+        }
+        if let coordinationError { throw coordinationError }
+        if let thrown { throw thrown }
     }
 
     /// Installs a finished download. The old installation is moved aside first and only removed once
@@ -3660,18 +3691,14 @@ struct ContentView: View {
                 divider
                 toggleRow("Haptic feedback", symbol: "iphone.radiowaves.left.and.right", isOn: $haptics)
                 divider
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Label("Scrolling text speed", systemImage: "speedometer").font(.system(size: 16))
-                        Spacer()
-                        Text(marqueeSpeed < 0.5 ? "Off" : String(format: "%.2f×", marqueeSpeed))
-                            .font(.system(size: 14, weight: .semibold)).foregroundStyle(.secondary).monospacedDigit()
-                    }
-                    Slider(value: $marqueeSpeed, in: 0...2, step: 0.05).tint(.accentColor)
-                    Text("0.5× is slow, 1× is normal and 2× is fast. Below 0.5× the scrolling text is off.")
-                        .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                row("Scrolling text speed", symbol: "speedometer") {
+                    Text(marqueeSpeed < 0.5 ? "Off" : String(format: "%.2f×", marqueeSpeed))
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(.secondary).monospacedDigit()
                 }
-                .padding(.horizontal, 15).padding(.vertical, 12)
+                Slider(value: $marqueeSpeed, in: 0...2, step: 0.05)
+                    .tint(.accentColor)
+                    .padding(.leading, 51).padding(.trailing, 15).padding(.bottom, 12)
             }
         )
     }
