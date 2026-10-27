@@ -58,6 +58,7 @@ If you found ModShelf useful, a GitHub star is always appreciated.
 
 1. Download `ModShelf.ipa` from the [latest release](https://github.com/shplash/ModShelf/releases/latest).
 2. Install it with a sideloading tool that signs for your device.
+
 Use:
 - SideStore
 - AltStore
