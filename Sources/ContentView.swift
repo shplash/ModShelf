@@ -697,16 +697,17 @@ final class WorkshopStore: ObservableObject {
     /// install, or LiveContainer's chain when the app is running inside it.
     nonisolated static func readablePath(_ url: URL) -> String {
         let path = url.path
+        // LiveContainer keeps the app inside its own folder, so the path from there on is the true
+        // one Files shows, without the /var/mobile boilerplate or a made-up app name in front.
+        if let range = path.range(of: "LiveContainer/", options: [.caseInsensitive]) {
+            return String(path[range.lowerBound...])
+        }
         let name = (Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
             ?? (Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String)
             ?? "ModShelf"
-        // Report the real folder the way Files shows it: from the app's own Documents folder down,
-        // which also hides the UUID that LiveContainer wraps the app in.
+        // A normal install: from the app's own Documents folder down, as Files shows it.
         if let docs = path.range(of: "/Documents") {
             return name + String(path[docs.upperBound...])
-        }
-        if let range = path.range(of: "LiveContainer/", options: [.caseInsensitive]) {
-            return String(path[range.upperBound...])
         }
         var stripped = path
         for prefix in ["/private/var/mobile/Containers/", "/var/mobile/Containers/",
@@ -752,8 +753,6 @@ final class WorkshopStore: ObservableObject {
         try? fm.setAttributes([.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication], ofItemAtPath: cacheURL.path)
         return url.path
     }
-    private var temporaryPath: URL { documents.appendingPathComponent("ModShelfTemporary", isDirectory: true) }
-
     init() {
         library = Self.loadLibrary()
         let oldHistory = Self.load([String].self, key: "history") ?? []
@@ -1787,17 +1786,19 @@ final class WorkshopStore: ObservableObject {
     }
     func clearHistory() { history.removeAll(); saveHistory(); UserDefaults.standard.removeObject(forKey: "history") }
     func clearTemporaryFiles() {
-        do {
-            try FileManager.default.createDirectory(at: temporaryPath, withIntermediateDirectories: true)
-            for url in try FileManager.default.contentsOfDirectory(at: temporaryPath, includingPropertiesForKeys: nil) { try FileManager.default.removeItem(at: url) }
-            // Leftover partial downloads and replaced copies from interrupted sessions, in any game
-            // folder they were left in.
-            for url in Self.partialLeftovers(in: downloadsRoot) {
-                try? FileManager.default.removeItem(at: url)
-            }
-            status = "Temporary files cleared"
-            operationMessage = "Temporary files cleared."
-        } catch { errorMessage = "Couldn't clear temporary files." }
+        let fm = FileManager.default
+        // An older build kept a visible "ModShelfTemporary" folder in Documents; nothing needs it now.
+        let legacy = documents.appendingPathComponent("ModShelfTemporary", isDirectory: true)
+        if fm.fileExists(atPath: legacy.path) { try? fm.removeItem(at: legacy) }
+        // The app's own temporary folder is where ZIP builds work, and iOS may clear it anyway.
+        for url in (try? fm.contentsOfDirectory(at: fm.temporaryDirectory, includingPropertiesForKeys: nil)) ?? [] {
+            try? fm.removeItem(at: url)
+        }
+        // Leftover partial downloads and replaced copies from interrupted sessions, in any game
+        // folder they were left in.
+        for url in Self.partialLeftovers(in: downloadsRoot) { try? fm.removeItem(at: url) }
+        status = "Temporary files cleared"
+        operationMessage = "Temporary files cleared."
     }
     func refreshLibraryBytes() {
         let folders = library.map(\.folder)
@@ -2252,6 +2253,7 @@ struct ContentView: View {
     @State private var contextItem: WorkshopItem?
     @State private var contextHistory: DownloadRecord?
     @State private var searchText = ""
+    @State private var historySearch = ""
     @State private var showingHistory = false
     @State private var inputWasSubmitted = false
     @State private var pendingDeleteItem: WorkshopItem?
@@ -2281,7 +2283,7 @@ struct ContentView: View {
     /// Space reserved under every tab for the tab bar, so content can always scroll clear of it.
     private var tabBarReserve: CGFloat { tabStyle == "bar" ? 84 : 100 }
 
-    private let sortOrders = ["Recently added", "Oldest added", "Name", "Game", "Updates first", "Highest rated", "Favourites first"]
+    private let sortOrders = ["Recently added", "Oldest added", "Name", "Game", "Largest first", "Updates first", "Highest rated", "Favourites first"]
 
     // MARK: derived library data
 
@@ -2323,6 +2325,7 @@ struct ContentView: View {
         }
         case "Updates first": return filtered.sorted { $0.updateAvailable && !$1.updateAvailable }
         case "Oldest added": return filtered.sorted { $0.addedAt < $1.addedAt }
+        case "Largest first": return filtered.sorted { ($0.byteCount ?? 0) > ($1.byteCount ?? 0) }
         case "Highest rated": return filtered.sorted { ($0.rating ?? -1) > ($1.rating ?? -1) }
         case "Favourites first": return filtered.sorted { $0.isFavourite && !$1.isFavourite }
         default: return filtered.sorted { $0.addedAt > $1.addedAt }
@@ -3130,6 +3133,14 @@ struct ContentView: View {
                     .disabled(store.library.isEmpty)
                 Button { beginExport(all: true) } label: { Label("Export all as ZIP", systemImage: "square.and.arrow.up") }
                     .disabled(store.library.isEmpty)
+                Button {
+                    UIPasteboard.general.string = store.library.map(\.id).joined(separator: "\n")
+                    Haptics.success()
+                    store.operationMessage = "Copied \(store.library.count) Workshop ID\(store.library.count == 1 ? "" : "s")."
+                } label: {
+                    Label("Copy all Workshop IDs", systemImage: "doc.on.doc")
+                }
+                .disabled(store.library.isEmpty)
             }
         } label: { iconLabel("ellipsis", waving: selecting) }
     }
@@ -3473,20 +3484,49 @@ struct ContentView: View {
             if store.history.isEmpty {
                 emptyState("No download history", detail: "Download attempts and results will appear here.", symbol: "clock.arrow.circlepath")
             } else {
-                ScrollView {
-                    VStack(spacing: 0) {
-                        ScrollSpy(onChange: handleScroll)
-                        LazyVStack(spacing: 0) {
-                            ForEach(store.history) { record in
-                                historyRow(record)
-                                Rectangle().fill(Color.gray.opacity(0.2)).frame(height: 0.5).padding(.leading, 83)
+                VStack(spacing: 0) {
+                    HStack(spacing: 9) {
+                        Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                        TextField("Search history", text: $historySearch).textInputAutocapitalization(.never).autocorrectionDisabled()
+                        if !historySearch.isEmpty {
+                            Button { historySearch = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
+                        }
+                    }
+                    .padding(.horizontal, 12).padding(.vertical, 10)
+                    .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+                    .padding(.horizontal, 14).padding(.bottom, 8)
+
+                    if filteredHistory.isEmpty {
+                        emptyState("Nothing matches", detail: "No attempt matches “\(historySearch)”.", symbol: "magnifyingglass")
+                    } else {
+                        ScrollView {
+                            VStack(spacing: 0) {
+                                ScrollSpy(onChange: handleScroll)
+                                LazyVStack(spacing: 0) {
+                                    ForEach(filteredHistory) { record in
+                                        historyRow(record)
+                                        Rectangle().fill(Color.gray.opacity(0.2)).frame(height: 0.5).padding(.leading, 83)
+                                    }
+                                }
+                                .padding(.bottom, tabBarReserve)
                             }
                         }
-                        .padding(.bottom, tabBarReserve)
+                        .coordinateSpace(name: "scroll")
+                        .scrollDismissesKeyboard(.interactively)
                     }
                 }
-                .coordinateSpace(name: "scroll")
-                }
+            }
+        }
+    }
+
+    /// History rows that match the search box: title, Workshop ID or game.
+    private var filteredHistory: [DownloadRecord] {
+        let query = historySearch.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return store.history }
+        return store.history.filter { record in
+            record.title.localizedCaseInsensitiveContains(query)
+                || record.workshopID.contains(query)
+                || (record.gameName ?? "").localizedCaseInsensitiveContains(query)
         }
     }
 
@@ -3874,24 +3914,28 @@ struct ItemDetailPopup: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 13) {
-            HStack(alignment: .top, spacing: 12) {
-                CachedImage(urlString: item.imageURL, fill: true, maxPixel: 300)
-                    .frame(width: 84, height: 84).clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            HStack(alignment: .top, spacing: 14) {
+                // Bigger artwork, with the text block matching its height: the name sits on the top
+                // edge and the state on the bottom edge.
+                CachedImage(urlString: item.imageURL, fill: true, maxPixel: 400)
+                    .frame(width: 96, height: 96).clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                 VStack(alignment: .leading, spacing: 4) {
                     Text(item.displayTitle).font(.headline).lineLimit(2)
                     RatingLine(rating: item.rating, count: item.ratingCount, size: 13)
                     if let game = item.gameName { Text(game).font(.footnote).foregroundStyle(.secondary).lineLimit(1) }
+                    Spacer(minLength: 2)
                     HStack(spacing: 6) {
                         StatusGlyph(status: item.status, size: 15)
                         Text(statusText).font(.system(size: 13, weight: .semibold)).lineLimit(1).minimumScaleFactor(0.7)
                     }
-                    .padding(.top, 1)
                 }
-                Spacer(minLength: 0)
+                .frame(height: 96, alignment: .top)
+                .padding(.trailing, 26)
+            }
+            .overlay(alignment: .topTrailing) {
                 Button(action: onClose) { Image(systemName: "xmark.circle.fill").font(.title2).foregroundStyle(.secondary) }
                     .accessibilityLabel("Close")
             }
-            if showIDs { IDChip(id: item.id) }
             if let d = item.description, !d.isEmpty {
                 ScrollView { ExpandableDescription(text: d, lineLimit: 5) }.frame(maxHeight: 130)
             }
@@ -3903,6 +3947,10 @@ struct ItemDetailPopup: View {
             if let verified = item.lastVerifiedAt {
                 Text((item.isInsideModShelf ? "Files last checked " : "Last known good ") + Fmt.date(verified))
                     .font(.caption).foregroundStyle(.secondary)
+            }
+            if showIDs {
+                Text("Workshop ID \(item.id)")
+                    .font(.system(size: 12, weight: .regular, design: .monospaced)).foregroundStyle(.secondary)
             }
             HStack(spacing: 10) {
                 Button { Haptics.tap(); onOpenWorkshop() } label: {
@@ -4107,18 +4155,6 @@ struct ExpandableDescription: View {
                 }.buttonStyle(.plain)
             }
         }
-    }
-}
-
-struct IDChip: View {
-    let id: String
-    var small = false
-    var body: some View {
-        Text("Workshop ID: \(id)")
-            .font(.system(size: small ? 11 : 12, weight: .medium, design: .monospaced))
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 8).padding(.vertical, 3)
-            .background(Capsule().fill(Color(uiColor: .tertiarySystemFill)))
     }
 }
 
