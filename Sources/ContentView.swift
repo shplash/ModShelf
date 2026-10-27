@@ -13,7 +13,8 @@ struct ModShelfApp: App {
 }
 
 let modShelfInfoFileName = "ModShelf Information.txt"
-let modShelfVersion = "1.0"
+/// The version comes from the bundle, so bumping MARKETING_VERSION in project.yml is the only edit.
+let modShelfVersion = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "1.0"
 /// The build number CI stamps in, taken from the bundle so it follows the commit count.
 let modShelfBuild = (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String) ?? "1"
 

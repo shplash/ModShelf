@@ -27,7 +27,7 @@ targets:
       path: Sources/Info.plist
       properties:
         CFBundleDisplayName: ModShelf
-        CFBundleShortVersionString: "1.0"
+        CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
