@@ -671,8 +671,9 @@ final class WorkshopStore: ObservableObject {
     @Published var revealFolderURL: URL?
 
     /// The Go engine. Signing in and downloading need it, so a failure to create it is reported
-    /// instead of crashing the app on launch.
-    private let engine: SteamengineNewEngine? = SteamengineNewEngine()
+    /// instead of crashing the app on launch. Its type comes from the generated binding, so it is
+    /// left to inference rather than named here.
+    private let engine = SteamengineNewEngine()
     private var poller: Timer?
     private var activeID = ""
     private var activeMeta: WorkshopMetadata?
