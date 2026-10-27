@@ -19,7 +19,7 @@ let modShelfBuild = "30"
 
 // MARK: - Models
 
-enum ModStatus { case upToDate, needsUpdate, unverified }
+enum ModStatus { case upToDate, needsUpdate, unverified, moved }
 
 struct WorkshopItem: Identifiable, Codable, Equatable {
     var id: String
@@ -43,6 +43,10 @@ struct WorkshopItem: Identifiable, Codable, Equatable {
     var filesBroken: Bool = false
     var fileCount: Int? = nil
     var byteCount: Int64? = nil
+    /// The last time ModShelf could actually read this mod's files on disk.
+    var lastVerifiedAt: Date? = nil
+    var lastVerifiedBytes: Int64? = nil
+    var lastVerifiedFiles: Int? = nil
 
     init(id: String, folder: String, addedAt: Date, updatedAt: Date, title: String? = nil, author: String? = nil,
          description: String? = nil, imageURL: String? = nil, publishedUpdatedAt: Int? = nil, lastCheckedAt: Date? = nil,
@@ -76,10 +80,23 @@ struct WorkshopItem: Identifiable, Codable, Equatable {
         filesBroken = try c.decodeIfPresent(Bool.self, forKey: .filesBroken) ?? false
         fileCount = try c.decodeIfPresent(Int.self, forKey: .fileCount)
         byteCount = try c.decodeIfPresent(Int64.self, forKey: .byteCount)
+        lastVerifiedAt = try c.decodeIfPresent(Date.self, forKey: .lastVerifiedAt)
+        lastVerifiedBytes = try c.decodeIfPresent(Int64.self, forKey: .lastVerifiedBytes)
+        lastVerifiedFiles = try c.decodeIfPresent(Int.self, forKey: .lastVerifiedFiles)
     }
 
     var displayTitle: String { title ?? "Workshop item \(id)" }
+
+    /// Where ModShelf keeps its downloads. A mod outside this folder was moved by the user, so
+    /// its files can no longer be read here — but its Workshop details still can.
+    static let managedRoot: String = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].path
+
+    var isInsideModShelf: Bool {
+        folder == Self.managedRoot || folder.hasPrefix(Self.managedRoot + "/")
+    }
+
     var status: ModStatus {
+        if !isInsideModShelf { return .moved }
         if filesBroken || checkFailed || lastCheckedAt == nil { return .unverified }
         return updateAvailable ? .needsUpdate : .upToDate
     }
@@ -133,17 +150,11 @@ struct MediaViewer: Identifiable {
     let index: Int
 }
 
-/// A folder choice: the shared mod folder, or where moved mods should go.
+/// Where the selected mods should be moved to.
 enum FolderSheet: Identifiable {
-    case shared
     case moveDestination
 
-    var id: String {
-        switch self {
-        case .shared: return "shared"
-        case .moveDestination: return "move"
-        }
-    }
+    var id: String { "move" }
 }
 
 // MARK: - Keychain
@@ -548,13 +559,23 @@ enum SteamMeta {
         let cacheKey = "modshelf.gameNames"
         var cache = UserDefaults.standard.dictionary(forKey: cacheKey) as? [String: String] ?? [:]
         if let hit = cache[appID] { return hit }
-        guard let url = URL(string: "https://store.steampowered.com/api/appdetails?appids=\(appID)&filters=basic") else { return nil }
-        guard let (data, _) = try? await URLSession.shared.data(from: url),
-              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        // An app ID Steam has no name for stays unknown, so a folder named "App <id>" left alone
+        // does not cost a request on every launch.
+        let unknownKey = "modshelf.gameNamesUnknown"
+        var unknown = Set(UserDefaults.standard.stringArray(forKey: unknownKey) ?? [])
+        if unknown.contains(appID) { return nil }
+        guard let url = URL(string: "https://store.steampowered.com/api/appdetails?appids=\(appID)&filters=basic"),
+              let (data, _) = try? await URLSession.shared.data(from: url) else { return nil }
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let entry = root[appID] as? [String: Any], (entry["success"] as? Bool) == true,
-              let d = entry["data"] as? [String: Any], let name = d["name"] as? String else { return nil }
+              let d = entry["data"] as? [String: Any], let name = d["name"] as? String else {
+            unknown.insert(appID)
+            UserDefaults.standard.set(Array(unknown), forKey: unknownKey)
+            return nil
+        }
         cache[appID] = name
         UserDefaults.standard.set(cache, forKey: cacheKey)
+        if unknown.remove(appID) != nil { UserDefaults.standard.set(Array(unknown), forKey: unknownKey) }
         return name
     }
 
@@ -639,7 +660,6 @@ final class WorkshopStore: ObservableObject {
     @Published var isCheckingUpdates = false
     @Published var isVerifyingAll = false
     @Published var libraryStorageBytes: Int64 = 0
-    @Published var folderLabel = ""
     @Published var activeTitle = ""
     @Published var phases: [String] = []
     @Published var revealFolderURL: URL?
@@ -650,8 +670,6 @@ final class WorkshopStore: ObservableObject {
     private var activeMeta: WorkshopMetadata?
     private var queue: [String] = []
     private var didLaunchChecks = false
-    private var customRoot: URL?
-    private var scopedURL: URL?
 
     var isAuthenticated: Bool { engine.isAuthenticated() }
     private var documents: URL { FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0] }
@@ -661,10 +679,10 @@ final class WorkshopStore: ObservableObject {
         return url
     }
     private var downloadsRoot: URL {
-        let url = customRoot ?? defaultRoot
-        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        return url
+        try? FileManager.default.createDirectory(at: defaultRoot, withIntermediateDirectories: true)
+        return defaultRoot
     }
+    var downloadsFolderURL: URL { downloadsRoot }
     private var sessionPath: String {
         let fm = FileManager.default
         let library = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -717,8 +735,7 @@ final class WorkshopStore: ObservableObject {
         status = engine.status()
         _ = NetworkWatcher.shared
         _ = sessionPath
-        resolveCustomRoot()
-        updateFolderLabel()
+        migrateRecords()
         refreshLibraryBytes()
         resolveGameNames()
         if !username.isEmpty && !password.isEmpty { Task { await signIn(automatic: true) } }
@@ -753,98 +770,97 @@ final class WorkshopStore: ObservableObject {
 
     // MARK: download folders
 
-    private func resolveCustomRoot() {
-        guard let data = UserDefaults.standard.data(forKey: "options.folderBookmark") else { return }
-        var stale = false
-        guard let url = try? URL(resolvingBookmarkData: data, options: [],
-                                 relativeTo: nil, bookmarkDataIsStale: &stale) else {
-            // The bookmark can stop resolving (a re-signed or rebuilt container). The folder may
-            // still be usable at its last path, so try that before giving up on it.
-            if let path = UserDefaults.standard.string(forKey: "options.folderPath"),
-               let fallback = Self.usableFolder(path) {
-                customRoot = fallback
-                return
-            }
-            UserDefaults.standard.removeObject(forKey: "options.folderBookmark")
-            return
-        }
-        if url.startAccessingSecurityScopedResource() { scopedURL = url }
-        customRoot = url
-        if stale, let fresh = try? url.bookmarkData(options: [],
-                                                    includingResourceValuesForKeys: nil, relativeTo: nil) {
-            UserDefaults.standard.set(fresh, forKey: "options.folderBookmark")
-        }
-    }
-
     nonisolated static func displayName(_ url: URL) -> String {
         (try? url.resourceValues(forKeys: [.localizedNameKey]).localizedName) ?? url.lastPathComponent
     }
 
-    /// A folder we can still use without a bookmark (its path is unchanged and it is writable).
-    nonisolated static func usableFolder(_ path: String) -> URL? {
-        var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue else { return nil }
-        let url = URL(fileURLWithPath: path, isDirectory: true)
-        guard canWrite(into: url) else { return nil }
-        _ = url.startAccessingSecurityScopedResource()
-        return url
-    }
-
-    /// The folder new downloads for `appID` go into: a folder named after the game inside the
-    /// shared download folder.
+    /// Where the files for a game belong: a folder named after it inside ModShelf's download folder.
     func root(forGame appID: String?) -> URL {
         guard let appID else { return downloadsRoot }
-        let folder = downloadsRoot.appendingPathComponent(gameFolderName(appID), isDirectory: true)
+        let folder = gameFolderURL(appID: appID, name: knownGameName(appID))
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         return folder
     }
 
-    /// The folder name a game gets inside the shared download folder.
-    func gameFolderName(_ appID: String) -> String {
-        if let name = library.first(where: { $0.appID == appID })?.gameName,
-           !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return Self.sanitizedName(name)
-        }
-        let cache = UserDefaults.standard.dictionary(forKey: "modshelf.gameNames") as? [String: String] ?? [:]
-        if let name = cache[appID], !name.isEmpty { return Self.sanitizedName(name) }
-        return "App \(appID)"
+    /// The game's name as ModShelf already knows it, from the library or the last lookup.
+    func knownGameName(_ appID: String) -> String? {
+        if let name = library.first(where: { $0.appID == appID })?.gameName?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty { return name }
+        let cache = UserDefaults.standard.dictionary(forKey: "modshelf.gameNames") as? [String: String]
+        return cache?[appID]
     }
 
-    /// Fills in missing game names from Steam, then renames the "App <id>" folders they left.
+    /// A game's folder, named after the game once that is known. Two games whose names come out the
+    /// same never share a folder: the second one gets the app ID after its name instead.
+    private func gameFolderURL(appID: String, name: String?) -> URL {
+        let base = Self.sanitizedName(name ?? "", fallback: "App \(appID)")
+        let plain = downloadsRoot.appendingPathComponent(base, isDirectory: true)
+        let claimedByAnotherGame = library.contains { other in
+            guard other.appID != appID else { return false }
+            return other.folder == plain.path || other.folder.hasPrefix(plain.path + "/")
+        }
+        guard claimedByAnotherGame else { return plain }
+        return downloadsRoot.appendingPathComponent("\(base) (\(appID))", isDirectory: true)
+    }
+
+    /// The app ID an "App <id>" folder stands for, or nil for any other folder name.
+    nonisolated static func appID(fromLegacyFolder name: String) -> String? {
+        guard name.hasPrefix("App ") else { return nil }
+        let id = name.dropFirst(4).trimmingCharacters(in: .whitespaces)
+        return !id.isEmpty && id.allSatisfy { $0.isNumber } ? id : nil
+    }
+
+    /// Fills in missing game names from Steam, then renames the "App <id>" folders that stand for
+    /// them. Folders left behind without a library entry are named too, so no game stays "App <id>".
     func resolveGameNames() {
-        var missing: [String: String] = [:]
-        for item in library {
-            guard let app = item.appID else { continue }
-            if (item.gameName ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                missing[app] = item.displayTitle
-            }
+        var apps = Set(library.compactMap { $0.appID })
+        for folder in (try? FileManager.default.contentsOfDirectory(atPath: downloadsRoot.path)) ?? [] {
+            if let id = Self.appID(fromLegacyFolder: folder) { apps.insert(id) }
         }
-        guard !missing.isEmpty else { return }
+        guard !apps.isEmpty else { return }
         Task { @MainActor in
-            for app in missing.keys {
-                guard let name = await SteamMeta.gameName(appID: app) else { continue }
-                for i in self.library.indices where self.library[i].appID == app
-                    && (self.library[i].gameName ?? "").isEmpty {
-                    self.library[i].gameName = name
+            for app in apps.sorted() {
+                var name = self.knownGameName(app)
+                if name?.isEmpty != false {
+                    guard let fetched = await SteamMeta.gameName(appID: app) else { continue }
+                    name = fetched
+                    for i in self.library.indices where self.library[i].appID == app {
+                        self.library[i].gameName = fetched
+                    }
+                    self.saveLibrary()
                 }
-                self.saveLibrary()
-                self.renameGameFolder(appID: app, to: name)
+                if let name { self.renameGameFolder(appID: app, to: name) }
             }
         }
     }
 
-    /// Moves an "App <id>" folder to the game's real name and updates the mods inside it.
+    /// Gives a game's folder its real name, merging into a folder of that name when one is already
+    /// there so mods left behind by an older build end up together.
     private func renameGameFolder(appID: String, to name: String) {
         let fm = FileManager.default
         let old = downloadsRoot.appendingPathComponent("App \(appID)", isDirectory: true)
-        let new = downloadsRoot.appendingPathComponent(Self.sanitizedName(name), isDirectory: true)
-        guard fm.fileExists(atPath: old.path), !fm.fileExists(atPath: new.path) else { return }
-        do { try fm.moveItem(at: old, to: new) } catch { return }
-        for i in library.indices where library[i].folder.hasPrefix(old.path + "/") {
-            library[i].folder = new.path + String(library[i].folder.dropFirst(old.path.count))
+        let new = gameFolderURL(appID: appID, name: name)
+        guard old.path != new.path, fm.fileExists(atPath: old.path) else { return }
+        if !fm.fileExists(atPath: new.path) {
+            guard (try? fm.moveItem(at: old, to: new)) != nil else { return }
+        } else {
+            for child in (try? fm.contentsOfDirectory(at: old, includingPropertiesForKeys: nil)) ?? [] {
+                let target = new.appendingPathComponent(child.lastPathComponent, isDirectory: true)
+                guard !fm.fileExists(atPath: target.path) else { continue }
+                try? fm.moveItem(at: child, to: target)
+            }
+            if (try? fm.contentsOfDirectory(atPath: old.path).isEmpty) == true { try? fm.removeItem(at: old) }
         }
-        saveLibrary()
-        refreshLibraryBytes()
+        var changed = false
+        for i in library.indices {
+            let path = library[i].folder
+            guard path == old.path || path.hasPrefix(old.path + "/") else { continue }
+            let updated = new.path + String(path.dropFirst(old.path.count))
+            guard fm.fileExists(atPath: updated) else { continue }
+            library[i].folder = updated
+            changed = true
+        }
+        if changed { saveLibrary(); refreshLibraryBytes() }
     }
 
     nonisolated static func sanitizedName(_ name: String, fallback: String = "") -> String {
@@ -854,136 +870,6 @@ final class WorkshopStore: ObservableObject {
         let limited = String(cleaned.prefix(80))
         return limited.isEmpty ? fallback : limited
     }
-
-    func setCustomFolder(_ url: URL) { setFolder(url) }
-
-    /// Picks the shared download folder and moves every mod that already lives in the old one.
-    func setFolder(_ url: URL) {
-        let oldRoot = currentRootURL
-        // Access has to be started before the folder can be tested or bookmarked.
-        let started = url.startAccessingSecurityScopedResource()
-        guard Self.canWrite(into: url) else {
-            if started { url.stopAccessingSecurityScopedResource() }
-            errorMessage = "ModShelf can't write to that folder. Pick another one."
-            Haptics.error()
-            return
-        }
-        guard let data = try? url.bookmarkData(options: [],
-                                               includingResourceValuesForKeys: nil, relativeTo: nil) else {
-            if started { url.stopAccessingSecurityScopedResource() }
-            errorMessage = "Couldn't save that folder. Try again."
-            Haptics.error()
-            return
-        }
-        if let previous = scopedURL, previous.path != url.path { previous.stopAccessingSecurityScopedResource() }
-        if let previous = scopedURL, previous.path == url.path {
-            if started { url.stopAccessingSecurityScopedResource() }
-        } else {
-            scopedURL = started ? url : nil
-        }
-        customRoot = url
-        UserDefaults.standard.set(data, forKey: "options.folderBookmark")
-        UserDefaults.standard.set(url.path, forKey: "options.folderPath")
-        updateFolderLabel()
-        moveAllMods(to: url, from: oldRoot)
-    }
-
-    func resetCustomFolder() {
-        guard let previousRoot = customRoot else { return }
-        scopedURL?.stopAccessingSecurityScopedResource()
-        scopedURL = nil
-        customRoot = nil
-        UserDefaults.standard.removeObject(forKey: "options.folderBookmark")
-        UserDefaults.standard.removeObject(forKey: "options.folderPath")
-        updateFolderLabel()
-        moveAllMods(to: defaultRoot, from: previousRoot)
-    }
-
-    /// Moves every mod (and the game folders they sit in) into `newRoot`, keeping the layout.
-    private func moveAllMods(to newRoot: URL, from oldRoot: URL) {
-        guard oldRoot.path != newRoot.path else { return }
-        let entries = library.map { (id: $0.id, title: $0.displayTitle, folder: $0.folder) }
-        guard !entries.isEmpty else { return }
-        operationMessage = "Moving your mods to the new folder…"
-        Task { @MainActor in
-            let outcome = await Task.detached(priority: .userInitiated) { () -> (moved: [(String, String)], failed: [String]) in
-                var moved: [(String, String)] = []
-                var failed: [String] = []
-                let fm = FileManager.default
-                try? fm.createDirectory(at: newRoot, withIntermediateDirectories: true)
-                for entry in entries {
-                    guard entry.folder.hasPrefix(oldRoot.path + "/") else { continue }
-                    let source = URL(fileURLWithPath: entry.folder, isDirectory: true)
-                    guard fm.fileExists(atPath: source.path) else {
-                        failed.append("\(entry.title) (files missing)")
-                        continue
-                    }
-                    let relative = String(entry.folder.dropFirst(oldRoot.path.count)).drop(while: { $0 == "/" })
-                    let wanted = newRoot.appendingPathComponent(String(relative), isDirectory: true)
-                    let parent = wanted.deletingLastPathComponent()
-                    try? fm.createDirectory(at: parent, withIntermediateDirectories: true)
-                    let destination = Self.availableURL(name: wanted.lastPathComponent, id: entry.id, in: parent)
-                    do {
-                        try Self.place(from: source, to: destination)
-                        let arrived = Self.scan(folder: destination.path)
-                        guard arrived.exists, arrived.count > 0 else {
-                            failed.append("\(entry.title) (the copy arrived empty)")
-                            continue
-                        }
-                        moved.append((entry.id, destination.path))
-                    } catch {
-                        failed.append("\(entry.title) (\(error.localizedDescription))")
-                    }
-                }
-                return (moved, failed)
-            }.value
-            for (id, path) in outcome.moved {
-                if let index = self.library.firstIndex(where: { $0.id == id }) {
-                    self.library[index].folder = path
-                    self.library[index].filesBroken = false
-                }
-            }
-            if !outcome.moved.isEmpty { self.saveLibrary(); self.refreshLibraryBytes() }
-            if outcome.failed.isEmpty {
-                self.operationMessage = outcome.moved.isEmpty
-                    ? "New downloads will be saved to \(Self.displayName(newRoot))."
-                    : "Moved \(outcome.moved.count) mod\(outcome.moved.count == 1 ? "" : "s") to \(Self.displayName(newRoot))."
-            } else {
-                self.errorMessage = "Moved \(outcome.moved.count), but \(outcome.failed.count) couldn't move: \(outcome.failed.joined(separator: ", "))"
-            }
-        }
-    }
-
-    private func updateFolderLabel() {
-        folderLabel = Self.readablePath(currentRootURL)
-    }
-
-    /// The folder as the Files app shows it, past "On My iPhone": the app's own folder for a normal
-    /// install, or LiveContainer's chain when the app is running inside it.
-    nonisolated static func readablePath(_ url: URL) -> String {
-        let path = url.path
-        if let range = path.range(of: "LiveContainer/", options: [.caseInsensitive]) {
-            return String(path[range.lowerBound...])
-        }
-        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].path
-        if path.hasPrefix(documents) {
-            let name = (Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
-                ?? (Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String)
-                ?? "ModShelf"
-            return name + String(path.dropFirst(documents.count))
-        }
-        // A folder the user picked elsewhere: keep the real path, without the sandbox boilerplate.
-        var stripped = path
-        for prefix in ["/private/var/mobile/Containers/", "/var/mobile/Containers/",
-                       "/private/var/mobile/", "/var/mobile/"] where stripped.hasPrefix(prefix) {
-            stripped = String(stripped.dropFirst(prefix.count))
-            break
-        }
-        return stripped
-    }
-
-    var usingCustomFolder: Bool { customRoot != nil }
-    var currentRootURL: URL { customRoot ?? defaultRoot }
 
     func gameDisplayName(_ appID: String) -> String {
         if let name = library.first(where: { $0.appID == appID })?.gameName { return name }
@@ -1284,6 +1170,9 @@ final class WorkshopStore: ObservableObject {
                 if meta.rating != nil { item.rating = meta.rating; item.ratingCount = meta.ratingCount }
                 item.fileCount = done.files
                 item.byteCount = done.bytes
+                item.lastVerifiedAt = Date()
+                item.lastVerifiedFiles = done.files
+                item.lastVerifiedBytes = done.bytes
                 if let old = library.firstIndex(where: { $0.id == activeID }) { library[old] = item } else { library.insert(item, at: 0) }
                 saveLibrary()
                 success = true
@@ -1511,6 +1400,12 @@ final class WorkshopStore: ObservableObject {
     // MARK: library actions
 
     func remove(_ item: WorkshopItem) {
+        // A mod moved out of ModShelf belongs to wherever the user put it: only forget the entry.
+        if !item.isInsideModShelf {
+            library.removeAll { $0.id == item.id }; saveLibrary(); refreshLibraryBytes()
+            operationMessage = "Removed \(item.displayTitle) from your library. Its files are still in the folder you moved it to."
+            return
+        }
         do { if FileManager.default.fileExists(atPath: item.folder) { try FileManager.default.removeItem(atPath: item.folder) } }
         catch { errorMessage = "Couldn't delete those files."; return }
         library.removeAll { $0.id == item.id }; saveLibrary(); refreshLibraryBytes()
@@ -1613,6 +1508,7 @@ final class WorkshopStore: ObservableObject {
         var removed: [String] = []
         var failed: [String] = []
         for item in entries {
+            guard item.isInsideModShelf else { removed.append(item.id); continue }
             do {
                 if FileManager.default.fileExists(atPath: item.folder) {
                     try FileManager.default.removeItem(atPath: item.folder)
@@ -1646,7 +1542,7 @@ final class WorkshopStore: ObservableObject {
             let lost = external.filter { Self.scan(folder: $0.path).count == 0 }
             guard !lost.isEmpty else { return }
             for (id, _) in lost { self.applyCheck(id, broken: true) }
-            self.errorMessage = "The game's folder didn't keep the files ModShelf wrote, so that folder can't be written to from here. Pick a different folder, or copy the mod into the game with Files."
+            self.errorMessage = "The folder ModShelf wrote to dropped the files, so it can't be written to from here. Copy the mod in with the Files app instead."
         }
     }
 
@@ -1698,63 +1594,114 @@ final class WorkshopStore: ObservableObject {
         if let i = library.firstIndex(where: { $0.id == id }) { library[i].filesBroken = broken; saveLibrary() }
     }
 
+    /// Remembers that a mod's files were readable and complete, so a mod the user later moves out
+    /// of ModShelf can still say when it was last known to be fine.
+    private func recordVerified(_ id: String, files: Int, bytes: Int64) {
+        guard let i = library.firstIndex(where: { $0.id == id }) else { return }
+        library[i].lastVerifiedAt = Date()
+        library[i].lastVerifiedFiles = files
+        library[i].lastVerifiedBytes = bytes
+        library[i].filesBroken = false
+        saveLibrary()
+    }
+
+    /// What to say about a mod whose files are no longer inside ModShelf.
+    private func movedMessage(_ item: WorkshopItem) -> String {
+        guard let when = item.lastVerifiedAt else {
+            return "\(item.displayTitle) is outside ModShelf now, so its files can't be checked here."
+        }
+        let size = (item.lastVerifiedBytes ?? item.byteCount).map { " at \(Fmt.bytes($0))" } ?? ""
+        return "\(item.displayTitle) is outside ModShelf now. It was last checked \(Fmt.date(when))\(size), so it should still be fine."
+    }
+
+    /// Libraries saved before install records existed get one, taken from the download itself.
+    func migrateRecords() {
+        var changed = false
+        for i in library.indices where library[i].lastVerifiedAt == nil {
+            library[i].lastVerifiedAt = library[i].updatedAt
+            library[i].lastVerifiedBytes = library[i].lastVerifiedBytes ?? library[i].byteCount
+            library[i].lastVerifiedFiles = library[i].lastVerifiedFiles ?? library[i].fileCount
+            changed = true
+        }
+        if changed { saveLibrary() }
+    }
+
+    private enum FileCheck { case ok, mismatch, missing, unknown }
+
+    /// Reads a mod's files and compares them with the size Steam has. `.unknown` means Steam no
+    /// longer reports a size, so the files were readable but nothing could be compared.
+    private func checkFiles(id: String, folder: String) async -> FileCheck {
+        let scan = await Task.detached(priority: .utility) { Self.scan(folder: folder) }.value
+        guard scan.exists, scan.count > 0 else {
+            applyCheck(id, broken: true)
+            return .missing
+        }
+        guard let meta = await SteamMeta.fetch(id: id, includePage: false), meta.fileSize > 0 else {
+            recordVerified(id, files: scan.count, bytes: scan.bytes)
+            return .unknown
+        }
+        let ok = Self.sizeMatches(disk: scan.bytes, steam: meta.fileSize)
+        guard ok else {
+            applyCheck(id, broken: true)
+            return .mismatch
+        }
+        recordVerified(id, files: scan.count, bytes: scan.bytes)
+        return .ok
+    }
+
     func verify(_ item: WorkshopItem) {
         guard !isVerifyingAll else { return }
-        let folder = item.folder
+        guard item.isInsideModShelf else {
+            operationMessage = movedMessage(item)
+            return
+        }
         operationMessage = "Validating \(item.displayTitle)…"
         Task { @MainActor in
-            let scan = await Task.detached(priority: .utility) { Self.scan(folder: folder) }.value
-            guard scan.exists, scan.count > 0 else {
-                applyCheck(item.id, broken: true)
-                operationMessage = scan.exists
-                    ? "\(item.displayTitle) has no files left. Download it again."
-                    : "\(item.displayTitle) is missing from its folder."
-                return
+            switch await checkFiles(id: item.id, folder: item.folder) {
+            case .ok:
+                operationMessage = "\(item.displayTitle) matches Steam."
+            case .mismatch:
+                operationMessage = "\(item.displayTitle) doesn't match Steam. Download it again to repair it."
+            case .missing:
+                operationMessage = "\(item.displayTitle) has no files in its folder. Download it again."
+            case .unknown:
+                operationMessage = "\(item.displayTitle) is still there, but Steam has no size to compare."
             }
-            guard let meta = await SteamMeta.fetch(id: item.id, includePage: false), meta.fileSize > 0 else {
-                operationMessage = "Couldn't check \(item.displayTitle) with Steam."
-                return
-            }
-            let ok = Self.sizeMatches(disk: scan.bytes, steam: meta.fileSize)
-            applyCheck(item.id, broken: !ok)
-            operationMessage = ok
-                ? "\(item.displayTitle) matches Steam (\(Fmt.bytes(scan.bytes)))."
-                : "\(item.displayTitle) doesn't match Steam (\(Fmt.bytes(scan.bytes)) here, \(Fmt.bytes(meta.fileSize)) expected)."
         }
     }
 
     func verifyAllFiles() {
         guard !isVerifyingAll else { return }
-        guard !library.isEmpty else { operationMessage = "Your library is empty."; return }
+        guard !library.isEmpty else { return }
         isVerifyingAll = true
-        let entries = library.map { ($0.id, $0.displayTitle, $0.folder) }
+        let entries = library.map { (id: $0.id, title: $0.displayTitle, folder: $0.folder, inside: $0.isInsideModShelf) }
         Task { @MainActor in
-            var localTotal: Int64 = 0
-            var steamTotal: Int64 = 0
-            var mismatches: [String] = []
-            var checked = 0
+            var ok = 0
+            var missing = 0
+            var unknown = 0
+            var moved = 0
+            var changed: [String] = []
             for (index, entry) in entries.enumerated() {
+                guard entry.inside else { moved += 1; continue }
                 operationMessage = "Validating \(index + 1) of \(entries.count)…"
-                let folder = entry.2
-                let scan = await Task.detached(priority: .utility) { Self.scan(folder: folder) }.value
-                guard scan.exists, scan.count > 0 else {
-                    applyCheck(entry.0, broken: true)
-                    mismatches.append(entry.1)
-                    continue
+                switch await checkFiles(id: entry.id, folder: entry.folder) {
+                case .ok: ok += 1
+                case .missing: missing += 1
+                case .unknown: unknown += 1
+                case .mismatch: changed.append(entry.title)
                 }
-                guard let meta = await SteamMeta.fetch(id: entry.0, includePage: false), meta.fileSize > 0 else { continue }
-                checked += 1
-                localTotal += scan.bytes
-                steamTotal += meta.fileSize
-                let ok = Self.sizeMatches(disk: scan.bytes, steam: meta.fileSize)
-                applyCheck(entry.0, broken: !ok)
-                if !ok { mismatches.append(entry.1) }
-                try? await Task.sleep(nanoseconds: 300_000_000)
+                if index + 1 < entries.count { try? await Task.sleep(nanoseconds: 250_000_000) }
             }
             isVerifyingAll = false
-            operationMessage = mismatches.isEmpty
-                ? "All \(checked) mods match Steam (\(Fmt.bytes(localTotal)) of \(Fmt.bytes(steamTotal)))."
-                : "\(mismatches.count) of \(checked) mods don't match Steam: \(mismatches.joined(separator: ", "))."
+            var parts: [String] = []
+            if ok > 0 { parts.append(ok == 1 ? "1 mod matches Steam" : "\(ok) mods match Steam") }
+            if !changed.isEmpty {
+                parts.append(changed.count == 1 ? "1 doesn't match" : "\(changed.count) don't match")
+            }
+            if missing > 0 { parts.append(missing == 1 ? "1 has no files" : "\(missing) have no files") }
+            if unknown > 0 { parts.append(unknown == 1 ? "1 couldn't be compared" : "\(unknown) couldn't be compared") }
+            if moved > 0 { parts.append(moved == 1 ? "1 moved out of ModShelf" : "\(moved) moved out of ModShelf") }
+            operationMessage = parts.isEmpty ? "Nothing to validate." : parts.joined(separator: ", ") + "."
         }
     }
 
@@ -1763,15 +1710,17 @@ final class WorkshopStore: ObservableObject {
     func checkUpdates(_ item: WorkshopItem) {
         guard !isCheckingUpdates else { operationMessage = "An update check is already running."; return }
         isCheckingUpdates = true
-        operationMessage = "Checking for updates…"
+        operationMessage = "Checking \(item.displayTitle)…"
         Task { @MainActor in
             let success = await refreshMetadata(for: item, full: true)
             isCheckingUpdates = false
-            if success, let latest = library.first(where: { $0.id == item.id }) {
-                operationMessage = latest.updateAvailable ? "Update available: \(latest.displayTitle)" : "\(latest.displayTitle) is up to date."
-            } else {
-                operationMessage = "Couldn't check item \(item.id). It may be private or deleted."
+            guard success, let latest = library.first(where: { $0.id == item.id }) else {
+                operationMessage = "Couldn't check this mod with Steam."
+                return
             }
+            operationMessage = latest.updateAvailable
+                ? "An update is available for \(latest.displayTitle)."
+                : "\(latest.displayTitle) is up to date."
         }
     }
 
@@ -1799,6 +1748,9 @@ final class WorkshopStore: ObservableObject {
         if !meta.tags.isEmpty { library[index].tags = meta.tags }
         if meta.rating != nil { library[index].rating = meta.rating; library[index].ratingCount = meta.ratingCount }
         saveLibrary()
+        if let app = library[index].appID, let game = library[index].gameName, !game.isEmpty {
+            renameGameFolder(appID: app, to: game)
+        }
         return true
     }
 
@@ -1810,7 +1762,7 @@ final class WorkshopStore: ObservableObject {
         Task { @MainActor in
             var checked = 0, updated = 0, failed = 0
             for item in entries {
-                if !silent { operationMessage = "Checking updates: \(checked + failed + 1) of \(entries.count)…" }
+                if !silent { operationMessage = "Checking \(checked + failed + 1) of \(entries.count)…" }
                 if await refreshMetadata(for: item, full: false) {
                     checked += 1
                     if library.first(where: { $0.id == item.id })?.updateAvailable == true { updated += 1 }
@@ -1820,8 +1772,12 @@ final class WorkshopStore: ObservableObject {
             isCheckingUpdates = false
             if silent {
                 operationMessage = updated > 0 ? "\(updated) mod update\(updated == 1 ? "" : "s") available." : ""
+            } else if checked == 0 {
+                operationMessage = "Couldn't check for updates."
             } else {
-                operationMessage = "Update check complete: \(checked) checked, \(updated) update(s) available, \(failed) failed."
+                var parts: [String] = [updated > 0 ? "\(updated) update\(updated == 1 ? "" : "s") available" : "Everything is up to date"]
+                if failed > 0 { parts.append("\(failed) couldn't be checked") }
+                operationMessage = parts.joined(separator: ", ") + "."
             }
         }
     }
@@ -1831,8 +1787,14 @@ final class WorkshopStore: ObservableObject {
         guard !didLaunchChecks else { return }
         didLaunchChecks = true
         var changed = false
+        let fm = FileManager.default
         for i in library.indices {
-            let missing = !FileManager.default.fileExists(atPath: library[i].folder)
+            // A mod the user moved out of ModShelf has no files here to look at, and that is not an error.
+            guard library[i].isInsideModShelf else {
+                if library[i].filesBroken { library[i].filesBroken = false; changed = true }
+                continue
+            }
+            let missing = !fm.fileExists(atPath: library[i].folder)
             if library[i].filesBroken != missing { library[i].filesBroken = missing; changed = true }
         }
         if changed { saveLibrary() }
@@ -1849,14 +1811,10 @@ final class WorkshopStore: ObservableObject {
         do {
             try FileManager.default.createDirectory(at: temporaryPath, withIntermediateDirectories: true)
             for url in try FileManager.default.contentsOfDirectory(at: temporaryPath, includingPropertiesForKeys: nil) { try FileManager.default.removeItem(at: url) }
-            // Leftover partial downloads and replaced copies from interrupted sessions, in every folder
-            // ModShelf writes to.
             // Leftover partial downloads and replaced copies from interrupted sessions.
-            for root in [downloadsRoot] {
-                for url in visibleAndHidden(root)
-                where url.lastPathComponent.hasPrefix(".partial-") || url.lastPathComponent.hasPrefix(".modshelf-replacing-") {
-                    try? FileManager.default.removeItem(at: url)
-                }
+            for url in visibleAndHidden(downloadsRoot)
+            where url.lastPathComponent.hasPrefix(".partial-") || url.lastPathComponent.hasPrefix(".modshelf-replacing-") {
+                try? FileManager.default.removeItem(at: url)
             }
             status = "Temporary files cleared"
             operationMessage = "Temporary files cleared."
@@ -2079,6 +2037,8 @@ struct StatusGlyph: View {
             Image(systemName: "arrow.down.circle.fill").font(.system(size: size)).foregroundStyle(Color.accentColor)
         case .unverified:
             Image(systemName: "exclamationmark.triangle.fill").font(.system(size: size)).foregroundStyle(Color.yellow)
+        case .moved:
+            Image(systemName: "folder").font(.system(size: size)).foregroundStyle(Color.secondary)
         }
     }
 }
@@ -2332,7 +2292,7 @@ struct ContentView: View {
         let filtered = store.library.filter { item in
             if libraryFilter == "Favourites" && !item.isFavourite { return false }
             if libraryFilter == "Updates" && !item.updateAvailable { return false }
-            if libraryFilter == "Problems" && !(item.filesBroken || item.checkFailed) { return false }
+            if libraryFilter == "Problems" && !(item.filesBroken || item.checkFailed || !item.isInsideModShelf) { return false }
             if let g = selectedGame, item.appID != g { return false }
             if let t = selectedTag, !item.tags.contains(t) { return false }
             if searchText.isEmpty { return true }
@@ -2397,11 +2357,6 @@ struct ContentView: View {
         }
         .sheet(item: $folderSheet) { sheet in
             switch sheet {
-            case .shared:
-                FolderPicker(onPick: { url in
-                    folderSheet = nil
-                    store.setFolder(url)
-                }, onCancel: { folderSheet = nil }, startURL: store.currentRootURL)
             case .moveDestination:
                 FolderPicker(onPick: { url in
                     folderSheet = nil
@@ -2409,7 +2364,7 @@ struct ContentView: View {
                         selection.subtract(moved)
                         if selection.isEmpty { selecting = false }
                     }
-                }, onCancel: { folderSheet = nil }, startURL: store.currentRootURL)
+                }, onCancel: { folderSheet = nil })
             }
         }
         .onChange(of: store.shareURL) { showShare = $0 != nil }
@@ -3160,7 +3115,7 @@ struct ContentView: View {
         switch name {
         case "Updates": return store.library.filter { $0.updateAvailable }.count
         case "Favourites": return store.library.filter { $0.isFavourite }.count
-        case "Problems": return store.library.filter { $0.filesBroken || $0.checkFailed }.count
+        case "Problems": return store.library.filter { $0.filesBroken || $0.checkFailed || !$0.isInsideModShelf }.count
         default: return 0
         }
     }
@@ -3301,6 +3256,7 @@ struct ContentView: View {
     }
 
     private func dateLine(_ item: WorkshopItem) -> (String, Color) {
+        if !item.isInsideModShelf { return ("Moved out of ModShelf", Color.secondary) }
         if item.filesBroken || item.checkFailed { return ("Couldn't verify", Color.yellow) }
         if item.updateAvailable { return ("New update available", Color.orange) }
         if item.updatedAt.timeIntervalSince(item.addedAt) > 60 { return ("Updated \(Fmt.date(item.updatedAt))", Color.secondary) }
@@ -3642,29 +3598,12 @@ struct ContentView: View {
                 divider
                 toggleRow("Write info file into each mod", symbol: "doc.text", isOn: $infoFile)
                 divider
-                HStack(spacing: 6) {
-                    Button { Haptics.tap(); folderSheet = .shared } label: {
-                        rowContent("Shared mod folder", symbol: "folder", detail: store.folderLabel)
-                    }.buttonStyle(.plain)
-                    Button { Haptics.tap(); store.revealFolder(store.currentRootURL) } label: {
-                        Image(systemName: "folder")
-                            .font(.system(size: 13, weight: .semibold)).foregroundStyle(.secondary)
-                            .frame(width: 30, height: 30)
-                            .background(Circle().fill(Color.secondary.opacity(0.12)))
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Open the shared mod folder")
-                }
-                .padding(.trailing, 12)
-                if store.usingCustomFolder {
-                    divider
-                    Button { Haptics.tap(); store.resetCustomFolder() } label: {
-                        rowContent("Reset to default folder", symbol: "arrow.uturn.backward", detail: nil, tint: .accentColor)
-                    }.buttonStyle(.plain)
-                }
-                divider
                 Button { Haptics.tap(); store.clearTemporaryFiles() } label: {
                     rowContent("Clear temporary files", symbol: "trash.slash", detail: nil)
+                }.buttonStyle(.plain)
+                divider
+                Button { Haptics.tap(); store.revealFolder(store.downloadsFolderURL) } label: {
+                    rowContent("Show download folder", symbol: "folder", detail: nil)
                 }.buttonStyle(.plain)
             }
         )
@@ -3887,6 +3826,10 @@ struct ItemDetailPopup: View {
             }
             Text("Installed \(Fmt.date(item.addedAt))" + (item.fileCount.map { " · \($0) files" } ?? "") + (item.byteCount.map { " · \(Fmt.bytes($0))" } ?? ""))
                 .font(.caption).foregroundStyle(.secondary)
+            if let verified = item.lastVerifiedAt {
+                Text((item.isInsideModShelf ? "Files last checked " : "Last known good ") + Fmt.date(verified))
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             HStack(spacing: 10) {
                 Button { Haptics.tap(); onOpenWorkshop() } label: {
                     Label("Workshop", systemImage: "safari").font(.system(size: 14, weight: .semibold))
@@ -3916,6 +3859,7 @@ struct ItemDetailPopup: View {
         case .upToDate: return "Up to date"
         case .needsUpdate: return "Update available"
         case .unverified: return item.filesBroken ? "Files missing or changed" : "Couldn't verify"
+        case .moved: return "Moved out of ModShelf"
         }
     }
 }
