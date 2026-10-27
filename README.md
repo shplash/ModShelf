@@ -80,7 +80,6 @@ Moving a mod into its game is normal use, so ModShelf shows those as moved out r
 The Xcode project is generated with [XcodeGen](https://github.com/yonaskolb/XcodeGen) from `project.yml`:
 
 ```sh
-swift Scripts/make-app-icon.swift   # makes the committed icon a valid 1024x1024 app icon
 xcodegen generate
 xcodebuild -project ModShelf.xcodeproj -scheme WorkshopDownloader -sdk iphoneos build
 ```
