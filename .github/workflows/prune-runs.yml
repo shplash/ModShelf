@@ -1,7 +1,7 @@
 name: Prune workflow runs
 
-# Deletes every workflow run except the newest one. The run this creates is itself the newest, so
-# it survives, which is what you want: dispatch it and come back to a clean Actions list.
+# Deletes every workflow run except the two newest. The run this creates counts as one of them, so
+# the run before it is kept as well: dispatch it and come back to a clean Actions list.
 
 on:
   workflow_dispatch:
@@ -16,11 +16,11 @@ concurrency:
 
 jobs:
   prune:
-    name: Keep the newest run, delete the rest
+    name: Keep the two newest runs, delete the rest
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Delete all but the newest run
+      - name: Delete all but the two newest runs
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -33,15 +33,16 @@ jobs:
             | sort -k3 -r > runs.tsv
 
           total=$(wc -l < runs.tsv | tr -d ' ')
-          if [ "$total" -le 1 ]; then
+          if [ "$total" -le 2 ]; then
             echo "Only $total run(s); nothing to delete."
             exit 0
           fi
 
-          keep=$(head -n1 runs.tsv | cut -f1)
-          echo "Keeping run $keep (the newest of $total)."
+          # This run is the newest, so the one just behind it is the last real build to keep.
+          kept=$(head -n2 runs.tsv | cut -f1 | tr '\n' ' ')
+          echo "Keeping runs $kept (newest two of $total)."
 
-          tail -n +2 runs.tsv | while IFS=$'\t' read -r id status created; do
+          tail -n +3 runs.tsv | while IFS=$'\t' read -r id status created; do
             case "$status" in
               in_progress|queued|requested|waiting|pending)
                 echo "Skipping $id: $status"
