@@ -188,4 +188,11 @@ jobs:
           fi
           cp ModShelf.ipa "ModShelf-$VERSION-$BUILD.ipa"
           gh release upload "$TAG" "ModShelf-$VERSION-$BUILD.ipa" --clobber --repo "$GITHUB_REPOSITORY"
+          # Keep only the newest build on the draft.
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' |
+            while read -r asset; do
+              [ -z "$asset" ] && continue
+              [ "$asset" = "ModShelf-$VERSION-$BUILD.ipa" ] && continue
+              gh release delete-asset "$TAG" "$asset" --yes --repo "$GITHUB_REPOSITORY" || true
+            done
 

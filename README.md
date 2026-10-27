@@ -86,8 +86,8 @@ xcodebuild -project ModShelf.xcodeproj -scheme WorkshopDownloader -sdk iphoneos 
 
 The Steam engine is a Go module bound to iOS with `gomobile`. `.github/workflows/build-ipa.yml`
 builds `SteamEngine.xcframework` from `ios-engine/`, packages an ad-hoc signed IPA and attaches it to a
-private draft release ("ModShelf builds"), which only people with write access can see; releases are
-published by hand from that build.
+private draft release ("ModShelf builds") that keeps only the latest build; only people with write
+access can see it, and releases are published by hand from that build.
 
 ## Notes
 
