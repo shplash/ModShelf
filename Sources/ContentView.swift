@@ -2738,7 +2738,7 @@ struct ContentView: View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
                 brandLogo
-                    .overlay(alignment: .bottom) {
+                    .overlay(alignment: .bottomLeading) {
                         versionBadge
                     }
                 Spacer()
@@ -3880,39 +3880,41 @@ struct ContentView: View {
     private var aboutSettings: AnyView {
         AnyView(
             settingsGroup("About") {
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack(spacing: 8) {
-                        brandLogo
+                Button { Haptics.tap(); store.checkForAppUpdate() } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                            .font(.system(size: 16)).foregroundStyle(.secondary).frame(width: 24)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Check for app updates").font(.system(size: 16))
+                            if !store.appUpdateMessage.isEmpty {
+                                Text(store.appUpdateMessage).font(.system(size: 12))
+                                    .foregroundStyle(.secondary).lineLimit(2)
+                            }
+                        }
                         Spacer(minLength: 8)
-                        Text("v\(modShelfVersion)")
-                            .font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
+                        VStack(alignment: .trailing, spacing: 1) {
+                            Text("v\(modShelfVersion)").font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                            Text("build \(modShelfBuild)").font(.system(size: 11))
+                                .foregroundStyle(.tertiary)
+                        }
                     }
-                    Text("Build \(modShelfBuild) · A native SwiftUI Steam Workshop downloader.")
-                        .font(.system(size: 12)).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 15).padding(.vertical, 11).contentShape(Rectangle())
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 15).padding(.vertical, 12)
+                .buttonStyle(.plain)
+                .disabled(store.isCheckingAppUpdate)
 
                 divider
                 linkRow("GitHub", symbol: "chevron.left.forwardslash.chevron.right", detail: WorkshopStore.appRepo,
                         url: "https://github.com/\(WorkshopStore.appRepo)")
                 divider
                 linkRow("Report a bug", symbol: "ladybug", detail: nil,
-                        url: "https://github.com/\(WorkshopStore.appRepo)/issues/new?labels=bug&title=Bug%3A%20")
+                        url: "https://github.com/\(WorkshopStore.appRepo)/issues/new?template=bug_report.yml")
                 divider
                 linkRow("Request a feature", symbol: "lightbulb", detail: nil,
-                        url: "https://github.com/\(WorkshopStore.appRepo)/issues/new?labels=enhancement&title=Feature%3A%20")
+                        url: "https://github.com/\(WorkshopStore.appRepo)/issues/new?template=feature_request.yml")
                 divider
                 linkRow("Support ModShelf", symbol: "heart", detail: "ko-fi.com/shplash", url: "https://ko-fi.com/shplash")
-                divider
-                Button { Haptics.tap(); store.checkForAppUpdate() } label: {
-                    rowContent("Check for app updates", symbol: "arrow.triangle.2.circlepath",
-                               detail: store.appUpdateMessage.isEmpty ? "v\(modShelfVersion) (build \(modShelfBuild))" : store.appUpdateMessage,
-                               chevron: false)
-                }
-                .buttonStyle(.plain)
-                .disabled(store.isCheckingAppUpdate)
             }
         )
     }
