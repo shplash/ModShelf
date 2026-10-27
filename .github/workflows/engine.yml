@@ -2,6 +2,9 @@ name: Steam Engine
 
 on:
   workflow_dispatch:
+  # Weekly, so a change in go-steam upstream shows up before a build does.
+  schedule:
+    - cron: '0 6 * * 1'
 
 permissions:
   contents: read
