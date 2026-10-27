@@ -697,17 +697,19 @@ final class WorkshopStore: ObservableObject {
     /// install, or LiveContainer's chain when the app is running inside it.
     nonisolated static func readablePath(_ url: URL) -> String {
         let path = url.path
-        // LiveContainer keeps the app inside its own folder, so the path from there on is the true
-        // one Files shows, without the /var/mobile boilerplate or a made-up app name in front.
-        if let range = path.range(of: "LiveContainer/", options: [.caseInsensitive]) {
-            return String(path[range.lowerBound...])
-        }
         let name = (Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
             ?? (Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String)
             ?? "ModShelf"
-        // A normal install: from the app's own Documents folder down, as Files shows it.
+        // Everything from the first Documents folder down is how Files shows it. Inside LiveContainer
+        // that folder belongs to LiveContainer itself, so its name goes in front, not ModShelf's.
         if let docs = path.range(of: "/Documents") {
-            return name + String(path[docs.upperBound...])
+            let tail = String(path[docs.upperBound...])
+            let inLiveContainer = Bundle.main.bundlePath.range(of: "/Documents/Applications/") != nil
+                || path.range(of: "/Documents/Applications/") != nil
+            return (inLiveContainer ? "LiveContainer" : name) + tail
+        }
+        if let range = path.range(of: "LiveContainer/", options: [.caseInsensitive]) {
+            return String(path[range.lowerBound...])
         }
         var stripped = path
         for prefix in ["/private/var/mobile/Containers/", "/var/mobile/Containers/",
@@ -1204,10 +1206,14 @@ final class WorkshopStore: ObservableObject {
         if successStatus, !stagingPath.isEmpty {
             do {
                 let existing = library.first(where: { $0.id == activeID })
+                let previousVersion = existing?.publishedUpdatedAt ?? 0
                 let done = try finalizeDownload(staging: staging, id: activeID, meta: meta, existing: existing)
                 var item = existing ?? WorkshopItem(id: activeID, folder: done.url.path, addedAt: Date(), updatedAt: Date())
                 item.folder = done.url.path
-                item.updatedAt = Date()
+                // The "Updated" date only moves when the Workshop version really changed, so
+                // re-installing the same version is not reported as an update.
+                let sameVersion = previousVersion > 0 && meta.updatedAt == previousVersion
+                item.updatedAt = sameVersion ? (existing?.updatedAt ?? Date()) : Date()
                 item.title = meta.title
                 item.description = meta.description.isEmpty ? item.description : meta.description
                 item.imageURL = meta.imageURL.isEmpty ? item.imageURL : meta.imageURL
@@ -1241,6 +1247,9 @@ final class WorkshopStore: ObservableObject {
             updateHistory(id: activeID, result: "Downloaded", error: nil)
             refreshLibraryBytes()
             resolveGameNames()
+            // An update carries the metadata the mod already had, so Workshop is asked once more for
+            // the version that really landed, and the info file is rewritten with it.
+            refreshInstalledMetadata(id: activeID)
             lastOutcome = "Download completed"
             Haptics.success()
         } else {
@@ -1381,7 +1390,9 @@ final class WorkshopStore: ObservableObject {
             let n = meta.ratingCount.map { " from \($0) ratings" } ?? ""
             lines.append("Workshop rating: \(Int(r))/5 stars\(n)")
         }
-        if meta.updatedAt > 0 { lines.append("Last updated on Workshop: \(Fmt.date(unix: meta.updatedAt))") }
+        if meta.updatedAt > 0 {
+            lines.append("Last updated on Workshop: \(stamp.string(from: Date(timeIntervalSince1970: TimeInterval(meta.updatedAt))))")
+        }
         lines.append("")
         lines.append("Installed on: \(stamp.string(from: Date()))")
         lines.append("Installed with: ModShelf \(modShelfVersion) (build \(modShelfBuild))")
@@ -1389,6 +1400,34 @@ final class WorkshopStore: ObservableObject {
         lines.append("")
         lines.append("This file is written by ModShelf and is safe to delete or leave as is, turn future info files off in ModShelf's options.")
         return lines.joined(separator: "\n")
+    }
+
+    /// Rewrites the info file inside a mod's folder with the freshest Workshop numbers, so an update
+    /// never leaves the previous version's dates in it.
+    private func rewriteInfoFile(_ item: WorkshopItem, meta: WorkshopMetadata) {
+        guard UserDefaults.standard.object(forKey: "options.infoFile") as? Bool ?? true else { return }
+        let folder = URL(fileURLWithPath: item.folder, isDirectory: true)
+        guard FileManager.default.fileExists(atPath: folder.path) else { return }
+        let text = infoText(meta: meta, id: item.id, files: item.fileCount ?? 0, bytes: item.lastVerifiedBytes ?? item.byteCount ?? 0,
+                            existing: item, singleMod: false)
+        try? text.write(to: folder.appendingPathComponent(modShelfInfoFileName), atomically: true, encoding: .utf8)
+    }
+
+    /// An update starts from the metadata already stored for the mod, so the new version's date is
+    /// only known once Workshop is asked. This fills it in and refreshes the info file.
+    private func refreshInstalledMetadata(id: String) {
+        Task { @MainActor in
+            guard let fresh = await SteamMeta.fetch(id: id, includePage: false) else { return }
+            guard let index = library.firstIndex(where: { $0.id == id }) else { return }
+            if fresh.updatedAt > 0 { library[index].publishedUpdatedAt = fresh.updatedAt }
+            if !fresh.title.isEmpty { library[index].title = fresh.title }
+            if !fresh.tags.isEmpty { library[index].tags = fresh.tags }
+            if fresh.rating != nil { library[index].rating = fresh.rating; library[index].ratingCount = fresh.ratingCount }
+            if let game = fresh.gameName { library[index].gameName = game }
+            library[index].updateAvailable = false
+            saveLibrary()
+            rewriteInfoFile(library[index], meta: fresh)
+        }
     }
 
     nonisolated static func scan(folder: String) -> (exists: Bool, count: Int, bytes: Int64) {
@@ -3381,9 +3420,8 @@ struct ContentView: View {
                 }
                 .aspectRatio(1, contentMode: .fit)
                 .frame(maxWidth: .infinity)
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .contentShape(Rectangle())
-                    .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .overlay(Rectangle()
                         .stroke(Color.accentColor, lineWidth: picked ? 3 : 0))
             }
             .buttonStyle(.plain)
@@ -3398,7 +3436,7 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 1) {
                     MarqueeText(text: item.displayTitle, fontSize: 14, weight: .semibold,
                                 height: 17, speed: 26 * marqueeSpeed,
-                                active: selectedTab == 2 && marqueeSpeed >= 0.5,
+                                active: selectedTab == 2 && marqueeSpeed >= 0.25,
                                 restartToken: marqueeToken)
                     HStack(spacing: 6) {
                         if item.rating != nil {
@@ -3444,9 +3482,7 @@ struct ContentView: View {
                 HStack(spacing: 12) {
                     Color.clear.frame(width: 84, height: 84)
                         .overlay(CachedImage(urlString: item.imageURL, fill: true, maxPixel: 300).allowsHitTesting(false))
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .stroke(Color.accentColor, lineWidth: picked ? 3 : 0))
+                        .overlay(Rectangle().stroke(Color.accentColor, lineWidth: picked ? 3 : 0))
                     VStack(alignment: .leading, spacing: 4) {
                         Text(item.displayTitle).font(.system(size: 15, weight: .semibold)).lineLimit(2).multilineTextAlignment(.leading)
                         HStack(spacing: 6) {
@@ -3544,7 +3580,6 @@ struct ContentView: View {
         return HStack(alignment: .top, spacing: 12) {
             Color.clear.frame(width: 56, height: 56)
                 .overlay(CachedImage(urlString: record.imageURL, fill: true, maxPixel: 200))
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             VStack(alignment: .leading, spacing: 5) {
                 Text(record.title).font(.system(size: 15, weight: .semibold)).lineLimit(2)
                 HStack(spacing: 6) {
@@ -3667,7 +3702,7 @@ struct ContentView: View {
                 toggleRow("Haptic feedback", symbol: "iphone.radiowaves.left.and.right", isOn: $haptics)
                 divider
                 row("Scrolling text speed", symbol: "speedometer") {
-                    Text(marqueeSpeed < 0.5 ? "Off" : String(format: "%.2f×", marqueeSpeed))
+                    Text(marqueeSpeed < 0.25 ? "Off" : String(format: "%.2f×", marqueeSpeed))
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(.secondary).monospacedDigit()
                 }
@@ -3918,40 +3953,41 @@ struct ItemDetailPopup: View {
                 // Bigger artwork, with the text block matching its height: the name sits on the top
                 // edge and the state on the bottom edge.
                 CachedImage(urlString: item.imageURL, fill: true, maxPixel: 400)
-                    .frame(width: 96, height: 96).clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                VStack(alignment: .leading, spacing: 4) {
+                    .frame(width: 108, height: 108).clipShape(Rectangle())
+                VStack(alignment: .leading, spacing: 3) {
                     Text(item.displayTitle).font(.headline).lineLimit(2)
                     RatingLine(rating: item.rating, count: item.ratingCount, size: 13)
                     if let game = item.gameName { Text(game).font(.footnote).foregroundStyle(.secondary).lineLimit(1) }
-                    Spacer(minLength: 2)
                     HStack(spacing: 6) {
                         StatusGlyph(status: item.status, size: 15)
                         Text(statusText).font(.system(size: 13, weight: .semibold)).lineLimit(1).minimumScaleFactor(0.7)
                     }
+                    .padding(.top, 1)
                 }
-                .frame(height: 96, alignment: .top)
-                .padding(.trailing, 26)
+                .frame(height: 108, alignment: .top)
+                .padding(.trailing, 28)
+                Spacer(minLength: 0)
             }
             .overlay(alignment: .topTrailing) {
                 Button(action: onClose) { Image(systemName: "xmark.circle.fill").font(.title2).foregroundStyle(.secondary) }
                     .accessibilityLabel("Close")
             }
             if let d = item.description, !d.isEmpty {
-                ScrollView { ExpandableDescription(text: d, lineLimit: 5) }.frame(maxHeight: 130)
+                ScrollView { ExpandableDescription(text: d, lineLimit: 7) }.frame(maxHeight: 170)
             }
             if !item.tags.isEmpty {
                 Text(item.tags.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary).lineLimit(2)
             }
-            Text("Installed \(Fmt.date(item.addedAt))" + (item.fileCount.map { " · \($0) files" } ?? "") + (item.byteCount.map { " · \(Fmt.bytes($0))" } ?? ""))
-                .font(.caption).foregroundStyle(.secondary)
-            if let verified = item.lastVerifiedAt {
-                Text((item.isInsideModShelf ? "Files last checked " : "Last known good ") + Fmt.date(verified))
-                    .font(.caption).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(installedLine)
+                if let verified = item.lastVerifiedAt {
+                    Text((item.isInsideModShelf ? "Files last checked " : "Last known good ") + Fmt.date(verified))
+                }
+                if showIDs {
+                    Text("Workshop ID \(item.id)").font(.system(size: 12, design: .monospaced))
+                }
             }
-            if showIDs {
-                Text("Workshop ID \(item.id)")
-                    .font(.system(size: 12, weight: .regular, design: .monospaced)).foregroundStyle(.secondary)
-            }
+            .font(.system(size: 12)).foregroundStyle(.secondary)
             HStack(spacing: 10) {
                 Button { Haptics.tap(); onOpenWorkshop() } label: {
                     Label("Workshop", systemImage: "safari").font(.system(size: 14, weight: .semibold))
@@ -3978,6 +4014,13 @@ struct ItemDetailPopup: View {
         .padding(16)
         .background(RoundedRectangle(cornerRadius: 20, style: .continuous).fill(Color(uiColor: .secondarySystemGroupedBackground)))
         .shadow(color: .black.opacity(0.3), radius: 20, y: 8)
+    }
+
+    private var installedLine: String {
+        var text = "Installed \(Fmt.date(item.addedAt))"
+        if let files = item.fileCount { text += " · \(files) files" }
+        if let bytes = item.byteCount { text += " · \(Fmt.bytes(bytes))" }
+        return text
     }
 
     private var statusText: String {
@@ -5096,7 +5139,6 @@ struct BrowserHome: View {
                         .frame(maxWidth: .infinity)
                         .frame(height: 54)
                         .overlay(CachedImage(urlString: hit.tiny_image, fill: true, maxPixel: 300))
-                        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                     Text(hit.name)
                         .font(.system(size: 12, weight: .semibold)).lineLimit(1)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -5116,7 +5158,6 @@ struct BrowserHome: View {
                 HStack(spacing: 12) {
                     CachedImage(urlString: hit.tiny_image, fill: true, maxPixel: 120)
                         .frame(width: 46, height: 46)
-                        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                     Text(hit.name)
                         .font(.system(size: 15, weight: .semibold)).lineLimit(2)
                         .frame(maxWidth: .infinity, alignment: .leading)
