@@ -5,7 +5,7 @@
 <h1 align="center">ModShelf</h1>
 
 <p align="center">
-  Steam Workshop downloader for iPhone
+  Steam Workshop downloader for iOS
 </p>
 
 <p align="center">
