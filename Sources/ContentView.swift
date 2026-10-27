@@ -400,6 +400,9 @@ struct CachedImage: View {
                 Image(systemName: "shippingbox").font(.title2).foregroundStyle(.tertiary)
             }
         }
+        // A filled image is scaled up to cover its frame, so anything outside that frame has to be
+        // cut off or it spills over neighbouring rows and cards.
+        .clipped()
         .task(id: (urlString ?? "") + (animate ? "|1" : "|0")) {
             guard let s = urlString, !s.isEmpty, let url = URL(string: s) else { image = nil; return }
             if let hit = ImageStore.shared.cached(url, animate: animate) { image = hit; return }
@@ -2325,7 +2328,7 @@ struct ContentView: View {
     private let sortGroups: [[String]] = [
         ["Recently added", "Recently updated", "Oldest added"],
         ["Name", "Game"],
-        ["Largest first"],
+        ["Largest first", "Smallest first"],
         ["Updates first", "Highest rated", "Favourites first"]
     ]
     private var sortOrders: [String] { sortGroups.flatMap { $0 } }
@@ -2373,7 +2376,14 @@ struct ContentView: View {
         case "Recently updated": return filtered.sorted { ($0.publishedUpdatedAt ?? 0) > ($1.publishedUpdatedAt ?? 0) }
         case "Oldest added": return filtered.sorted { $0.addedAt < $1.addedAt }
         case "Largest first": return filtered.sorted { ($0.byteCount ?? 0) > ($1.byteCount ?? 0) }
-        case "Highest rated": return filtered.sorted { ($0.rating ?? -1) > ($1.rating ?? -1) }
+        case "Smallest first": return filtered.sorted { ($0.byteCount ?? Int64.max) < ($1.byteCount ?? Int64.max) }
+        case "Highest rated": return filtered.sorted { a, b in
+            let ra = a.rating ?? -1, rb = b.rating ?? -1
+            if ra != rb { return ra > rb }
+            let ca = a.ratingCount ?? 0, cb = b.ratingCount ?? 0
+            if ca != cb { return ca > cb }
+            return a.displayTitle.localizedCaseInsensitiveCompare(b.displayTitle) == .orderedAscending
+        }
         case "Favourites first": return filtered.sorted { $0.isFavourite && !$1.isFavourite }
         default: return filtered.sorted { $0.addedAt > $1.addedAt }
         }
@@ -3347,23 +3357,6 @@ struct ContentView: View {
                 listRow(item)
                     .listRowInsets(EdgeInsets())
                     .listRowBackground(Color(uiColor: .systemGroupedBackground))
-                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                        Button(role: .destructive) { store.requestDelete(item) } label: {
-                            Label("Delete", systemImage: "trash")
-                        }
-                    }
-                    .swipeActions(edge: .leading, allowsFullSwipe: false) {
-                        if item.updateAvailable {
-                            Button { Haptics.tap(); store.update(item); selectedTab = 0 } label: {
-                                Label("Update", systemImage: "arrow.down.circle")
-                            }
-                            .tint(Color.accentColor)
-                        }
-                        Button { store.toggleFavourite(item) } label: {
-                            Label(item.isFavourite ? "Unfavourite" : "Favourite", systemImage: item.isFavourite ? "star.slash" : "star")
-                        }
-                        .tint(.yellow)
-                    }
             }
             // Keeps the last row clear of the tab bar.
             Color.clear.frame(height: tabBarReserve)
@@ -4216,34 +4209,12 @@ struct ExpandableDescription: View {
     }
 }
 
-/// A video in the media strip: its YouTube thumbnail with a play mark. YouTube's embedded player
-/// cannot be restyled, so the video only plays in the full-screen viewer, where its own progress
-/// bar and controls live.
-struct VideoPoster: View {
-    let videoID: String
-
-    var body: some View {
-        ZStack {
-            CachedImage(urlString: "https://img.youtube.com/vi/\(videoID)/hqdefault.jpg", fill: true, maxPixel: 800)
-            Color.black.opacity(0.25)
-            Image(systemName: "play.circle.fill")
-                .font(.system(size: 52, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.95))
-                .shadow(color: .black.opacity(0.45), radius: 10, y: 4)
-        }
-        .contentShape(Rectangle())
-        .accessibilityLabel("Play video")
-    }
-}
-
 struct MediaCarousel: View {
     let media: [MediaItem]
     @Binding var index: Int
     var onExpand: (MediaItem, Int) -> Void = { _, _ in }
     /// The page that was showing before the swipe, so only a video being left is paused.
     @State private var lastIndex = 0
-    /// A video started from its poster plays in place, with YouTube's own controls.
-    @State private var playingVideo: String?
 
     init(media: [MediaItem], index: Binding<Int>, onExpand: @escaping (MediaItem, Int) -> Void = { _, _ in }) {
         self.media = media
@@ -4266,17 +4237,8 @@ struct MediaCarousel: View {
                             })
                             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                         case .video(let id):
-                            if playingVideo == id {
-                                YouTubePlayerView(videoID: id)
-                                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                            } else {
-                                // The embedded player's own chrome stays out of the strip until it is
-                                // asked for: a poster with a play mark starts it in place.
-                                Button { Haptics.tap(); playingVideo = id } label: {
-                                    VideoPoster(videoID: id)
-                                }
-                                .buttonStyle(.plain)
-                            }
+                            YouTubePlayerView(videoID: id)
+                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                         }
                     }
                     .padding(.horizontal, 2)
@@ -4290,8 +4252,6 @@ struct MediaCarousel: View {
                 if media.indices.contains(lastIndex), case .video = media[lastIndex] {
                     YouTubePlayers.shared.pause()
                 }
-                // Leaving a page stops its video, so coming back shows the poster again.
-                if playingVideo != nil { playingVideo = nil }
                 lastIndex = newIndex
             }
             if media.count > 1 {
@@ -5193,29 +5153,32 @@ struct BrowserHome: View {
     }
 
     private var favouritesGrid: some View {
-        LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
-            ForEach(Array(favourites.prefix(4))) { hit in favouriteTile(hit) }
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 10) {
+                ForEach(favourites) { hit in favouriteTile(hit) }
+            }
+            .padding(.vertical, 2)
         }
     }
 
+    /// A compact launcher tile: a square cover with the star in its corner, the name underneath.
     private func favouriteTile(_ hit: GameHit) -> some View {
-        Button { openGame(hit) } label: {
-            VStack(alignment: .leading, spacing: 6) {
-                Color.clear
-                    .aspectRatio(1, contentMode: .fit)
-                    .overlay(CachedImage(urlString: hit.tiny_image, fill: true, maxPixel: 300))
-                    .overlay(alignment: .topTrailing) { starButton(hit).padding(4) }
-                Text(hit.name)
-                    .font(.system(size: 12, weight: .semibold)).lineLimit(2)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .multilineTextAlignment(.leading)
+        ZStack(alignment: .topTrailing) {
+            Button { openGame(hit) } label: {
+                VStack(spacing: 5) {
+                    CachedImage(urlString: hit.tiny_image, fill: true, maxPixel: 240)
+                        .frame(width: 76, height: 76)
+                        .clipped()
+                    Text(hit.name)
+                        .font(.system(size: 11, weight: .semibold)).lineLimit(1)
+                        .frame(width: 76)
+                }
+                .contentShape(Rectangle())
             }
-            .padding(7)
-            .frame(maxWidth: .infinity)
-            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color(uiColor: .secondarySystemGroupedBackground)))
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+            starButton(hit)
         }
-        .buttonStyle(.plain)
+        .frame(width: 76)
     }
 
     private func gameRow(_ hit: GameHit) -> some View {
