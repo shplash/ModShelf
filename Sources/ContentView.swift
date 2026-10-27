@@ -14,7 +14,8 @@ struct ModShelfApp: App {
 
 let modShelfInfoFileName = "ModShelf Information.txt"
 let modShelfVersion = "1.0"
-let modShelfBuild = "90"
+/// The build number CI stamps in, taken from the bundle so it follows the commit count.
+let modShelfBuild = (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String) ?? "1"
 
 // MARK: - Models
 

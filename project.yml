@@ -28,7 +28,7 @@ targets:
       properties:
         CFBundleDisplayName: ModShelf
         CFBundleShortVersionString: "1.0"
-        CFBundleVersion: "90"
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
         UILaunchScreen: {}
@@ -44,7 +44,8 @@ targets:
         PRODUCT_NAME: ModShelf
         TARGETED_DEVICE_FAMILY: "1"
         MARKETING_VERSION: "1.0"
-        CURRENT_PROJECT_VERSION: "90"
+        # Overridden by CI with the commit count; a local build gets this default.
+        CURRENT_PROJECT_VERSION: "1"
         # The icon is drawn by Scripts/make-app-icon.swift, so no binary lives in the repository.
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         GENERATE_INFOPLIST_FILE: YES

@@ -105,6 +105,10 @@ jobs:
       - name: Generate the Xcode project
         run: xcodegen generate
 
+      # The build number is the commit count, so every commit gets its own build.
+      - name: Set the build number
+        run: echo "BUILD_NUMBER=$(git rev-list --count HEAD)" >> "$GITHUB_ENV"
+
       # Swift packages and the previous build are keyed on the sources, so a
       # rebuild after an app change still gets the warm DerivedData.
       - name: Restore Swift packages and build output
@@ -127,6 +131,7 @@ jobs:
             -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO \
             COMPILER_INDEX_STORE_ENABLE=NO \
+            CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
             build
 
       - name: Package and sign the IPA
