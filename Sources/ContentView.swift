@@ -19,7 +19,15 @@ let modShelfBuild = "30"
 
 // MARK: - Models
 
-enum ModStatus { case upToDate, needsUpdate, unverified, moved }
+/// What ModShelf can say about a mod: its Workshop state, and whether its files are still here to
+/// be checked. Moving a mod into a game is normal use, so that alone is not a problem.
+enum ModStatus { case upToDate, needsUpdate, moved, notChecked, broken }
+
+extension ModStatus {
+    /// Whether a mod deserves a look in the library: its files are missing or changed, or ModShelf
+    /// has never managed to check it.
+    var needsAttention: Bool { self == .broken || self == .notChecked }
+}
 
 struct WorkshopItem: Identifiable, Codable, Equatable {
     var id: String
@@ -96,9 +104,11 @@ struct WorkshopItem: Identifiable, Codable, Equatable {
     }
 
     var status: ModStatus {
+        if isInsideModShelf && filesBroken { return .broken }
+        if updateAvailable { return .needsUpdate }
+        if checkFailed || lastCheckedAt == nil { return .notChecked }
         if !isInsideModShelf { return .moved }
-        if filesBroken || checkFailed || lastCheckedAt == nil { return .unverified }
-        return updateAvailable ? .needsUpdate : .upToDate
+        return .upToDate
     }
 }
 
@@ -683,6 +693,32 @@ final class WorkshopStore: ObservableObject {
         return defaultRoot
     }
     var downloadsFolderURL: URL { downloadsRoot }
+
+    /// The folder as the Files app shows it, past "On My iPhone": the app's own folder for a normal
+    /// install, or LiveContainer's chain when the app is running inside it.
+    nonisolated static func readablePath(_ url: URL) -> String {
+        let path = url.path
+        if let range = path.range(of: "LiveContainer/", options: [.caseInsensitive]) {
+            return String(path[range.lowerBound...])
+        }
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].path
+        if path.hasPrefix(documents) {
+            let name = (Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
+                ?? (Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String)
+                ?? "ModShelf"
+            return name + String(path.dropFirst(documents.count))
+        }
+        var stripped = path
+        for prefix in ["/private/var/mobile/Containers/", "/var/mobile/Containers/",
+                       "/private/var/mobile/", "/var/mobile/"] where stripped.hasPrefix(prefix) {
+            stripped = String(stripped.dropFirst(prefix.count))
+            break
+        }
+        return stripped
+    }
+
+    /// "ModShelf/Downloaded Mods", as Files shows it.
+    var downloadsFolderLabel: String { Self.readablePath(downloadsFolderURL) }
     private var sessionPath: String {
         let fm = FileManager.default
         let library = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -1584,6 +1620,57 @@ final class WorkshopStore: ObservableObject {
         }
     }
 
+    /// Zips just the chosen mods, so part of a library can be shared without exporting all of it.
+    func export(_ ids: [String]) {
+        let wanted = Set(ids)
+        let chosen = library.filter { wanted.contains($0.id) }
+        guard !chosen.isEmpty else { return }
+        let folders = chosen.filter { FileManager.default.fileExists(atPath: $0.folder) }.map(\.folder)
+        guard !folders.isEmpty else {
+            errorMessage = "Those mods' files aren't in ModShelf any more, so there's nothing to export."
+            return
+        }
+        let name = chosen.count == 1
+            ? Self.sanitizedName(chosen[0].displayTitle, fallback: chosen[0].id)
+            : "ModShelf-Selected"
+        let staging = FileManager.default.temporaryDirectory.appendingPathComponent("ModShelf-Export", isDirectory: true)
+        let zip = FileManager.default.temporaryDirectory.appendingPathComponent("\(name).zip")
+        operationMessage = folders.count == 1
+            ? "Preparing the ZIP…"
+            : "Preparing \(folders.count) mods as one ZIP…"
+        Task { @MainActor in
+            let result = await Task.detached(priority: .utility) { () -> (ok: Bool, skipped: Int) in
+                let fm = FileManager.default
+                try? fm.removeItem(at: staging); try? fm.removeItem(at: zip)
+                do {
+                    try fm.createDirectory(at: staging, withIntermediateDirectories: true)
+                    var skipped = 0
+                    for folder in folders {
+                        let source = URL(fileURLWithPath: folder, isDirectory: true)
+                        guard fm.fileExists(atPath: source.path) else { skipped += 1; continue }
+                        let target = staging.appendingPathComponent(source.lastPathComponent, isDirectory: true)
+                        // Two mods can share a folder name; keep them apart rather than losing one.
+                        let destination = fm.fileExists(atPath: target.path)
+                            ? staging.appendingPathComponent("\(source.lastPathComponent) \(UUID().uuidString.prefix(4))", isDirectory: true)
+                            : target
+                        if (try? fm.copyItem(at: source, to: destination)) == nil { skipped += 1 }
+                    }
+                    try fm.zipItem(at: staging, to: zip, shouldKeepParent: false)
+                    try? fm.removeItem(at: staging)
+                    return (true, skipped)
+                } catch { return (false, 0) }
+            }.value
+            guard result.ok else {
+                operationMessage = "Couldn't build the ZIP."
+                return
+            }
+            operationMessage = result.skipped == 0
+                ? ""
+                : "Skipped \(result.skipped) mod\(result.skipped == 1 ? "" : "s") whose files are no longer in ModShelf."
+            shareURL = zip
+        }
+    }
+
     /// Steam's size and the files on disk are close, not always identical, so allow a small margin.
     nonisolated static func sizeMatches(disk: Int64, steam: Int64) -> Bool {
         let tolerance = max(256 * 1024, steam / 10)
@@ -1721,6 +1808,9 @@ final class WorkshopStore: ObservableObject {
             operationMessage = latest.updateAvailable
                 ? "An update is available for \(latest.displayTitle)."
                 : "\(latest.displayTitle) is up to date."
+            if !latest.isInsideModShelf {
+                operationMessage += "\nIts files are outside ModShelf, so only the Workshop version was checked."
+            }
         }
     }
 
@@ -1760,12 +1850,15 @@ final class WorkshopStore: ObservableObject {
         isCheckingUpdates = true
         let entries = library
         Task { @MainActor in
-            var checked = 0, updated = 0, failed = 0
+            var checked = 0, updated = 0, failed = 0, unverified = 0
             for item in entries {
                 if !silent { operationMessage = "Checking \(checked + failed + 1) of \(entries.count)…" }
                 if await refreshMetadata(for: item, full: false) {
                     checked += 1
-                    if library.first(where: { $0.id == item.id })?.updateAvailable == true { updated += 1 }
+                    if let current = library.first(where: { $0.id == item.id }) {
+                        if current.updateAvailable { updated += 1 }
+                        if !current.isInsideModShelf || current.filesBroken { unverified += 1 }
+                    }
                 } else { failed += 1 }
                 if checked + failed < entries.count { try? await Task.sleep(nanoseconds: 300_000_000) }
             }
@@ -1778,6 +1871,7 @@ final class WorkshopStore: ObservableObject {
                 var parts: [String] = [updated > 0 ? "\(updated) update\(updated == 1 ? "" : "s") available" : "Everything is up to date"]
                 if failed > 0 { parts.append("\(failed) couldn't be checked") }
                 operationMessage = parts.joined(separator: ", ") + "."
+                if unverified > 0 { operationMessage += "\nUnverified mods checked: \(unverified)" }
             }
         }
     }
@@ -2029,16 +2123,45 @@ struct FilterPill: View {
 struct StatusGlyph: View {
     let status: ModStatus
     var size: CGFloat = 14
-    var body: some View {
+    var body: some View { glyph.accessibilityLabel(label) }
+
+    @ViewBuilder private var glyph: some View {
         switch status {
         case .upToDate:
             Image(systemName: "checkmark.circle.fill").font(.system(size: size)).foregroundStyle(Color.green)
+        // Fine, but the files live in a game folder now: a green folder with an arrow in it, so it
+        // reads at a glance without a warning colour or another line of text. The ready-made symbol
+        // only exists on newer iOS, so older versions get the same shape drawn from two symbols.
+        case .moved:
+            if UIImage(systemName: "arrow.forward.folder") != nil {
+                Image(systemName: "arrow.forward.folder")
+                    .font(.system(size: size, weight: .medium)).foregroundStyle(Color.green)
+            } else {
+                ZStack {
+                    Image(systemName: "folder")
+                        .font(.system(size: size, weight: .semibold))
+                    Image(systemName: "arrow.right")
+                        .font(.system(size: size * 0.52, weight: .bold))
+                        .offset(x: size * 0.08, y: size * 0.14)
+                }
+                .foregroundStyle(Color.green)
+            }
         case .needsUpdate:
             Image(systemName: "arrow.down.circle.fill").font(.system(size: size)).foregroundStyle(Color.accentColor)
-        case .unverified:
+        case .notChecked:
+            Image(systemName: "questionmark.circle.fill").font(.system(size: size)).foregroundStyle(Color.secondary)
+        case .broken:
             Image(systemName: "exclamationmark.triangle.fill").font(.system(size: size)).foregroundStyle(Color.yellow)
-        case .moved:
-            Image(systemName: "folder").font(.system(size: size)).foregroundStyle(Color.secondary)
+        }
+    }
+
+    private var label: String {
+        switch status {
+        case .upToDate: return "Up to date"
+        case .moved: return "Up to date, files outside ModShelf"
+        case .needsUpdate: return "Update available"
+        case .notChecked: return "Not checked yet"
+        case .broken: return "Files missing or changed"
         }
     }
 }
@@ -2292,7 +2415,7 @@ struct ContentView: View {
         let filtered = store.library.filter { item in
             if libraryFilter == "Favourites" && !item.isFavourite { return false }
             if libraryFilter == "Updates" && !item.updateAvailable { return false }
-            if libraryFilter == "Problems" && !(item.filesBroken || item.checkFailed || !item.isInsideModShelf) { return false }
+            if libraryFilter == "Problems" && !item.status.needsAttention { return false }
             if let g = selectedGame, item.appID != g { return false }
             if let t = selectedTag, !item.tags.contains(t) { return false }
             if searchText.isEmpty { return true }
@@ -2313,6 +2436,20 @@ struct ContentView: View {
     private func beginMove() {
         Haptics.tap()
         folderSheet = .moveDestination
+    }
+
+    /// "Select and export as ZIP" turns on selection so a subset can be picked, then exported.
+    private func startExportSelection() {
+        Haptics.tap()
+        selection.removeAll()
+        selecting = true
+        store.operationMessage = "Pick the mods to export, then choose Export selected from this menu."
+    }
+
+    private func exportSelection() {
+        guard !selection.isEmpty else { return }
+        Haptics.tap()
+        store.export(Array(selection))
     }
 
     private func toggleSelection(_ item: WorkshopItem) {
@@ -3065,6 +3202,10 @@ struct ContentView: View {
                 Button { selectAllVisible() } label: { Label("Select all", systemImage: "checkmark.circle") }
                 Button { selection.removeAll() } label: { Label("Deselect all", systemImage: "circle.dashed") }
                 Divider()
+                Button { exportSelection() } label: {
+                    Label(selection.isEmpty ? "Export as ZIP" : "Export selected (\(selection.count)) as ZIP", systemImage: "square.and.arrow.up")
+                }
+                .disabled(selection.isEmpty)
                 Button { beginMove() } label: { Label("Move selected (\(selection.count))", systemImage: "folder") }
                     .disabled(selection.isEmpty)
                 Button(role: .destructive) { requestDeleteSelected() } label: {
@@ -3075,7 +3216,10 @@ struct ContentView: View {
                 let pending = store.library.filter { $0.updateAvailable }.count
                 Button { store.updateAll(); selectedTab = 0 } label: { Label("Update all (\(pending))", systemImage: "arrow.down.circle") }
                     .disabled(pending == 0 || store.isBusy)
+                Button { startExportSelection() } label: { Label("Select and export as ZIP", systemImage: "square.and.arrow.up.on.square") }
+                    .disabled(store.library.isEmpty)
                 Button { store.exportAll() } label: { Label("Export all as ZIP", systemImage: "square.and.arrow.up") }
+                    .disabled(store.library.isEmpty)
             }
         } label: { iconLabel("ellipsis", waving: selecting) }
     }
@@ -3115,7 +3259,7 @@ struct ContentView: View {
         switch name {
         case "Updates": return store.library.filter { $0.updateAvailable }.count
         case "Favourites": return store.library.filter { $0.isFavourite }.count
-        case "Problems": return store.library.filter { $0.filesBroken || $0.checkFailed || !$0.isInsideModShelf }.count
+        case "Problems": return store.library.filter { $0.status.needsAttention }.count
         default: return 0
         }
     }
@@ -3256,9 +3400,12 @@ struct ContentView: View {
     }
 
     private func dateLine(_ item: WorkshopItem) -> (String, Color) {
-        if !item.isInsideModShelf { return ("Moved out of ModShelf", Color.secondary) }
-        if item.filesBroken || item.checkFailed { return ("Couldn't verify", Color.yellow) }
-        if item.updateAvailable { return ("New update available", Color.orange) }
+        switch item.status {
+        case .broken: return ("Files missing or changed", Color.yellow)
+        case .needsUpdate: return ("New update available", Color.orange)
+        case .notChecked: return (item.checkFailed ? "Couldn't reach Steam" : "Not checked yet", Color.secondary)
+        case .upToDate, .moved: break
+        }
         if item.updatedAt.timeIntervalSince(item.addedAt) > 60 { return ("Updated \(Fmt.date(item.updatedAt))", Color.secondary) }
         return ("Installed \(Fmt.date(item.addedAt))", Color.secondary)
     }
@@ -3598,12 +3745,21 @@ struct ContentView: View {
                 divider
                 toggleRow("Write info file into each mod", symbol: "doc.text", isOn: $infoFile)
                 divider
+                HStack(spacing: 10) {
+                    rowContent("Mod folder", symbol: "folder", detail: store.downloadsFolderLabel, chevron: false)
+                    Button { Haptics.tap(); store.revealFolder(store.downloadsFolderURL) } label: {
+                        Image(systemName: "folder")
+                            .font(.system(size: 15, weight: .semibold)).foregroundStyle(.secondary)
+                            .frame(width: 36, height: 36)
+                            .background(Circle().fill(Color.secondary.opacity(0.12)))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Open the mod folder")
+                }
+                .padding(.trailing, 12)
+                divider
                 Button { Haptics.tap(); store.clearTemporaryFiles() } label: {
                     rowContent("Clear temporary files", symbol: "trash.slash", detail: nil)
-                }.buttonStyle(.plain)
-                divider
-                Button { Haptics.tap(); store.revealFolder(store.downloadsFolderURL) } label: {
-                    rowContent("Show download folder", symbol: "folder", detail: nil)
                 }.buttonStyle(.plain)
             }
         )
@@ -3706,7 +3862,7 @@ struct ContentView: View {
         .background(Capsule().fill(Color.accentColor.opacity(0.14)))
     }
 
-    private func rowContent(_ title: String, symbol: String, detail: String?, tint: Color = .primary) -> some View {
+    private func rowContent(_ title: String, symbol: String, detail: String?, tint: Color = .primary, chevron: Bool = true) -> some View {
         HStack(spacing: 12) {
             Image(systemName: symbol).font(.system(size: 16)).foregroundStyle(tint == .primary ? Color.secondary : tint).frame(width: 24)
             VStack(alignment: .leading, spacing: 2) {
@@ -3714,7 +3870,7 @@ struct ContentView: View {
                 if let detail { Text(detail).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(2) }
             }
             Spacer(minLength: 0)
-            if tint == .primary { Image(systemName: "chevron.right").font(.caption.bold()).foregroundStyle(.tertiary) }
+            if tint == .primary && chevron { Image(systemName: "chevron.right").font(.caption.bold()).foregroundStyle(.tertiary) }
         }
         .padding(.horizontal, 15).padding(.vertical, 11).contentShape(Rectangle())
     }
@@ -3806,13 +3962,20 @@ struct ItemDetailPopup: View {
         VStack(alignment: .leading, spacing: 13) {
             HStack(alignment: .top, spacing: 12) {
                 CachedImage(urlString: item.imageURL, fill: true, maxPixel: 300)
-                    .frame(width: 84, height: 84).clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .frame(width: 92, height: 92).clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 VStack(alignment: .leading, spacing: 5) {
                     Text(item.displayTitle).font(.headline).lineLimit(2)
                     RatingLine(rating: item.rating, count: item.ratingCount, size: 13)
                     if let game = item.gameName { Text(game).font(.footnote).foregroundStyle(.secondary).lineLimit(1) }
-                    HStack(spacing: 6) { StatusGlyph(status: item.status, size: 13); Text(statusText).font(.caption.weight(.semibold)) }
+                    // The name sits at the top of the artwork and the state at its bottom, so the
+                    // two read as one block.
+                    Spacer(minLength: 4)
+                    HStack(spacing: 7) {
+                        StatusGlyph(status: item.status, size: 15)
+                        Text(statusText).font(.system(size: 13, weight: .semibold)).lineLimit(1).minimumScaleFactor(0.8)
+                    }
                 }
+                .frame(minHeight: 92, alignment: .top)
                 Spacer(minLength: 0)
                 Button(action: onClose) { Image(systemName: "xmark.circle.fill").font(.title2).foregroundStyle(.secondary) }
                     .accessibilityLabel("Close")
@@ -3858,8 +4021,9 @@ struct ItemDetailPopup: View {
         switch item.status {
         case .upToDate: return "Up to date"
         case .needsUpdate: return "Update available"
-        case .unverified: return item.filesBroken ? "Files missing or changed" : "Couldn't verify"
-        case .moved: return "Moved out of ModShelf"
+        case .moved: return "Up to date, files elsewhere"
+        case .notChecked: return item.checkFailed ? "Couldn't reach Steam" : "Not checked yet"
+        case .broken: return "Files missing or changed"
         }
     }
 }
