@@ -13,7 +13,7 @@ struct ModShelfApp: App {
 }
 
 let modShelfInfoFileName = "ModShelf Information.txt"
-let modShelfVersion = "0.3b"
+let modShelfVersion = "1.0"
 let modShelfBuild = "90"
 
 // MARK: - Models
@@ -2680,10 +2680,10 @@ struct ContentView: View {
     private var accountHeader: some View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
-                HStack(alignment: .bottom, spacing: 3) {
-                    brandLogo
-                    versionBadge
-                }
+                brandLogo
+                    .overlay(alignment: .bottom) {
+                        versionBadge
+                    }
                 Spacer()
                 signInPill
             }
@@ -2709,12 +2709,14 @@ struct ContentView: View {
         }
     }
 
-    /// "v0.3b" tucked just under the end of the logo, a hair above its baseline.
+    /// "v1.0" tucked under the wordmark, centred inside the logo's width.
     private var versionBadge: some View {
         Text("v\(modShelfVersion)")
-            .font(.system(size: 10, weight: .semibold))
+            .font(.system(size: 8, weight: .semibold))
             .foregroundStyle(.secondary)
-            .padding(.bottom, 2)
+            .lineLimit(1)
+            .fixedSize()
+            .offset(y: 2)
             .accessibilityLabel("Version \(modShelfVersion)")
     }
 
