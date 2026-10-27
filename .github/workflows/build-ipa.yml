@@ -227,24 +227,7 @@ jobs:
           name: ModShelf ${{ steps.version.outputs.short }}
           body: ${{ steps.notes.outputs.body }}
           prerelease: false
-          files: |
-            ModShelf.ipa
-            assets/appicon-rounded.png
+          files: ModShelf.ipa
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # The rounded icon is refreshed on the current release even when the version is already out,
-      # so the README image follows the artwork without a second IPA upload.
-      - name: Upload the README icon
-        if: steps.version.outcome == 'success'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          TAG="v${{ steps.version.outputs.short }}"
-          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "$TAG has no release yet; nothing to attach the icon to."
-            exit 0
-          fi
-          gh release upload "$TAG" assets/appicon-rounded.png --clobber --repo "$GITHUB_REPOSITORY"
 

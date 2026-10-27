@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://github.com/shplash/ModShelf/releases/latest/download/appicon-rounded.png" width="220" alt="ModShelf Icon">
+  <img src="assets/appicon.png" width="220" alt="ModShelf Icon">
 </p>
 
 <h1 align="center">ModShelf</h1>
