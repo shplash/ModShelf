@@ -1855,17 +1855,36 @@ final class WorkshopStore: ObservableObject {
         appUpdateMessage = "Checking for updates…"
         Task { @MainActor in
             isCheckingAppUpdate = false
-            guard let url = URL(string: "https://github.com/\(Self.appRepo)/releases/download/ios-build/version.json"),
-                  let (data, _) = try? await URLSession.shared.data(from: url),
-                  let remote = try? JSONDecoder().decode(AppVersion.self, from: data) else {
+            var request = URLRequest(url: URL(string: "https://api.github.com/repos/\(Self.appRepo)/releases/latest")!)
+            request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+            request.timeoutInterval = 15
+            guard let (data, _) = try? await URLSession.shared.data(for: request),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let tag = json["tag_name"] as? String else {
                 appUpdateMessage = "Couldn't check for updates."
                 return
             }
-            let installed = Int(modShelfBuild) ?? 0
-            appUpdateMessage = remote.build > installed
-                ? "v\(remote.version) (build \(remote.build)) is available."
+            let latest = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
+            appUpdateMessage = Self.version(latest, isNewerThan: modShelfVersion)
+                ? "v\(latest) is available."
                 : "You're on the latest version."
         }
+    }
+
+    /// Compares dotted version numbers, ignoring a trailing letter such as 1.0b.
+    nonisolated static func version(_ candidate: String, isNewerThan current: String) -> Bool {
+        func parts(_ value: String) -> [Int] {
+            value.trimmingCharacters(in: .letters)
+                .split(separator: ".")
+                .map { Int($0) ?? 0 }
+        }
+        let new = parts(candidate), old = parts(current)
+        for index in 0..<max(new.count, old.count) {
+            let a = index < new.count ? new[index] : 0
+            let b = index < old.count ? old[index] : 0
+            if a != b { return a > b }
+        }
+        return false
     }
 
     func refreshLibraryBytes() {
@@ -2295,12 +2314,6 @@ struct ExportPrompt: Identifiable {
     let ids: [String]
     let missing: Int
     let total: Int
-}
-
-/// The version file published beside the IPA, used by the in-app update check.
-struct AppVersion: Decodable {
-    let version: String
-    let build: Int
 }
 
 struct ContentView: View {

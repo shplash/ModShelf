@@ -173,15 +173,16 @@ jobs:
           shasum -a 256 ModShelf.ipa
           ls -lh ModShelf.ipa
 
-      - name: Write the version file
+      - name: Read the version
+        id: version
         run: |
           set -euo pipefail
           PLIST="build/Build/Products/Release-iphoneos/ModShelf.app/Info.plist"
           VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$PLIST")
           BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$PLIST")
-          printf '{"version":"%s","build":%s,"ipa":"https://github.com/%s/releases/download/ios-build/ModShelf.ipa"}\n' \
-            "$VERSION" "$BUILD" "$GITHUB_REPOSITORY" > version.json
-          cat version.json
+          echo "short=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "build=$BUILD" >> "$GITHUB_OUTPUT"
+          echo "ModShelf $VERSION ($BUILD)"
 
       - name: Upload the IPA
         uses: actions/upload-artifact@v7
@@ -191,20 +192,19 @@ jobs:
           if-no-files-found: error
           compression-level: 0
 
-      # Also publish the IPA as a direct download, so there is a link that hands
-      # over the .ipa itself instead of a zip that wraps it.
-      - name: Publish the direct IPA download
+      # A versioned, non-prerelease tag, so releases/latest points at this build and the app's
+      # update check has a version to compare against.
+      - name: Publish the release
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: ios-build
-          name: ModShelf iOS Build
+          tag_name: v${{ steps.version.outputs.short }}
+          name: ModShelf ${{ steps.version.outputs.short }}
           body: |
-            Direct download of the latest ModShelf IPA (ad-hoc signed).
-            The same file is attached to the workflow run as the ModShelf-IPA artifact.
-          prerelease: true
-          files: |
-            ModShelf.ipa
-            version.json
+            Build ${{ steps.version.outputs.build }} of ModShelf.
+
+            Ad-hoc signed IPA, ready for SideStore, AltStore, Feather, LiveContainer or TrollStore.
+          prerelease: false
+          files: ModShelf.ipa
           overwrite_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
