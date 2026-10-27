@@ -429,11 +429,18 @@ struct CachedImage: View {
     let urlString: String?
     var fill = true
     var maxPixel: CGFloat = 600
+    /// Tried in order when the main address has no picture, so an older or smaller artwork is used
+    /// instead of leaving the space empty.
+    var fallbackURLStrings: [String] = []
     @AppStorage("options.gifDownloads") private var gifDownloads = true
     @AppStorage("options.gifLibrary") private var gifLibrary = true
     var isDownloadPreview = false
     @State private var image: UIImage?
     private var animate: Bool { isDownloadPreview ? gifDownloads : gifLibrary }
+
+    private var taskKey: String {
+        ([urlString ?? ""] + fallbackURLStrings).joined(separator: "|") + (animate ? "|1" : "|0")
+    }
 
     var body: some View {
         // A clear base takes whatever size the parent offers, and the picture is drawn on top of it:
@@ -441,10 +448,18 @@ struct CachedImage: View {
         Color.clear
             .overlay { picture }
             .clipped()
-            .task(id: (urlString ?? "") + (animate ? "|1" : "|0")) {
-                guard let s = urlString, !s.isEmpty, let url = URL(string: s) else { image = nil; return }
-                if let hit = ImageStore.shared.cached(url, animate: animate) { image = hit; return }
-                image = await ImageStore.shared.load(url, maxPixel: maxPixel, animate: animate)
+            .task(id: taskKey) {
+                let candidates = ([urlString ?? ""] + fallbackURLStrings).filter { !$0.isEmpty }
+                guard !candidates.isEmpty else { image = nil; return }
+                for candidate in candidates {
+                    guard let url = URL(string: candidate) else { continue }
+                    if let hit = ImageStore.shared.cached(url, animate: animate) { image = hit; return }
+                    if let loaded = await ImageStore.shared.load(url, maxPixel: maxPixel, animate: animate) {
+                        image = loaded
+                        return
+                    }
+                }
+                image = nil
             }
     }
 
@@ -756,6 +771,15 @@ final class WorkshopStore: ObservableObject {
     private var downloadExpectedBytes: Int64 = 0
     private var downloadBytesPerSecond: Double = 0
     private var lastProgressSample: (Date, Double)?
+    /// Mods waiting their turn, with the details they were started from.
+    private var pendingMeta: [String: WorkshopMetadata] = [:]
+    // The folder being written is measured now and then, which is the only honest sign of progress
+    // for big items where Steam's own counter stays at zero.
+    private var activeStaging: URL?
+    private var stagingProbeInFlight = false
+    private var lastStagingProbe = Date.distantPast
+    private var receivedBytes: Int64 = 0
+    private var lastReceivedSeen: Int64 = -1
     private var didLaunchChecks = false
 
     var isAuthenticated: Bool { engine?.isAuthenticated() ?? false }
@@ -1186,9 +1210,8 @@ final class WorkshopStore: ObservableObject {
     func download(_ raw: String? = nil, meta override: WorkshopMetadata? = nil) {
         errorMessage = ""
         guard devTask == nil else { errorMessage = "A simulated run is on screen. Let it finish first."; return }
-        guard !isBusy else { errorMessage = "One thing at a time — let this finish first."; return }
         guard isAuthenticated else { operationMessage = "Sign in to Steam and this download can start."; showLogin = true; return }
-        guard let engine else {
+        guard engine != nil else {
             errorMessage = "The Steam engine didn't start. Reopening the app usually sorts it."
             return
         }
@@ -1198,9 +1221,33 @@ final class WorkshopStore: ObservableObject {
             queue.removeAll()
             return
         }
-        activeID = id
         let fallback = WorkshopMetadata(id: id, title: "Workshop item \(id)", author: "", description: "", imageURL: "", updatedAt: 0)
         let meta: WorkshopMetadata = override ?? ((preview?.id == id ? preview : nil) ?? fallback)
+        // One transfer at a time, so anything else joins the queue and starts when its turn comes.
+        if isBusy {
+            enqueue(id, meta: meta)
+            return
+        }
+        beginDownload(id: id, meta: meta, keepQueue: false)
+    }
+
+    /// Adds a mod to the back of the queue, drawn as a waiting row straight away.
+    private func enqueue(_ id: String, meta: WorkshopMetadata) {
+        guard !queue.contains(id), activeID != id, !queueRows.contains(where: { $0.id == id }) else {
+            operationMessage = "That one is already on its way."
+            return
+        }
+        queue.append(id)
+        pendingMeta[id] = meta
+        queueRows.append(DownloadQueueRow(id: id, title: meta.title,
+                                         imageURL: meta.imageURL.isEmpty ? nil : meta.imageURL))
+        queueTotal = queueRows.count
+        operationMessage = "\(meta.title) joins the queue."
+        Haptics.tap()
+    }
+
+    private func beginDownload(id: String, meta: WorkshopMetadata, keepQueue: Bool) {
+        activeID = id
         activeMeta = meta
         activeTitle = meta.title
         downloadActiveSeconds = 0
@@ -1214,6 +1261,10 @@ final class WorkshopStore: ObservableObject {
             : (library.first(where: { $0.id == id })?.byteCount ?? 0)
         downloadBytesPerSecond = 0
         lastProgressSample = nil
+        receivedBytes = 0
+        lastReceivedSeen = -1
+        stagingProbeInFlight = false
+        lastStagingProbe = .distantPast
         // However a download starts (library update, history retry, auto download), the download
         // screen shows that item rather than whatever was looked up last.
         if preview?.id != id {
@@ -1231,6 +1282,7 @@ final class WorkshopStore: ObservableObject {
             record(id, title: meta.title, result: "Failed", error: errorMessage, game: meta.gameName)
             return
         }
+        guard let engine else { return }
         let result = engine.downloadWorkshopItem(id, targetDir: staging.path)
         if !result.isEmpty {
             try? FileManager.default.removeItem(at: staging)
@@ -1240,14 +1292,24 @@ final class WorkshopStore: ObservableObject {
             Haptics.error()
             return
         }
-        // A single download gets a row of its own, so it uses the same progress line as a batch.
-        if queueRows.isEmpty {
-            queueRows = [DownloadQueueRow(id: id, title: meta.title,
-                                          imageURL: meta.imageURL.isEmpty ? nil : meta.imageURL,
-                                          state: .downloading)]
-            queueStep = 1
-            queueTotal = 1
+        if !keepQueue {
+            queueRows.removeAll()
+            queueTotal = 0
+            queueStep = 0
+            queueFailed = 0
         }
+        if let index = queueRows.firstIndex(where: { $0.id == id }) {
+            queueRows[index].state = .downloading
+            queueRows[index].progress = 0
+            queueStep = index + 1
+        } else {
+            queueRows.append(DownloadQueueRow(id: id, title: meta.title,
+                                              imageURL: meta.imageURL.isEmpty ? nil : meta.imageURL,
+                                              state: .downloading))
+            queueStep = queueRows.count
+        }
+        queueTotal = max(1, queueRows.count)
+        activeStaging = staging
         isBusy = true
         isDownloading = true
         progress = 0
@@ -1258,6 +1320,18 @@ final class WorkshopStore: ObservableObject {
         record(id, title: meta.title, result: "Downloading", imageURL: meta.imageURL.isEmpty ? nil : meta.imageURL, game: meta.gameName)
         startPolling()
         UserDefaults.standard.set(staging.path, forKey: "modshelf.activeStaging")
+    }
+
+    /// The Workshop details already known about a library mod, used to start a queued update.
+    private func metaFor(_ id: String) -> WorkshopMetadata? {
+        guard let item = library.first(where: { $0.id == id }) else { return nil }
+        var meta = WorkshopMetadata(id: item.id, title: item.displayTitle, author: item.author ?? "",
+                                    description: item.description ?? "", imageURL: item.imageURL ?? "",
+                                    updatedAt: item.publishedUpdatedAt ?? 0)
+        meta.appID = item.appID; meta.gameName = item.gameName; meta.tags = item.tags
+        meta.rating = item.rating; meta.ratingCount = item.ratingCount
+        meta.fileSize = item.byteCount ?? 0
+        return meta
     }
 
     func update(_ item: WorkshopItem) {
@@ -1288,6 +1362,20 @@ final class WorkshopStore: ObservableObject {
         guard devTask == nil else { operationMessage = "A simulated run is on screen. Let it finish first."; return }
         let picks = library.filter { $0.updateAvailable }
         guard !picks.isEmpty else { operationMessage = "Everything is up to date."; return }
+        // If something is already running, these updates join its queue rather than replacing it.
+        if isBusy || !queue.isEmpty {
+            var added = 0
+            for item in picks where !queue.contains(item.id) && activeID != item.id {
+                if let meta = metaFor(item.id) {
+                    enqueue(item.id, meta: meta)
+                    added += 1
+                }
+            }
+            operationMessage = added == 0
+                ? "Those updates are already queued."
+                : "\(added) mod\(added == 1 ? "" : "s") of updates added to the queue."
+            return
+        }
         queue = picks.map(\.id)
         queueRows = picks.map { DownloadQueueRow(id: $0.id, title: $0.displayTitle, imageURL: $0.imageURL) }
         queueStep = 0
@@ -1299,14 +1387,12 @@ final class WorkshopStore: ObservableObject {
         guard !isBusy else { return }
         while let id = queue.first {
             queue.removeFirst()
-            guard let item = library.first(where: { $0.id == id }) else { continue }
-            queueStep += 1
+            guard let meta = pendingMeta.removeValue(forKey: id) ?? metaFor(id) else { continue }
             updateRow(id, progress: 0, state: .downloading)
-            update(item)
+            beginDownload(id: id, meta: meta, keepQueue: true)
             if isBusy { return }
             // Nothing could start (signed out, no space, Wi-Fi only), so the rest cannot run either.
             queue.removeAll()
-            queueStep -= 1
             finishQueue()
             return
         }
@@ -1326,20 +1412,27 @@ final class WorkshopStore: ObservableObject {
         let done = max(0, queueStep - (cancelled ? 1 : 0))
         let failed = queueFailed
         queueStep = 0; queueTotal = 0; queueFailed = 0
-        queueRows.removeAll()
+        // The finished rows stay for a moment so the last 100% is actually seen.
+        let endedRows = queueRows
+        if !endedRows.isEmpty {
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 900_000_000)
+                if queueRows == endedRows { queueRows.removeAll() }
+            }
+        }
         guard total > 0 else { return }
         if total == 1 {
             operationMessage = cancelled ? "Download cancelled." : (failed > 0 ? "That one didn't finish." : "Downloaded.")
             return
         }
         if cancelled {
-            operationMessage = "Updates cancelled after \(min(done, total)) of \(total)."
+            operationMessage = "Stopped after \(min(done, total)) of \(total)."
         } else if done == 0 {
-            operationMessage = "None of the \(total) mods could be updated."
+            operationMessage = "Nothing could be downloaded just now."
         } else if failed == 0 {
-            operationMessage = done >= total ? "Updated all \(total) mods." : "Updated \(done) of \(total) mods."
+            operationMessage = done >= total ? "Downloaded all \(total) mods." : "Downloaded \(done) of \(total) mods."
         } else {
-            operationMessage = "Updated \(max(0, done - min(failed, done))) of \(total) mods; \(failed) failed."
+            operationMessage = "Downloaded \(max(0, done - min(failed, done))) of \(total) mods; \(failed) didn't finish."
         }
     }
 
@@ -1388,6 +1481,13 @@ final class WorkshopStore: ObservableObject {
         return min(0.99, (min(1, max(0, value)) * 100).rounded(.down) / 100)
     }
 
+    /// Whether Steam is still resolving, fetching manifests or checking files already on disk: a
+    /// stage that can sit quietly for a while without meaning the download has hung.
+    var isPreparingDownload: Bool {
+        let s = status.lowercased()
+        return s.contains("preparing") || s.contains("manifest") || s.contains("checking")
+    }
+
     func refreshState() {
         let nextStatus = engine?.status() ?? ""
         // Each new step Steam reports becomes its own segment of the progress bar.
@@ -1401,15 +1501,32 @@ final class WorkshopStore: ObservableObject {
         if statusChanged || valueChanged { lastMovementAt = now }
         let dt = lastTickAt.map { max(0, min(1.5, now.timeIntervalSince($0))) } ?? 0
         lastTickAt = now
-        if isDownloading {
+        // The folder on disk is the only honest sign of life for large items, where Steam's own
+        // counter can sit at zero for the whole download.
+        if isDownloading, let staging = activeStaging, !stagingProbeInFlight,
+           now.timeIntervalSince(lastStagingProbe) > 2 {
+            stagingProbeInFlight = true
+            lastStagingProbe = now
+            Task { @MainActor in
+                let size = await Task.detached(priority: .utility) { Self.directoryBytes(staging) }.value
+                stagingProbeInFlight = false
+                if size != receivedBytes { receivedBytes = size }
+                if size > lastReceivedSeen {
+                    lastReceivedSeen = size
+                    lastMovementAt = Date()
+                }
+            }
+        }
+        if isDownloading, !isPreparingDownload {
             // Only the part of this tick before Steam last reported anything counts: once a transfer
             // stops talking, the bar stops moving instead of counting a stall as progress.
             let quiet = lastMovementAt.map { max(0, now.timeIntervalSince($0)) } ?? 0
             downloadActiveSeconds += max(0, dt - min(dt, quiet))
         }
-        let stalled = isDownloading && (lastMovementAt.map { now.timeIntervalSince($0) > 6 } ?? false)
+        let preparing = isPreparingDownload
+        let stalled = isDownloading && !preparing && (lastMovementAt.map { now.timeIntervalSince($0) > 8 } ?? false)
         if isDownloadStalled != stalled { isDownloadStalled = stalled }
-        let nextProgress = simulatedProgress(engineValue: engineValue)
+        let nextProgress = preparing ? 0 : simulatedProgress(engineValue: engineValue)
         let nextFile = engine?.currentFile() ?? ""
         let waitingForCode = nextStatus == "Steam Guard code required"
         if waitingForCode != needsGuardCode { needsGuardCode = waitingForCode }
@@ -1428,6 +1545,7 @@ final class WorkshopStore: ObservableObject {
         isBusy = false
         isDownloading = false
         isDownloadStalled = false
+        activeStaging = nil
         stopPolling()
         let stagingPath = UserDefaults.standard.string(forKey: "modshelf.activeStaging") ?? ""
         UserDefaults.standard.removeObject(forKey: "modshelf.activeStaging")
@@ -1501,7 +1619,12 @@ final class WorkshopStore: ObservableObject {
         }
         saveHistory()
         if !queue.isEmpty {
-            Task { @MainActor in self.startNextInQueue() }
+            // A short pause lets the finished row show its last percent, and gives the engine time to
+            // release its download slot before the next one asks for it.
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 700_000_000)
+                self.startNextInQueue()
+            }
         } else {
             finishQueue(cancelled: cancelled)
         }
@@ -2113,6 +2236,18 @@ final class WorkshopStore: ObservableObject {
         }
     }
 
+    /// Bytes written under a folder, used to follow a download Steam is not reporting on.
+    nonisolated static func directoryBytes(_ url: URL) -> Int64 {
+        let fm = FileManager.default
+        guard let en = fm.enumerator(at: url, includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey]) else { return 0 }
+        var bytes: Int64 = 0
+        for case let file as URL in en {
+            let values = try? file.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+            if values?.isRegularFile == true { bytes += Int64(values?.fileSize ?? 0) }
+        }
+        return bytes
+    }
+
     nonisolated static func scan(folder: String) -> (exists: Bool, count: Int, bytes: Int64) {
         let fm = FileManager.default
         guard fm.fileExists(atPath: folder) else { return (false, 0, 0) }
@@ -2666,9 +2801,13 @@ struct AppTabBar: View {
     let style: String          // "pill" (shrinks on scroll), "pillFull", "bar"
     let collapsed: Bool
     let libraryBadge: Bool
+    /// The first tab says "Queue" while a batch is running.
+    var firstTitle: String = "Download"
     var onTap: (Int) -> Void = { _ in }
     private let items: [(String, String)] = [("Download", "arrow.down.circle.fill"), ("Workshop", "safari.fill"),
                                              ("Library", "square.grid.2x2.fill"), ("Options", "gearshape.fill")]
+
+    private func title(_ i: Int) -> String { i == 0 ? firstTitle : items[i].0 }
 
     var body: some View {
         if style == "bar" { bar } else { pill }
@@ -2699,7 +2838,7 @@ struct AppTabBar: View {
         } label: {
             VStack(spacing: compact ? 0 : 3) {
                 icon(i, size: compact ? 22 : 24, compact: compact)
-                if !compact { Text(items[i].0).font(.system(size: 12, weight: .semibold)).lineLimit(1) }
+                if !compact { Text(title(i)).font(.system(size: 12, weight: .semibold)).lineLimit(1) }
             }
             .foregroundStyle(on ? Color.accentColor : Color.secondary)
             .frame(width: compact ? 54 : 78, height: compact ? 40 : 54)
@@ -2707,7 +2846,7 @@ struct AppTabBar: View {
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(items[i].0)
+        .accessibilityLabel(title(i))
     }
 
     private func icon(_ i: Int, size: CGFloat, compact: Bool = false) -> some View {
@@ -2735,7 +2874,7 @@ struct AppTabBar: View {
                 } label: {
                     VStack(spacing: 3) {
                         icon(i, size: 26)
-                        Text(items[i].0).font(.system(size: 12, weight: .semibold))
+                        Text(title(i)).font(.system(size: 12, weight: .semibold))
                     }
                     .foregroundStyle(selected == i ? Color.accentColor : Color.secondary)
                     .frame(maxWidth: .infinity)
@@ -3290,6 +3429,7 @@ struct ContentView: View {
         .safeAreaInset(edge: .bottom, spacing: 0) {
             AppTabBar(selected: $selectedTab, style: tabStyle, collapsed: tabCollapsed,
                       libraryBadge: store.library.contains(where: { $0.updateAvailable }),
+                      firstTitle: store.queueRows.count > 1 ? "Queue" : "Download",
                       onTap: { tabTapped($0) })
                 .frame(height: tabBarReserve, alignment: .bottom)
         }
@@ -3788,7 +3928,11 @@ struct ContentView: View {
             Image(systemName: "clock")
                 .font(.system(size: 12, weight: .semibold)).foregroundStyle(.tertiary)
         case .downloading:
-            if store.isDownloadStalled {
+            if store.isPreparingDownload {
+                Text("Preparing")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+            } else if store.isDownloadStalled {
                 Text("Waiting")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.secondary)
@@ -5774,6 +5918,15 @@ struct GameHit: Codable, Identifiable, Equatable, Sendable {
     let id: Int
     let name: String
     let tiny_image: String?
+
+    /// Steam's poster art is portrait (600x900), where the capsule in tiny_image is landscape.
+    var posterURL: String { "https://steamcdn-a.akamaihd.net/steam/apps/\(id)/library_600x900.jpg" }
+
+    /// Older or smaller artwork, for the few games with no poster.
+    var posterFallbackURLs: [String] {
+        ["https://steamcdn-a.akamaihd.net/steam/apps/\(id)/library_capsule.jpg",
+         "https://steamcdn-a.akamaihd.net/steam/apps/\(id)/header.jpg"]
+    }
 }
 
 struct GameSearchResponse: Codable { let items: [GameHit] }
@@ -6152,7 +6305,11 @@ struct BrowserHome: View {
             Button { openGame(hit) } label: {
                 HStack(spacing: 12) {
                     ZStack {
-                        CachedImage(urlString: hit.tiny_image, fill: false, maxPixel: 200)
+                        Color(uiColor: .tertiarySystemFill)
+                        CachedImage(urlString: hit.posterURL,
+                                    fill: false,
+                                    maxPixel: 200,
+                                    fallbackURLStrings: hit.posterFallbackURLs + [hit.tiny_image ?? ""])
                     }
                     .frame(width: 56, height: 56)
                     .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))

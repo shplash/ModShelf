@@ -219,11 +219,15 @@ func (e *Engine) DownloadWorkshopItem(itemID, targetDir string) string {
 		failed := false
 		for p := range ch {
 			e.mu.Lock()
-			if p.TotalBytes > 0 {
+			// The library reports whole chunks completed, not bytes written, so the chunk count is
+			// the only progress it actually gives us.
+			if p.TotalBytes > 0 && p.DoneBytes > 0 {
 				e.progress = float64(p.DoneBytes) / float64(p.TotalBytes)
-				if e.progress > 1 {
-					e.progress = 1
-				}
+			} else if p.TotalChunks > 0 {
+				e.progress = float64(p.DoneChunks) / float64(p.TotalChunks)
+			}
+			if e.progress > 1 {
+				e.progress = 1
 			}
 			if p.CurrentFile != "" {
 				e.currentFile = p.CurrentFile
@@ -236,7 +240,16 @@ func (e *Engine) DownloadWorkshopItem(itemID, targetDir string) string {
 				e.progress = 1
 				e.status = "Download complete"
 			} else if !failed && ctx.Err() == nil {
-				e.status = p.Phase.String()
+				switch p.Phase {
+				case steam.PhaseResolving:
+					e.status = "Preparing download…"
+				case steam.PhaseManifest:
+					e.status = "Fetching Steam manifest…"
+				case steam.PhaseDiffing:
+					e.status = "Checking files already here…"
+				default:
+					e.status = "Downloading"
+				}
 			}
 			e.mu.Unlock()
 		}
