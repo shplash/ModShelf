@@ -16,7 +16,7 @@ body:
     id: device
     attributes:
       label: Device
-      placeholder: iPhone 15 Pro
+      placeholder: Device model
 
   - type: input
     id: ios

@@ -76,7 +76,7 @@ Use:
 ## Where mods go
 
 ```
-On My iPhone → ModShelf → Downloaded Mods → <game name> → <mod>
+Files app → ModShelf → Downloaded Mods → <game name> → <mod>
 ```
 
 Moving a mod into its game is normal use, so ModShelf shows those as moved out and keeps the install record for update checks.

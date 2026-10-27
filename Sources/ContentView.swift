@@ -13,6 +13,9 @@ struct ModShelfApp: App {
 }
 
 let modShelfInfoFileName = "ModShelf Information.txt"
+/// A second record, written into every install whether the visible info file is switched on or not,
+/// so a folder on disk can say what it is when the library has lost track of it.
+let modShelfManifestName = ".modshelf.json"
 /// The version comes from the bundle, so bumping MARKETING_VERSION in project.yml is the only edit.
 let modShelfVersion = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "1.0"
 /// The build number CI stamps in, taken from the bundle so it follows the commit count.
@@ -145,6 +148,21 @@ struct WorkshopMetadata: Equatable {
     var pageURL: URL { URL(string: "https://steamcommunity.com/sharedfiles/filedetails/?id=\(id)")! }
 }
 
+/// The hidden record ModShelf keeps inside each installed mod. It is always written, so the folder
+/// can be identified and put back in the library even when the library file or the visible info file
+/// is gone, and the version that is installed can be compared with Steam again.
+struct InstalledModManifest: Codable {
+    var workshopID: String
+    var title: String? = nil
+    var appID: String? = nil
+    var gameName: String? = nil
+    var publishedUpdatedAt: Int? = nil
+    var installedAt: Date? = nil
+    var fileCount: Int? = nil
+    var byteCount: Int64? = nil
+    var modShelfVersion: String? = nil
+}
+
 struct DownloadRecord: Identifiable, Codable {
     var id = UUID()
     var workshopID: String
@@ -155,6 +173,16 @@ struct DownloadRecord: Identifiable, Codable {
     var imageURL: String? = nil
     var attempt: Int? = nil
     var gameName: String? = nil
+}
+
+/// One line of the download queue shown on the download screen while a batch runs.
+struct DownloadQueueRow: Identifiable, Equatable {
+    enum State: Equatable { case waiting, downloading, done, failed }
+    let id: String
+    var title: String
+    var imageURL: String?
+    var progress: Double = 0
+    var state: State = .waiting
 }
 
 enum MediaItem: Identifiable, Equatable {
@@ -268,7 +296,7 @@ enum ErrorText {
             return "Couldn't reach Steam. Check your internet connection."
         }
         if r.contains("no space") || r.contains("disk full") || r.contains("not enough space") {
-            return "There isn't enough free space on this iPhone."
+            return "There isn't enough free space on this device."
         }
         if r.contains("cancel") { return "The download was cancelled." }
         return text
@@ -354,6 +382,12 @@ final class ImageStore {
         }
         guard !frames.isEmpty else { return nil }
         return UIImage.animatedImage(with: frames, duration: total)
+    }
+
+    /// Empties the in-memory images and the image cache on disk.
+    func clear() {
+        memory.removeAllObjects()
+        session.configuration.urlCache?.removeAllCachedResponses()
     }
 }
 
@@ -700,6 +734,13 @@ final class WorkshopStore: ObservableObject {
     private var activeID = ""
     private var activeMeta: WorkshopMetadata?
     private var queue: [String] = []
+    /// How far through "Update all" the run is, so the download screen can say which one it is on.
+    @Published var queueStep = 0
+    @Published var queueTotal = 0
+    /// The rows drawn on the download screen while a batch runs (or a simulated one).
+    @Published var queueRows: [DownloadQueueRow] = []
+    private var queueFailed = 0
+    private var devTask: Task<Void, Never>?
     private var didLaunchChecks = false
 
     var isAuthenticated: Bool { engine?.isAuthenticated() ?? false }
@@ -715,7 +756,7 @@ final class WorkshopStore: ObservableObject {
     }
     var downloadsFolderURL: URL { downloadsRoot }
 
-    /// The folder as the Files app shows it, past "On My iPhone": the app's own folder for a normal
+    /// The folder as the Files app shows it, past the top level: the app's own folder for a normal
     /// install, or LiveContainer's chain when the app is running inside it.
     nonisolated static func readablePath(_ url: URL) -> String {
         let path = url.path
@@ -794,6 +835,7 @@ final class WorkshopStore: ObservableObject {
         status = engine?.status() ?? "Ready"
         _ = NetworkWatcher.shared
         _ = sessionPath
+        repairFolders()
         migrateRecords()
         refreshLibraryBytes()
         resolveGameNames()
@@ -1145,6 +1187,13 @@ final class WorkshopStore: ObservableObject {
         let meta: WorkshopMetadata = override ?? ((preview?.id == id ? preview : nil) ?? fallback)
         activeMeta = meta
         activeTitle = meta.title
+        // However a download starts (library update, history retry, auto download), the download
+        // screen shows that item rather than whatever was looked up last.
+        if preview?.id != id {
+            input = "https://steamcommunity.com/sharedfiles/filedetails/?id=\(id)"
+            preview = meta
+            if meta.title == "Workshop item \(id)" { fetchPreview() }
+        }
         // Updates stage next to the current installation, so the swap is a rename rather than a copy.
         let targetRoot = installRoot(for: library.first(where: { $0.id == id }), appID: meta.appID)
         let staging = targetRoot.appendingPathComponent(".partial-\(id)-\(UUID().uuidString)", isDirectory: true)
@@ -1177,23 +1226,81 @@ final class WorkshopStore: ObservableObject {
     }
 
     func update(_ item: WorkshopItem) {
-        var meta = WorkshopMetadata(id: item.id, title: item.displayTitle, author: "", description: item.description ?? "",
-                                    imageURL: item.imageURL ?? "", updatedAt: item.publishedUpdatedAt ?? 0)
+        // An app update can leave the files somewhere else, so find them again before installing in place.
+        repairFolders()
+        let latest = library.first(where: { $0.id == item.id }) ?? item
+        // The download screen shows the mod being updated, not whatever was looked up last.
+        showOnDownloadPage(latest)
+        var meta = WorkshopMetadata(id: latest.id, title: latest.displayTitle, author: "", description: latest.description ?? "",
+                                    imageURL: latest.imageURL ?? "", updatedAt: latest.publishedUpdatedAt ?? 0)
+        meta.appID = latest.appID; meta.gameName = latest.gameName; meta.tags = latest.tags
+        meta.rating = latest.rating; meta.ratingCount = latest.ratingCount
+        download(latest.id, meta: meta)
+    }
+
+    /// Puts a library mod on the download screen: its Workshop link in the field and its known details
+    /// on the card, so an update opens the Workshop page it is updating.
+    func showOnDownloadPage(_ item: WorkshopItem) {
+        input = "https://steamcommunity.com/sharedfiles/filedetails/?id=\(item.id)"
+        var meta = WorkshopMetadata(id: item.id, title: item.displayTitle, author: item.author ?? "",
+                                    description: item.description ?? "", imageURL: item.imageURL ?? "",
+                                    updatedAt: item.publishedUpdatedAt ?? 0)
         meta.appID = item.appID; meta.gameName = item.gameName; meta.tags = item.tags
         meta.rating = item.rating; meta.ratingCount = item.ratingCount
-        download(item.id, meta: meta)
+        preview = meta
     }
     func updateAll() {
-        queue = library.filter { $0.updateAvailable }.map { $0.id }
-        guard !queue.isEmpty else { operationMessage = "Everything is up to date."; return }
-        operationMessage = "Updating \(queue.count) mod\(queue.count == 1 ? "" : "s")…"
+        let picks = library.filter { $0.updateAvailable }
+        guard !picks.isEmpty else { operationMessage = "Everything is up to date."; return }
+        queue = picks.map(\.id)
+        queueRows = picks.map { DownloadQueueRow(id: $0.id, title: $0.displayTitle, imageURL: $0.imageURL) }
+        queueStep = 0
+        queueTotal = queue.count
+        queueFailed = 0
         startNextInQueue()
     }
     private func startNextInQueue() {
         guard !isBusy else { return }
         while let id = queue.first {
             queue.removeFirst()
-            if let item = library.first(where: { $0.id == id }) { update(item); return }
+            guard let item = library.first(where: { $0.id == id }) else { continue }
+            queueStep += 1
+            updateRow(id, progress: 0, state: .downloading)
+            update(item)
+            if isBusy { return }
+            // Nothing could start (signed out, no space, Wi-Fi only), so the rest cannot run either.
+            queue.removeAll()
+            queueStep -= 1
+            finishQueue()
+            return
+        }
+        finishQueue()
+    }
+
+    private func updateRow(_ id: String, progress: Double? = nil, state: DownloadQueueRow.State? = nil) {
+        guard let index = queueRows.firstIndex(where: { $0.id == id }) else { return }
+        if let progress { queueRows[index].progress = max(0, min(1, progress)) }
+        if let state { queueRows[index].state = state }
+    }
+
+    /// The end of a batch: the queue card goes away and the banner carries a short summary, so a run
+    /// of several updates does not just go quiet when it is done.
+    private func finishQueue(cancelled: Bool = false) {
+        let total = queueTotal
+        let done = max(0, queueStep - (cancelled ? 1 : 0))
+        let failed = queueFailed
+        queueStep = 0; queueTotal = 0; queueFailed = 0
+        queueRows.removeAll()
+        guard total > 0 else { return }
+        let noun = total == 1 ? "mod" : "mods"
+        if cancelled {
+            operationMessage = "Updates cancelled after \(min(done, total)) of \(total)."
+        } else if done == 0 {
+            operationMessage = "None of the \(total) \(noun) could be updated."
+        } else if failed == 0 {
+            operationMessage = done >= total ? "Updated all \(total) \(noun)." : "Updated \(done) of \(total) \(noun)."
+        } else {
+            operationMessage = "Updated \(max(0, done - min(failed, done))) of \(total) \(noun); \(failed) failed."
         }
     }
 
@@ -1209,6 +1316,10 @@ final class WorkshopStore: ObservableObject {
         if status != nextStatus { status = nextStatus }
         if abs(progress - nextProgress) > 0.001 { progress = nextProgress }
         if currentFile != nextFile { currentFile = nextFile }
+        if isDownloading, let index = queueRows.firstIndex(where: { $0.id == activeID }),
+           queueRows[index].state == .downloading {
+            queueRows[index].progress = nextProgress
+        }
         guard isBusy else { stopPolling(); return }
 
         let s = nextStatus.lowercased()
@@ -1272,6 +1383,7 @@ final class WorkshopStore: ObservableObject {
             // An update carries the metadata the mod already had, so Workshop is asked once more for
             // the version that really landed, and the info file is rewritten with it.
             refreshInstalledMetadata(id: activeID)
+            updateRow(activeID, progress: 1, state: .done)
             lastOutcome = "Download completed"
             Haptics.success()
         } else {
@@ -1281,11 +1393,15 @@ final class WorkshopStore: ObservableObject {
             updateHistory(id: activeID, result: cancelled ? "Cancelled" : "Failed", error: reason)
             if !cancelled { errorMessage = reason }
             lastOutcome = cancelled ? "Download cancelled" : "Download failed"
-            if cancelled { queue.removeAll() }
+            if cancelled { queue.removeAll() } else { queueFailed += 1; updateRow(activeID, state: .failed) }
             Haptics.error()
         }
         saveHistory()
-        if !queue.isEmpty { Task { @MainActor in self.startNextInQueue() } }
+        if !queue.isEmpty {
+            Task { @MainActor in self.startNextInQueue() }
+        } else {
+            finishQueue(cancelled: cancelled)
+        }
     }
 
     private func updateHistory(id: String, result: String, error: String?) {
@@ -1294,7 +1410,195 @@ final class WorkshopStore: ObservableObject {
             if let m = activeMeta, m.id == id, !m.imageURL.isEmpty { history[index].imageURL = m.imageURL }
         } else { record(id, title: activeTitle, result: result, error: error) }
     }
-    func cancel() { queue.removeAll(); engine?.cancelDownload(); status = "Cancelling download…" }
+    func cancel() {
+        if let task = devTask {
+            task.cancel()
+            devTask = nil
+            queueRows.removeAll()
+            queueStep = 0; queueTotal = 0; queueFailed = 0
+            status = "Ready"
+            return
+        }
+        queue.removeAll()
+        engine?.cancelDownload()
+        status = "Cancelling download…"
+    }
+
+    // MARK: developer tools
+    //
+    // Reachable only from the hidden menu behind the logo taps. Nothing else in the app uses these.
+
+    var devSnapshot: String {
+        """
+        version: \(modShelfVersion) (build \(modShelfBuild))
+        engine: \(devEngineStatus)
+        engineProgress: \(String(format: "%.2f", devEngineProgress))
+        engineFile: \(devEngineFile)
+        engineError: \(devEngineError)
+        signedIn: \(isAuthenticated)
+        library: \(library.count)
+        updates: \(library.filter { $0.updateAvailable }.count)
+        queue: \(queueStep)/\(queueTotal)
+        """
+    }
+    var devEngineStatus: String { engine?.status() ?? "none" }
+    var devEngineProgress: Double { engine?.progress() ?? 0 }
+    var devEngineFile: String { engine?.currentFile() ?? "" }
+    var devEngineError: String { engine?.lastError() ?? "" }
+
+    /// A batch that runs entirely in the app: no Steam, no engine, no files touched.
+    func devFakeUpdateAll(count: Int, failEvery: Int, seconds: Double) {
+        guard devTask == nil, !isBusy else { operationMessage = "A download is already running."; return }
+        guard !library.isEmpty else { operationMessage = "The library is empty."; return }
+        let picks = Array(library.shuffled().prefix(max(1, min(count, library.count))))
+        devRunFake(ids: picks.map(\.id), failEvery: failEvery, seconds: seconds)
+    }
+
+    func devFakeDownload(fail: Bool, seconds: Double) {
+        guard devTask == nil, !isBusy else { operationMessage = "A download is already running."; return }
+        guard let item = library.first else { operationMessage = "The library is empty."; return }
+        devRunFake(ids: [item.id], failEvery: fail ? 1 : 0, seconds: seconds)
+    }
+
+    private func devRunFake(ids: [String], failEvery: Int, seconds: Double) {
+        queueRows = ids.compactMap { id in
+            library.first(where: { $0.id == id }).map {
+                DownloadQueueRow(id: id, title: $0.displayTitle, imageURL: $0.imageURL)
+            }
+        }
+        queueStep = 0
+        queueTotal = queueRows.count
+        queueFailed = 0
+        let stepSeconds = max(0.05, seconds) / 24
+        devTask = Task { @MainActor in
+            for (index, id) in ids.enumerated() {
+                if Task.isCancelled { return }
+                queueStep = index + 1
+                updateRow(id, progress: 0, state: .downloading)
+                for step in 1...24 {
+                    if Task.isCancelled { return }
+                    try? await Task.sleep(nanoseconds: UInt64(stepSeconds * 1_000_000_000))
+                    updateRow(id, progress: Double(step) / 24)
+                }
+                let ok = failEvery == 0 || (index + 1) % failEvery != 0
+                if ok {
+                    updateRow(id, progress: 1, state: .done)
+                    if let i = library.firstIndex(where: { $0.id == id }) {
+                        library[i].updateAvailable = false
+                        library[i].publishedUpdatedAt = Int(Date().timeIntervalSince1970)
+                        library[i].lastCheckedAt = Date()
+                        library[i].checkFailed = false
+                        library[i].filesBroken = false
+                    }
+                } else {
+                    updateRow(id, state: .failed)
+                    queueFailed += 1
+                }
+            }
+            saveLibrary()
+            refreshLibraryBytes()
+            devTask = nil
+            finishQueue()
+        }
+    }
+
+    func devMarkUpdates(count: Int) -> String {
+        guard !library.isEmpty else { return "The library is empty." }
+        let picks = library.shuffled().prefix(max(1, count))
+        for item in picks {
+            if let i = library.firstIndex(where: { $0.id == item.id }) { library[i].updateAvailable = true }
+        }
+        saveLibrary()
+        return "\(picks.count) mod\(picks.count == 1 ? "" : "s") marked as having updates."
+    }
+
+    func devRepairReport() -> String {
+        let fm = FileManager.default
+        let before = library.filter { !fm.fileExists(atPath: $0.folder) }.count
+        let countBefore = library.count
+        repairFolders()
+        let after = library.filter { !fm.fileExists(atPath: $0.folder) }.count
+        let added = library.count - countBefore
+        var parts = ["\(library.count) mods", "\(before) without a folder before", "\(after) still without"]
+        if before > after { parts.append("\(before - after) found") }
+        if added > 0 { parts.append("\(added) re-adopted") }
+        return parts.joined(separator: " · ")
+    }
+
+    func devRewriteManifests() -> String {
+        var written = 0
+        for item in library {
+            let folder = URL(fileURLWithPath: item.folder, isDirectory: true)
+            guard FileManager.default.fileExists(atPath: folder.path) else { continue }
+            Self.writeManifest(InstalledModManifest(workshopID: item.id,
+                                                    title: item.displayTitle,
+                                                    appID: item.appID,
+                                                    gameName: item.gameName,
+                                                    publishedUpdatedAt: item.publishedUpdatedAt,
+                                                    installedAt: item.addedAt,
+                                                    fileCount: item.fileCount,
+                                                    byteCount: item.byteCount,
+                                                    modShelfVersion: modShelfVersion),
+                               in: folder)
+            written += 1
+        }
+        return "\(written) manifest\(written == 1 ? "" : "s") written."
+    }
+
+    func devManifestJSON(for item: WorkshopItem) -> String {
+        let folder = URL(fileURLWithPath: item.folder, isDirectory: true)
+        guard let manifest = Self.readManifest(in: folder) ?? Self.readInfoFile(in: folder),
+              let data = try? JSONEncoder().encode(manifest),
+              let text = String(data: data, encoding: .utf8) else { return "No manifest in this folder." }
+        return text
+    }
+
+    func devStorageReport() -> String {
+        let missing = library.filter { !FileManager.default.fileExists(atPath: $0.folder) }.count
+        let bytes = library.compactMap { $0.byteCount }.reduce(0, +)
+        return """
+        version: \(modShelfVersion) (build \(modShelfBuild))
+        documents: \(documents.path)
+        downloads: \(downloadsRoot.path)
+        library: \(library.count) mods, \(missing) without files, \(Fmt.bytes(bytes))
+        history: \(history.count) entries
+        """
+    }
+
+    func devClearSteamCache() -> String {
+        let fm = FileManager.default
+        let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("ModShelf/SteamSession/steam-session", isDirectory: true)
+        guard let files = try? fm.contentsOfDirectory(at: base, includingPropertiesForKeys: nil) else {
+            return "Nothing to clear."
+        }
+        var removed = 0
+        for file in files where (try? fm.removeItem(at: file)) != nil { removed += 1 }
+        return "\(removed) Steam cache file\(removed == 1 ? "" : "s") removed."
+    }
+
+    func devResetFlags() -> String {
+        var changed = 0
+        for i in library.indices {
+            guard library[i].filesMoved || library[i].filesBroken || library[i].checkFailed else { continue }
+            library[i].filesMoved = false
+            library[i].filesBroken = false
+            library[i].checkFailed = false
+            changed += 1
+        }
+        if changed > 0 { saveLibrary() }
+        return "\(changed) mod\(changed == 1 ? "" : "s") reset."
+    }
+
+    func devResetSettings() -> String {
+        let defaults = UserDefaults.standard
+        var removed = 0
+        for key in defaults.dictionaryRepresentation().keys where key.hasPrefix("options.") || key.hasPrefix("browser.") {
+            defaults.removeObject(forKey: key)
+            removed += 1
+        }
+        return "\(removed) setting\(removed == 1 ? "" : "s") reset."
+    }
 
     // MARK: finalising a download (flatten Steam's <id>/mods/<mod> layout, write info file)
 
@@ -1335,6 +1639,229 @@ final class WorkshopStore: ObservableObject {
     nonisolated static func isInsideAppStorage(_ url: URL) -> Bool {
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].path
         return url.path == documents || url.path.hasPrefix(documents + "/")
+    }
+
+    /// The path a saved folder points at now. A reinstalled app gets a fresh data container, so an
+    /// absolute path saved by the previous install would read as "the files were moved"; only what
+    /// follows Documents is kept, and put in front of the container that is running.
+    nonisolated static func currentPath(for saved: String) -> String {
+        guard !saved.isEmpty else { return saved }
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].path
+        if saved == documents || saved.hasPrefix(documents + "/") { return saved }
+        if saved.hasPrefix("/") {
+            if let range = saved.range(of: "/Documents") { return documents + String(saved[range.upperBound...]) }
+            return saved
+        }
+        return documents + "/" + saved
+    }
+
+    /// Finds a folder the library has lost track of: sitting where an installer left it, next to
+    /// "Downloaded Mods" instead of inside it, or one level down from where the record points.
+    nonisolated static func locateFolder(named name: String, near documents: URL) -> URL? {
+        let fm = FileManager.default
+        guard !name.isEmpty, !name.hasPrefix(".") else { return nil }
+        let roots = [documents, documents.appendingPathComponent("Downloaded Mods", isDirectory: true)]
+        for root in roots {
+            let direct = root.appendingPathComponent(name, isDirectory: true)
+            if fm.fileExists(atPath: direct.path) { return direct }
+        }
+        for root in roots {
+            let children = (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
+            for child in children where (try? child.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
+                let candidate = child.appendingPathComponent(name, isDirectory: true)
+                if fm.fileExists(atPath: candidate.path) { return candidate }
+            }
+        }
+        return nil
+    }
+
+    /// The hidden manifest that lives inside every mod's folder.
+    nonisolated static func manifestURL(in folder: URL) -> URL {
+        folder.appendingPathComponent(modShelfManifestName)
+    }
+
+    nonisolated static func writeManifest(_ manifest: InstalledModManifest, in folder: URL) {
+        guard let data = try? JSONEncoder().encode(manifest) else { return }
+        try? data.write(to: manifestURL(in: folder), options: .atomic)
+    }
+
+    nonisolated static func readManifest(in folder: URL) -> InstalledModManifest? {
+        guard let data = try? Data(contentsOf: manifestURL(in: folder)) else { return nil }
+        return try? JSONDecoder().decode(InstalledModManifest.self, from: data)
+    }
+
+    /// Reads the visible info file, for downloads made before the hidden manifest existed. It is a
+    /// plain "Key: value" list, so a few lines are enough to identify the mod again.
+    nonisolated static func readInfoFile(in folder: URL) -> InstalledModManifest? {
+        let url = folder.appendingPathComponent(modShelfInfoFileName)
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "d MMM yyyy, h:mm a"
+        var manifest = InstalledModManifest(workshopID: "")
+        for line in text.split(separator: "\n") {
+            guard let colon = line.firstIndex(of: ":") else { continue }
+            let key = line[..<colon].trimmingCharacters(in: .whitespaces)
+            let value = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+            switch key {
+            case "Workshop ID": manifest.workshopID = value
+            case "Title": manifest.title = value
+            case "Game":
+                if let open = value.lastIndex(of: "("), value.hasSuffix(")") {
+                    let appID = value[value.index(after: open)..<value.index(before: value.endIndex)].filter { $0.isNumber }
+                    manifest.gameName = String(value[value.startIndex..<open]).trimmingCharacters(in: .whitespaces)
+                    if !appID.isEmpty { manifest.appID = appID }
+                } else {
+                    manifest.gameName = value
+                }
+            case "Last updated on Workshop":
+                if let date = formatter.date(from: value) { manifest.publishedUpdatedAt = Int(date.timeIntervalSince1970) }
+            case "Installed on":
+                if let date = formatter.date(from: value) { manifest.installedAt = date }
+            default: break
+            }
+        }
+        guard !manifest.workshopID.isEmpty else { return nil }
+        return manifest
+    }
+
+    /// Every folder under `root` that carries a manifest, by Workshop ID, `depth` levels down.
+    nonisolated static func foldersWithManifest(in root: URL, depth: Int) -> [String: URL] {
+        let fm = FileManager.default
+        var found: [String: URL] = [:]
+        func walk(_ url: URL, _ remaining: Int) {
+            guard remaining > 0 else { return }
+            let children = (try? fm.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
+            for child in children {
+                guard !child.lastPathComponent.hasPrefix("."),
+                      (try? child.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { continue }
+                if let manifest = readManifest(in: child) ?? readInfoFile(in: child), found[manifest.workshopID] == nil {
+                    found[manifest.workshopID] = child
+                }
+                walk(child, remaining - 1)
+            }
+        }
+        walk(root, depth)
+        return found
+    }
+
+    /// Points every saved mod path at this install's storage, and at wherever its folder is now, so
+    /// an app update no longer leaves the whole library reading as moved and unable to be updated.
+    /// A folder that cannot be matched by name is matched by the Workshop ID in its hidden manifest.
+    func repairFolders() {
+        let fm = FileManager.default
+        let root = downloadsRoot
+        var changed = false
+        var missing = false
+        var diskIndex: [String: URL]?
+
+        /// Built once, and only when a path is actually lost: it reads every mod folder's manifest.
+        func foldersOnDisk() -> [String: URL] {
+            if let diskIndex { return diskIndex }
+            var found = Self.foldersWithManifest(in: root, depth: 2)
+            for (id, url) in Self.foldersWithManifest(in: documents, depth: 2) where found[id] == nil { found[id] = url }
+            diskIndex = found
+            return found
+        }
+
+        for i in library.indices {
+            let current = Self.currentPath(for: library[i].folder)
+            if current != library[i].folder { library[i].folder = current; changed = true }
+            var folder = URL(fileURLWithPath: library[i].folder, isDirectory: true)
+
+            if !fm.fileExists(atPath: folder.path) {
+                missing = true
+                if let found = foundFolder(named: folder.lastPathComponent, id: library[i].id,
+                                           root: root, index: foldersOnDisk) {
+                    folder = found
+                    library[i].folder = found.path
+                    changed = true
+                }
+            }
+            guard fm.fileExists(atPath: folder.path) else { continue }
+            if library[i].filesMoved { library[i].filesMoved = false; changed = true }
+
+            // A mod installed by an older build has no manifest yet; the library fills one in, so this
+            // is the last launch that has to work anything out from the folder name.
+            if Self.readManifest(in: folder) == nil {
+                Self.writeManifest(InstalledModManifest(workshopID: library[i].id,
+                                                        title: library[i].displayTitle,
+                                                        appID: library[i].appID,
+                                                        gameName: library[i].gameName,
+                                                        publishedUpdatedAt: library[i].publishedUpdatedAt,
+                                                        installedAt: library[i].addedAt,
+                                                        fileCount: library[i].fileCount,
+                                                        byteCount: library[i].byteCount,
+                                                        modShelfVersion: modShelfVersion),
+                                   in: folder)
+            }
+
+            // Whatever the folder itself remembers fills in what the library lost, so an update is
+            // compared against the version that is really installed.
+            if let manifest = Self.readManifest(in: folder) {
+                if library[i].publishedUpdatedAt == nil, let stamp = manifest.publishedUpdatedAt, stamp > 0 {
+                    library[i].publishedUpdatedAt = stamp; changed = true
+                }
+                if library[i].appID == nil, let app = manifest.appID { library[i].appID = app; changed = true }
+                if (library[i].gameName ?? "").isEmpty, let game = manifest.gameName, !game.isEmpty {
+                    library[i].gameName = game; changed = true
+                }
+                if (library[i].title ?? "").isEmpty, let title = manifest.title, !title.isEmpty {
+                    library[i].title = title; changed = true
+                }
+            }
+        }
+
+        // A folder with a manifest but no library entry (a library file that went missing, or a game
+        // folder put back by hand) is taken back into the library as it was installed.
+        if missing || library.isEmpty {
+            let known = Set(library.map(\.id))
+            for (id, folder) in foldersOnDisk() where !known.contains(id) {
+                guard let manifest = Self.readManifest(in: folder) ?? Self.readInfoFile(in: folder) else { continue }
+                let counts = Self.scan(folder: folder.path)
+                guard counts.exists, counts.count > 0 else { continue }
+                Self.writeManifest(manifest, in: folder)
+                var item = WorkshopItem(id: id, folder: folder.path,
+                                        addedAt: manifest.installedAt ?? Date(),
+                                        updatedAt: manifest.installedAt ?? Date())
+                item.title = manifest.title
+                item.appID = manifest.appID
+                item.gameName = manifest.gameName
+                item.publishedUpdatedAt = manifest.publishedUpdatedAt
+                item.fileCount = counts.count
+                item.byteCount = counts.bytes
+                library.append(item)
+                changed = true
+            }
+        }
+
+        if changed { saveLibrary(); refreshLibraryBytes() }
+    }
+
+    /// A mod folder whose saved path is gone: matched by name first, then by the Workshop ID in its
+    /// manifest, which also survives the folder being renamed. A game folder that ended up loose in
+    /// the app's storage is moved back under "Downloaded Mods" so Files shows one tidy tree.
+    private func foundFolder(named name: String, id: String,
+                             root: URL, index: () -> [String: URL]) -> URL? {
+        let fm = FileManager.default
+        if var found = Self.locateFolder(named: name, near: documents) {
+            if !found.path.hasPrefix(root.path + "/") {
+                let game = found.deletingLastPathComponent()
+                let target = root.appendingPathComponent(game.lastPathComponent, isDirectory: true)
+                if game.deletingLastPathComponent().path == documents.path,
+                   !fm.fileExists(atPath: target.path),
+                   (try? fm.moveItem(at: game, to: target)) != nil {
+                    let oldPrefix = game.path, newPrefix = target.path
+                    for j in library.indices {
+                        let path = library[j].folder
+                        guard path == oldPrefix || path.hasPrefix(oldPrefix + "/") else { continue }
+                        library[j].folder = newPrefix + String(path.dropFirst(oldPrefix.count))
+                    }
+                    found = target.appendingPathComponent(name, isDirectory: true)
+                }
+            }
+            return found
+        }
+        return index()[id]
     }
 
     /// Installs a finished download. The old installation is moved aside first and only removed once
@@ -1401,6 +1928,17 @@ final class WorkshopStore: ObservableObject {
         } else {
             try? fm.removeItem(at: infoURL)
         }
+        // The hidden manifest is written either way: it is how the folder is recognised later.
+        Self.writeManifest(InstalledModManifest(workshopID: id,
+                                                title: meta.title,
+                                                appID: meta.appID ?? existing?.appID,
+                                                gameName: meta.gameName ?? existing?.gameName,
+                                                publishedUpdatedAt: meta.updatedAt > 0 ? meta.updatedAt : existing?.publishedUpdatedAt,
+                                                installedAt: existing?.addedAt ?? Date(),
+                                                fileCount: counts.count,
+                                                byteCount: counts.bytes,
+                                                modShelfVersion: modShelfVersion),
+                           in: destination)
         return (destination, counts.count, counts.bytes)
     }
 
@@ -1431,11 +1969,22 @@ final class WorkshopStore: ObservableObject {
     }
 
     /// Rewrites the info file inside a mod's folder with the freshest Workshop numbers, so an update
-    /// never leaves the previous version's dates in it.
+    /// never leaves the previous version's dates in it. The hidden manifest is always refreshed; the
+    /// visible file only when the option asks for it.
     private func rewriteInfoFile(_ item: WorkshopItem, meta: WorkshopMetadata) {
-        guard UserDefaults.standard.object(forKey: "options.infoFile") as? Bool ?? true else { return }
         let folder = URL(fileURLWithPath: item.folder, isDirectory: true)
         guard FileManager.default.fileExists(atPath: folder.path) else { return }
+        Self.writeManifest(InstalledModManifest(workshopID: item.id,
+                                                title: meta.title,
+                                                appID: meta.appID ?? item.appID,
+                                                gameName: meta.gameName ?? item.gameName,
+                                                publishedUpdatedAt: meta.updatedAt > 0 ? meta.updatedAt : item.publishedUpdatedAt,
+                                                installedAt: item.addedAt,
+                                                fileCount: item.fileCount,
+                                                byteCount: item.lastVerifiedBytes ?? item.byteCount,
+                                                modShelfVersion: modShelfVersion),
+                           in: folder)
+        guard UserDefaults.standard.object(forKey: "options.infoFile") as? Bool ?? true else { return }
         let text = infoText(meta: meta, id: item.id, files: item.fileCount ?? 0, bytes: item.lastVerifiedBytes ?? item.byteCount ?? 0,
                             existing: item, singleMod: false)
         try? text.write(to: folder.appendingPathComponent(modShelfInfoFileName), atomically: true, encoding: .utf8)
@@ -1466,7 +2015,7 @@ final class WorkshopStore: ObservableObject {
         var count = 0
         var bytes: Int64 = 0
         for case let file as URL in en {
-            if file.lastPathComponent == modShelfInfoFileName { continue }
+            if file.lastPathComponent == modShelfInfoFileName || file.lastPathComponent == modShelfManifestName { continue }
             let values = try? file.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
             if values?.isRegularFile == true { count += 1; bytes += Int64(values?.fileSize ?? 0) }
         }
@@ -1693,21 +2242,23 @@ final class WorkshopStore: ObservableObject {
 
     func verify(_ item: WorkshopItem) {
         guard !isVerifyingAll else { return }
-        guard item.isInsideModShelf else {
-            operationMessage = movedMessage(item)
+        repairFolders()
+        let latest = library.first(where: { $0.id == item.id }) ?? item
+        guard latest.isInsideModShelf else {
+            operationMessage = movedMessage(latest)
             return
         }
-        operationMessage = "Validating \(item.displayTitle)…"
+        operationMessage = "Validating \(latest.displayTitle)…"
         Task { @MainActor in
-            switch await checkFiles(id: item.id, folder: item.folder) {
+            switch await checkFiles(id: latest.id, folder: latest.folder) {
             case .ok:
-                operationMessage = "\(item.displayTitle) matches Steam."
+                operationMessage = "\(latest.displayTitle) matches Steam."
             case .mismatch:
-                operationMessage = "\(item.displayTitle) doesn't match Steam. Download it again to repair it."
+                operationMessage = "\(latest.displayTitle) doesn't match Steam. Download it again to repair it."
             case .moved:
-                operationMessage = "\(item.displayTitle) isn't in ModShelf any more, so its files were probably moved into the game."
+                operationMessage = "\(latest.displayTitle) isn't in ModShelf any more, so its files were probably moved into the game."
             case .unknown:
-                operationMessage = "\(item.displayTitle) is still there, but Steam has no size to compare."
+                operationMessage = "\(latest.displayTitle) is still there, but Steam has no size to compare."
             }
         }
     }
@@ -1715,6 +2266,7 @@ final class WorkshopStore: ObservableObject {
     func verifyAllFiles() {
         guard !isVerifyingAll else { return }
         guard !library.isEmpty else { return }
+        repairFolders()
         isVerifyingAll = true
         let entries = library.map { (id: $0.id, title: $0.displayTitle, folder: $0.folder, inside: $0.isInsideModShelf) }
         Task { @MainActor in
@@ -1774,7 +2326,16 @@ final class WorkshopStore: ObservableObject {
             return false
         }
         guard let index = library.firstIndex(where: { $0.id == item.id }) else { return false }
-        let installedStamp = library[index].publishedUpdatedAt ?? 0
+        var installedStamp = library[index].publishedUpdatedAt ?? 0
+        if installedStamp == 0 {
+            // The hidden manifest knows which version was installed, so a real update is not mistaken
+            // for the current one when the library entry lost its stamp.
+            let folder = URL(fileURLWithPath: library[index].folder, isDirectory: true)
+            if let stamp = Self.readManifest(in: folder)?.publishedUpdatedAt, stamp > 0 {
+                installedStamp = stamp
+                library[index].publishedUpdatedAt = stamp
+            }
+        }
         if installedStamp == 0 {
             library[index].publishedUpdatedAt = meta.updatedAt   // legacy entry: treat the current version as installed
             library[index].updateAvailable = false
@@ -1833,6 +2394,7 @@ final class WorkshopStore: ObservableObject {
     func runLaunchChecks() {
         guard !didLaunchChecks else { return }
         didLaunchChecks = true
+        repairFolders()
         var changed = false
         let fm = FileManager.default
         for i in library.indices {
@@ -2396,6 +2958,9 @@ struct ContentView: View {
     @State private var upwardRun: CGFloat = 0
     @State private var browserHomeToken = 0
     @State private var lastWorkshopTap = Date.distantPast
+    @State private var showDeveloperMenu = false
+    @State private var logoTapCount = 0
+    @State private var lastLogoTap = Date.distantPast
 
     /// Space reserved under every tab for the tab bar, so content can always scroll clear of it.
     private var tabBarReserve: CGFloat { tabStyle == "bar" ? 84 : 100 }
@@ -2535,6 +3100,7 @@ struct ContentView: View {
             overlays
         }
         .sheet(isPresented: $store.showLogin) { loginSheet.presentationDetents([.medium, .large]) }
+        .sheet(isPresented: $showDeveloperMenu) { DeveloperMenuView(store: store) }
         .sheet(isPresented: $showShare, onDismiss: { store.shareURL = nil }) { if let url = store.shareURL { ShareSheet(activityItems: [url]) } }
         .sheet(isPresented: Binding(get: { store.revealFolderURL != nil },
                                     set: { if !$0 { store.revealFolderURL = nil } })) {
@@ -2721,7 +3287,7 @@ struct ContentView: View {
             Color.black.opacity(0.38).ignoresSafeArea().contentShape(Rectangle())
                 .onTapGesture { confirmBulkDelete = false }.zIndex(14)
             ConfirmPopup(heading: "Delete \(selection.count) mod\(selection.count == 1 ? "" : "s")?",
-                         message: "Their downloaded files will be removed from this iPhone. You can download them again later.",
+                         message: "Their downloaded files will be removed from this device. You can download them again later.",
                          actionTitle: "Delete",
                          confirm: {
                              deleteSelected()
@@ -2784,6 +3350,8 @@ struct ContentView: View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
                 brandLogo
+                    .contentShape(Rectangle())
+                    .onTapGesture { logoTapped() }
                 Spacer()
                 signInPill
             }
@@ -3011,7 +3579,8 @@ struct ContentView: View {
                             HStack(spacing: 10) { ProgressView(); Text("Loading Workshop details…").font(.subheadline).foregroundStyle(.secondary) }.padding(.vertical, 2)
                         }
                         if let item = store.preview { metadataCard(item) }
-                        if store.isDownloading { progressCard }
+                        if !store.queueRows.isEmpty { queueCard }
+                        else if store.isDownloading { progressCard }
                         else if let item = store.preview { downloadButton(item) }
                         if store.preview == nil && !store.isDownloading { browseRow }
                     }
@@ -3022,6 +3591,90 @@ struct ContentView: View {
             .scrollDismissesKeyboard(.interactively)
             .background(Color(uiColor: .systemGroupedBackground))
             .toolbar(.hidden, for: .navigationBar)
+        }
+    }
+
+    /// Taps on the logo are counted silently; nothing in the app suggests they lead anywhere.
+    private func logoTapped() {
+        let now = Date()
+        if now.timeIntervalSince(lastLogoTap) > 1.5 { logoTapCount = 0 }
+        lastLogoTap = now
+        logoTapCount += 1
+        if logoTapCount >= 20 {
+            logoTapCount = 0
+            showDeveloperMenu = true
+        }
+    }
+
+    /// The running batch: a header saying which one it is on, then a row per mod with its progress.
+    private var queueCard: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 10) {
+                Text("Downloading \(min(store.queueStep, store.queueTotal)) of \(store.queueTotal)")
+                    .font(.system(size: 16, weight: .bold, design: .rounded))
+                Spacer(minLength: 8)
+                Button { Haptics.tap(); store.cancel() } label: {
+                    Image(systemName: "xmark").font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 30, height: 30)
+                        .background(Circle().fill(Color.primary.opacity(0.08)))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Cancel downloads")
+            }
+            .padding(.horizontal, 14).padding(.top, 12).padding(.bottom, 8)
+
+            ForEach(store.queueRows) { row in
+                queueRow(row)
+            }
+        }
+        .padding(.bottom, 6)
+        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    private func queueRow(_ row: DownloadQueueRow) -> some View {
+        HStack(spacing: 12) {
+            Color.clear
+                .frame(width: 56, height: 56)
+                .overlay(CachedImage(urlString: row.imageURL, fill: true, maxPixel: 200).allowsHitTesting(false))
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            VStack(alignment: .leading, spacing: 7) {
+                Text(row.title).font(.system(size: 15, weight: .semibold)).lineLimit(1)
+                queueBar(row)
+            }
+            Spacer(minLength: 8)
+            queueStatus(row)
+        }
+        .padding(.horizontal, 14).padding(.vertical, 8)
+    }
+
+    private func queueBar(_ row: DownloadQueueRow) -> some View {
+        let fraction = row.state == .done ? 1 : min(1, max(0, row.progress))
+        let tint: Color = row.state == .failed ? .red : (row.state == .done ? .green : Color.accentColor)
+        return GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.primary.opacity(0.08))
+                Capsule().fill(tint).frame(width: geo.size.width * fraction)
+            }
+        }
+        .frame(height: 5)
+    }
+
+    @ViewBuilder private func queueStatus(_ row: DownloadQueueRow) -> some View {
+        switch row.state {
+        case .waiting:
+            Image(systemName: "clock")
+                .font(.system(size: 12, weight: .semibold)).foregroundStyle(.tertiary)
+        case .downloading:
+            Text("\(Int(row.progress * 100))%")
+                .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                .foregroundStyle(Color.accentColor)
+        case .done:
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 15, weight: .semibold)).foregroundStyle(.green)
+        case .failed:
+            Image(systemName: "exclamationmark.circle.fill")
+                .font(.system(size: 15, weight: .semibold)).foregroundStyle(.red)
         }
     }
 
@@ -3125,6 +3778,11 @@ struct ContentView: View {
                 .accessibilityLabel("Cancel download")
             }
             progressBar(downloadProgress)
+            if store.queueTotal > 1 {
+                Text("Update \(store.queueStep) of \(store.queueTotal)")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
         }
         .padding(14)
         .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
@@ -3848,7 +4506,7 @@ struct ContentView: View {
                 divider
                 toggleRow("Show Workshop IDs", symbol: "number", isOn: $showIDs)
                 divider
-                toggleRow("Haptic feedback", symbol: "iphone.radiowaves.left.and.right", isOn: $haptics)
+                toggleRow("Haptic feedback", symbol: "hand.tap", isOn: $haptics)
                 divider
                 row("Scrolling text speed", symbol: "speedometer") {
                     Text(marqueeSpeed < 0.25 ? "Off" : String(format: "%.2f×", marqueeSpeed))
@@ -4207,6 +4865,13 @@ struct ItemDetailPopup: View {
                             .frame(maxWidth: .infinity).frame(height: 42)
                             .background(RoundedRectangle(cornerRadius: 11).fill(Color.orange))
                     }.buttonStyle(.plain)
+                } else if item.filesBroken {
+                    // A mod whose files no longer match Steam can only be put right by fetching it again.
+                    Button { Haptics.medium(); onUpdate() } label: {
+                        Label("Reinstall", systemImage: "arrow.down.circle.fill").font(.system(size: 14, weight: .semibold)).foregroundStyle(.white)
+                            .frame(maxWidth: .infinity).frame(height: 42)
+                            .background(RoundedRectangle(cornerRadius: 11).fill(Color.orange))
+                    }.buttonStyle(.plain)
                 }
                 Button { Haptics.tap(); store.revealInFiles(item) } label: {
                     Image(systemName: "folder").font(.system(size: 15, weight: .semibold)).foregroundStyle(Color.accentColor)
@@ -4263,8 +4928,13 @@ struct ItemActionPopup: View {
             .padding(.horizontal, 16).padding(.top, 16).padding(.bottom, 10)
             action("Open Workshop page", "safari", favourite: false, action: openWorkshop)
             action(item.isFavourite ? "Remove favourite" : "Add favourite", item.isFavourite ? "star.fill" : "star", favourite: true, action: favourite)
-            if item.updateAvailable { action("Update now", "arrow.down.circle", favourite: false, action: updateNow) }
-            action("Check for updates", "arrow.clockwise", favourite: false, action: checkUpdates)
+            if item.updateAvailable {
+                action("Update now", "arrow.down.circle", favourite: false, action: updateNow)
+            } else {
+                action("Check for updates", "arrow.clockwise", favourite: false, action: checkUpdates)
+                // A mod whose files were damaged can only be put right by fetching it again.
+                if item.filesBroken { action("Download again", "arrow.down.circle", favourite: false, action: updateNow) }
+            }
             action("Verify files", "checkmark.shield", favourite: false, action: verify)
             action("Export as ZIP", "square.and.arrow.up", favourite: false, action: export)
             action("Reveal in Files", "folder", favourite: false, action: reveal)
@@ -4360,7 +5030,7 @@ struct DeleteConfirmationPopup: View {
         VStack(spacing: 14) {
             Image(systemName: "trash.fill").font(.system(size: 30)).foregroundStyle(.red)
             Text("Delete \(title)?").font(.headline).multilineTextAlignment(.center)
-            Text("The downloaded files will be removed from this iPhone. You can download the mod again later.")
+            Text("The downloaded files will be removed from this device. You can download the mod again later.")
                 .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
             HStack(spacing: 10) {
                 Button(action: cancel) {
@@ -5027,6 +5697,12 @@ final class WorkshopCatalogue {
     private init() {
         let cached = Self.loadCache()
         entries = cached.isEmpty ? nil : cached
+    }
+
+    /// Forgets the downloaded game list and its cache file, so it is fetched again next time.
+    func clearCache() {
+        entries = nil
+        if let url = Self.cacheURL { try? FileManager.default.removeItem(at: url) }
     }
 
     func games() async -> [GameHit] {
@@ -5808,5 +6484,123 @@ struct WorkshopWebContainer: UIViewRepresentable {
             guard message.name == "modshelf", let id = message.body as? String else { return }
             parent.onOpenInApp(id)
         }
+    }
+}
+
+
+// MARK: - Developer menu
+//
+// Nothing in the app points here: it opens after twenty quick taps on the logo in the header.
+
+struct DeveloperMenuView: View {
+    @ObservedObject var store: WorkshopStore
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var fakeCount = 3
+    @State private var fakeEvery = 0
+    @State private var fakeSpeed = 2.0
+    @State private var report: String?
+    @State private var showingManifests = false
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("Simulation") {
+                    Stepper("Mods in the fake update: \(fakeCount)", value: $fakeCount, in: 1...10)
+                    Stepper("Fail every: \(fakeEvery == 0 ? "off" : "\(fakeEvery)")", value: $fakeEvery, in: 0...5)
+                    HStack {
+                        Text("Seconds per mod")
+                        Spacer()
+                        Text(String(format: "%.1f", fakeSpeed)).foregroundStyle(.secondary)
+                    }
+                    Slider(value: $fakeSpeed, in: 0.5...8, step: 0.5)
+                    Button("Fake update all") {
+                        report = nil
+                        store.devFakeUpdateAll(count: fakeCount, failEvery: fakeEvery, seconds: fakeSpeed)
+                    }
+                    Button("Fake download success") {
+                        report = nil
+                        store.devFakeDownload(fail: false, seconds: fakeSpeed)
+                    }
+                    Button("Fake download failure") {
+                        report = nil
+                        store.devFakeDownload(fail: true, seconds: fakeSpeed)
+                    }
+                    Button("Simulate an available update") {
+                        report = store.devMarkUpdates(count: fakeCount)
+                    }
+                }
+
+                Section("Storage") {
+                    Button("Run folder repair") { report = store.devRepairReport() }
+                    Button("Rewrite manifests and info files") { report = store.devRewriteManifests() }
+                    NavigationLink("Hidden manifests") { DevManifestList(store: store) }
+                    Button("Storage report") { report = store.devStorageReport() }
+                }
+
+                Section("Maintenance") {
+                    Button("Clear image cache") {
+                        ImageStore.shared.clear()
+                        report = "Image cache cleared."
+                    }
+                    Button("Clear Steam session cache") { report = store.devClearSteamCache() }
+                    Button("Clear Workshop catalogue") {
+                        WorkshopCatalogue.shared.clearCache()
+                        report = "Workshop catalogue cleared."
+                    }
+                    Button("Clear download history") {
+                        store.clearHistory()
+                        report = "Download history cleared."
+                    }
+                    Button("Reset moved and broken flags") { report = store.devResetFlags() }
+                    Button("Reset all settings", role: .destructive) { report = store.devResetSettings() }
+                }
+
+                Section("Engine") {
+                    LabeledContent("Status", value: store.devEngineStatus)
+                    LabeledContent("Progress", value: String(format: "%.2f", store.devEngineProgress))
+                    LabeledContent("File", value: store.devEngineFile.isEmpty ? "—" : store.devEngineFile)
+                    LabeledContent("Last error", value: store.devEngineError.isEmpty ? "—" : store.devEngineError)
+                    Button("Copy debug snapshot") {
+                        UIPasteboard.general.string = store.devSnapshot
+                        report = "Snapshot copied."
+                    }
+                }
+
+                if let report {
+                    Section("Last result") {
+                        Text(report)
+                            .font(.system(size: 12, design: .monospaced))
+                            .textSelection(.enabled)
+                    }
+                }
+            }
+            .navigationTitle("Developer")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+            }
+        }
+    }
+}
+
+struct DevManifestList: View {
+    @ObservedObject var store: WorkshopStore
+
+    var body: some View {
+        List(store.library) { item in
+            NavigationLink(item.displayTitle) {
+                ScrollView {
+                    Text(store.devManifestJSON(for: item))
+                        .font(.system(size: 12, design: .monospaced))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding()
+                        .textSelection(.enabled)
+                }
+                .navigationTitle(item.displayTitle)
+                .navigationBarTitleDisplayMode(.inline)
+            }
+        }
+        .navigationTitle("Hidden manifests")
     }
 }
