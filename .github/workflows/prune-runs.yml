@@ -1,0 +1,55 @@
+name: Prune workflow runs
+
+# Deletes every workflow run except the newest one. The run this creates is itself the newest, so
+# it survives, which is what you want: dispatch it and come back to a clean Actions list.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: prune-runs
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    name: Keep the newest run, delete the rest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Delete all but the newest run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # Every run in this repository, newest first.
+          gh api --paginate "repos/$REPO/actions/runs?per_page=100" \
+            --jq '.workflow_runs[] | [.id, .status, .created_at] | @tsv' \
+            | sort -k3 -r > runs.tsv
+
+          total=$(wc -l < runs.tsv | tr -d ' ')
+          if [ "$total" -le 1 ]; then
+            echo "Only $total run(s); nothing to delete."
+            exit 0
+          fi
+
+          keep=$(head -n1 runs.tsv | cut -f1)
+          echo "Keeping run $keep (the newest of $total)."
+
+          tail -n +2 runs.tsv | while IFS=$'\t' read -r id status created; do
+            case "$status" in
+              in_progress|queued|requested|waiting|pending)
+                echo "Skipping $id: $status"
+                continue
+                ;;
+            esac
+            echo "Deleting $id ($created, $status)"
+            gh api -X DELETE "repos/$REPO/actions/runs/$id" >/dev/null || echo "  could not delete $id"
+          done
+
+          echo "Done."
