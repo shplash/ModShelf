@@ -34,7 +34,7 @@ jobs:
       # produces is reused until ios-engine changes.
       - name: Restore SteamEngine.xcframework
         id: engine-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: SteamEngine.xcframework
           key: steamengine-${{ runner.os }}-${{ hashFiles('ios-engine/**') }}
@@ -86,7 +86,7 @@ jobs:
           done
 
       - name: Restore the Homebrew cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/Library/Caches/Homebrew
           key: homebrew-${{ runner.os }}-xcodegen
@@ -112,7 +112,7 @@ jobs:
       # Swift packages and the previous build are keyed on the sources, so a
       # rebuild after an app change still gets the warm DerivedData.
       - name: Restore Swift packages and build output
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             build/SourcePackages
