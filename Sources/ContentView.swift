@@ -535,7 +535,7 @@ enum SteamMeta {
 
         if let m = firstMatch(#"class="fileRating"[^>]*?src="[^"]*?/(\d)-star"#, in: html), let n = Double(m) { meta.rating = n }
         else if let m = firstMatch(#"(\d)-star(?:_large)?\.png"#, in: html), let n = Double(m) { meta.rating = n }
-        if let m = firstMatch(#"class="numRatings"[^>]*>\s*([\d,\.\s]+)\s*(?:rating|Rating)"#, in: html) {
+        if let m = firstMatch(#"class="numRatings"[^>]*>[\s\S]{0,64}?([\d][\d,\.\s]*)"#, in: html) {
             let digits = m.filter { $0.isNumber }
             if let n = Int(digits) { meta.ratingCount = n }
         }
@@ -1319,10 +1319,16 @@ final class WorkshopStore: ObservableObject {
         return root.appendingPathComponent("\(name) (\(id)-\(UUID().uuidString.prefix(4)))", isDirectory: true)
     }
 
-    /// Renames when both folders share a volume, which is instant, and copies when they do not.
-    /// Everything ModShelf installs lives in its own storage, so a plain move is enough.
+    /// Moves a finished download into place, falling back to a copy when the move is refused (a
+    /// folder can refuse a rename across containers while still accepting the bytes).
     nonisolated static func place(from source: URL, to destination: URL) throws {
-        try FileManager.default.moveItem(at: source, to: destination)
+        let fm = FileManager.default
+        do {
+            try fm.moveItem(at: source, to: destination)
+        } catch {
+            try fm.copyItem(at: source, to: destination)
+            try? fm.removeItem(at: source)
+        }
     }
 
     /// Whether a URL lives in ModShelf's own storage, where plain file operations are enough.
@@ -2659,6 +2665,11 @@ struct ContentView: View {
             ItemDetailPopup(item: currentItem(item), store: store, showIDs: showIDs,
                             onClose: { withAnimation(.easeOut(duration: 0.16)) { popupItem = nil } },
                             onOpenWorkshop: { openWorkshop(item.id); popupItem = nil },
+                            onUpdate: {
+                                store.update(item)
+                                selectedTab = 0
+                                withAnimation(.easeOut(duration: 0.16)) { popupItem = nil }
+                            },
                             onDelete: { store.requestDelete(item); popupItem = nil })
                 .padding(20).transition(.scale(scale: 0.97).combined(with: .opacity)).zIndex(5)
         }
@@ -4138,6 +4149,7 @@ struct ItemDetailPopup: View {
     let showIDs: Bool
     let onClose: () -> Void
     let onOpenWorkshop: () -> Void
+    let onUpdate: () -> Void
     let onDelete: () -> Void
 
     var body: some View {
@@ -4168,7 +4180,7 @@ struct ItemDetailPopup: View {
                     .accessibilityLabel("Close")
             }
             if let d = item.description, !d.isEmpty {
-                ScrollView { ExpandableDescription(text: d, lineLimit: 7) }.frame(maxHeight: 170)
+                ScrollView { ExpandableDescription(text: d, lineLimit: 9) }.frame(maxHeight: 215)
             }
             if !item.tags.isEmpty {
                 Text("Tags: " + item.tags.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary).lineLimit(2)
@@ -4190,7 +4202,7 @@ struct ItemDetailPopup: View {
                         .background(RoundedRectangle(cornerRadius: 11).fill(Color.accentColor.opacity(0.14)))
                 }.buttonStyle(.plain)
                 if item.updateAvailable {
-                    Button { Haptics.medium(); store.update(item) } label: {
+                    Button { Haptics.medium(); onUpdate() } label: {
                         Label("Update", systemImage: "arrow.down.circle.fill").font(.system(size: 14, weight: .semibold)).foregroundStyle(.white)
                             .frame(maxWidth: .infinity).frame(height: 42)
                             .background(RoundedRectangle(cornerRadius: 11).fill(Color.orange))
@@ -5371,8 +5383,8 @@ struct BrowserHome: View {
         HStack(spacing: 0) {
             Button { openGame(hit) } label: {
                 HStack(spacing: 12) {
-                    CachedImage(urlString: hit.tiny_image, fill: true, maxPixel: 120)
-                        .frame(width: 46, height: 46)
+                    CachedImage(urlString: hit.tiny_image, fill: true, maxPixel: 160)
+                        .frame(width: 56, height: 56)
                         .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                     Text(hit.name)
                         .font(.system(size: 15, weight: .semibold)).lineLimit(2)
