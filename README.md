@@ -89,6 +89,10 @@ builds `SteamEngine.xcframework` from `ios-engine/`, packages an ad-hoc signed I
 private draft release ("ModShelf builds") that keeps only the latest build; only people with write
 access can see it, and releases are published by hand from that build.
 
+## License
+
+Licensed under MPL-2.0.
+
 ## Notes
 
 Steam and the Steam Workshop are trademarks of Valve Corporation. ModShelf is not made by or endorsed by Valve.
