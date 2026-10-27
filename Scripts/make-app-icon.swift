@@ -31,6 +31,28 @@ func writeOpaquePNG(_ draw: (CGContext) -> Void) {
         exit(1)
     }
     do { try png.write(to: output) } catch { exit(1) }
+    writeRoundedCopy()
+}
+
+/// Also writes the icon with rounded corners, for the README, where GitHub strips CSS.
+func writeRoundedCopy() {
+    let rounded = root.appendingPathComponent("assets/appicon-rounded.png")
+    guard let data = try? Data(contentsOf: output),
+          let source = CGImageSourceCreateWithData(data as CFData, nil),
+          let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return }
+    try? FileManager.default.createDirectory(at: rounded.deletingLastPathComponent(), withIntermediateDirectories: true)
+    let space = CGColorSpaceCreateDeviceRGB()
+    guard let ctx = CGContext(data: nil, width: Int(canvas), height: Int(canvas), bitsPerComponent: 8, bytesPerRow: 0,
+                              space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return }
+    let rect = CGRect(x: 0, y: 0, width: canvas, height: canvas)
+    let radius = canvas * 0.22
+    ctx.addPath(CGPath(roundedRect: rect, cornerWidth: radius, cornerHeight: radius, transform: nil))
+    ctx.clip()
+    ctx.draw(image, in: rect)
+    guard let out = ctx.makeImage(),
+          let png = NSBitmapImageRep(cgImage: out).representation(using: .png, properties: [:]) else { return }
+    try? png.write(to: rounded)
+    print("Wrote \(rounded.path)")
 }
 
 // An icon already exists: scale it onto an opaque square instead of replacing the artwork.
@@ -39,6 +61,7 @@ if let data = try? Data(contentsOf: output),
    let art = CGImageSourceCreateImageAtIndex(source, 0, nil) {
     if art.width == Int(canvas), art.height == Int(canvas), art.alphaInfo == .none || art.alphaInfo == .noneSkipLast {
         print("AppIcon.png is already 1024x1024 and opaque; leaving it alone.")
+        writeRoundedCopy()
         exit(0)
     }
     writeOpaquePNG { ctx in

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="Assets.xcassets/AppIcon.appiconset/AppIcon.png" width="220" alt="ModShelf Icon" style="border-radius: 22%">
+  <img src="https://github.com/shplash/ModShelf/releases/latest/download/appicon-rounded.png" width="220" alt="ModShelf Icon">
 </p>
 
 <h1 align="center">ModShelf</h1>
