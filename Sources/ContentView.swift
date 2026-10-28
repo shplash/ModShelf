@@ -789,6 +789,8 @@ final class WorkshopStore: ObservableObject {
     private var lastStagingProbe = Date.distantPast
     private var receivedBytes: Int64 = 0
     private var lastReceivedSeen: Int64 = -1
+    private var stagingBaselineBytes: Int64 = 0
+    private var lastProgressLogAt = Date.distantPast
     private var didLaunchChecks = false
 
     var isAuthenticated: Bool { engine?.isAuthenticated() ?? false }
@@ -1285,10 +1287,23 @@ final class WorkshopStore: ObservableObject {
         lastProgressSample = nil
         receivedBytes = 0
         lastReceivedSeen = -1
+        stagingBaselineBytes = 0
+        lastProgressLogAt = .distantPast
         stagingProbeInFlight = false
         lastStagingProbe = .distantPast
         lastLoggedDecade = -1
         if autoRetryItem != id { autoRetryItem = id; autoRetries = 0 }
+        // Fail before touching the disk when the item obviously cannot fit.
+        if downloadExpectedBytes > 0,
+           let values = try? URL(fileURLWithPath: NSHomeDirectory()).resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]),
+           let free = values.volumeAvailableCapacityForImportantUsage, free > 0,
+           Int64(free) < downloadExpectedBytes {
+            errorMessage = "Not enough space: this needs \(Fmt.bytes(downloadExpectedBytes)) and \(Fmt.bytes(Int64(free))) is free."
+            log("not enough space: need \(Fmt.bytes(downloadExpectedBytes)), free \(Fmt.bytes(Int64(free)))")
+            record(id, title: meta.title, result: "Failed", error: errorMessage, game: meta.gameName)
+            Haptics.error()
+            return
+        }
         log("start \(id) \"\(meta.title)\" expected \(Fmt.bytes(downloadExpectedBytes)), game \(meta.gameName ?? "-")")
         // However a download starts (library update, history retry, auto download), the download
         // screen shows that item rather than whatever was looked up last.
@@ -1419,6 +1434,7 @@ final class WorkshopStore: ObservableObject {
             queue.removeFirst()
             guard let meta = pendingMeta.removeValue(forKey: id) ?? metaFor(id) else { continue }
             updateRow(id, progress: 0, state: .downloading)
+            log("starting queued \(id) as item \(queueStep) of \(max(queueTotal, queueRows.count))")
             beginDownload(id: id, meta: meta, keepQueue: true)
             if isBusy { return }
             // Nothing could start (signed out, no space, Wi-Fi only), so the rest cannot run either.
@@ -1464,6 +1480,7 @@ final class WorkshopStore: ObservableObject {
         } else {
             operationMessage = "Downloaded \(max(0, done - min(failed, done))) of \(total) mods; \(failed) didn't finish."
         }
+        log("queue end: \(operationMessage)")
     }
 
     /// Progress worked out from the mod's size and an estimated speed, in whole percent steps. It
@@ -1532,7 +1549,8 @@ final class WorkshopStore: ObservableObject {
         let dt = lastTickAt.map { max(0, min(1.5, now.timeIntervalSince($0))) } ?? 0
         lastTickAt = now
         // The folder on disk is the only honest sign of life for large items, where Steam's own
-        // counter can sit at zero for the whole download.
+        // counter can sit at zero for the whole download. Files are pre-allocated before any data
+        // arrives, so the allocated size (not the logical size) is what actually grows.
         if isDownloading, let staging = activeStaging, !stagingProbeInFlight,
            now.timeIntervalSince(lastStagingProbe) > 2 {
             stagingProbeInFlight = true
@@ -1540,23 +1558,46 @@ final class WorkshopStore: ObservableObject {
             Task { @MainActor in
                 let size = await Task.detached(priority: .utility) { Self.directoryBytes(staging) }.value
                 stagingProbeInFlight = false
-                if size != receivedBytes { receivedBytes = size }
-                if size > lastReceivedSeen {
+                if lastReceivedSeen < 0 {
+                    // First reading: pre-allocation may already have produced the full size on a
+                    // filesystem without sparse files, so this becomes the baseline rather than
+                    // counting as downloaded bytes.
                     lastReceivedSeen = size
+                    receivedBytes = size
+                    stagingBaselineBytes = size
+                    log("disk baseline \(Fmt.bytes(size)) of \(Fmt.bytes(downloadExpectedBytes)) expected")
+                } else if size > lastReceivedSeen {
+                    lastReceivedSeen = size
+                    receivedBytes = size
                     lastMovementAt = Date()
+                } else {
+                    receivedBytes = size
                 }
             }
         }
         if isDownloading, !isPreparingDownload {
-            // Only the part of this tick before Steam last reported anything counts: once a transfer
-            // stops talking, the bar stops moving instead of counting a stall as progress.
-            let quiet = lastMovementAt.map { max(0, now.timeIntervalSince($0)) } ?? 0
-            downloadActiveSeconds += max(0, dt - min(dt, quiet))
+            // Where the allocated size can move, only the part of this tick before Steam last
+            // reported anything counts. A filesystem without sparse files never grows here, so then
+            // the wall clock keeps the estimate moving instead.
+            let diskNotUseful = downloadExpectedBytes > 0 && stagingBaselineBytes >= downloadExpectedBytes / 2
+            if diskNotUseful {
+                downloadActiveSeconds += dt
+            } else {
+                let quiet = lastMovementAt.map { max(0, now.timeIntervalSince($0)) } ?? 0
+                downloadActiveSeconds += max(0, dt - min(dt, quiet))
+            }
         }
         let preparing = isPreparingDownload
         let stalled = isDownloading && !preparing && (lastMovementAt.map { now.timeIntervalSince($0) > 8 } ?? false)
-        if isDownloadStalled != stalled { isDownloadStalled = stalled }
-        let nextProgress = preparing ? 0 : simulatedProgress(engineValue: engineValue)
+        if isDownloadStalled != stalled {
+            isDownloadStalled = stalled
+            log(stalled ? "download looks stalled at \(Int(progress * 100))%" : "download moving again")
+        }
+        let grownBytes = max(0, receivedBytes - stagingBaselineBytes)
+        let diskFraction = downloadExpectedBytes > 0 && stagingBaselineBytes > 0
+            ? min(0.99, Double(grownBytes) / Double(downloadExpectedBytes))
+            : 0
+        let nextProgress = preparing ? 0 : simulatedProgress(engineValue: max(engineValue, diskFraction))
         let nextFile = engine?.currentFile() ?? ""
         let waitingForCode = nextStatus == "Steam Guard code required"
         if waitingForCode != needsGuardCode { needsGuardCode = waitingForCode }
@@ -1570,8 +1611,14 @@ final class WorkshopStore: ObservableObject {
             let decade = Int(nextProgress * 10)
             if isDownloading, decade != lastLoggedDecade {
                 lastLoggedDecade = decade
-                log("progress \(Int(nextProgress * 100))% (engine \(String(format: "%.0f", engineValue * 100))%, disk \(Fmt.bytes(receivedBytes)))")
+                log("progress \(Int(nextProgress * 100))% · engine \(String(format: "%.0f", engineValue * 100))% · disk \(Fmt.bytes(grownBytes)) of \(Fmt.bytes(downloadExpectedBytes))")
             }
+        }
+        // A steady line every few seconds, so a run that never changes percent still shows what the
+        // engine and the disk are doing.
+        if isDownloading, now.timeIntervalSince(lastProgressLogAt) > 5 {
+            lastProgressLogAt = now
+            log("tick \(Int(nextProgress * 100))% · engine \(String(format: "%.0f", engineValue * 100))% · disk \(Fmt.bytes(grownBytes)) of \(Fmt.bytes(downloadExpectedBytes)) · \(nextStatus)")
         }
         if currentFile != nextFile { currentFile = nextFile }
         if isDownloading, let index = queueRows.firstIndex(where: { $0.id == activeID }),
@@ -1658,6 +1705,7 @@ final class WorkshopStore: ObservableObject {
             if !cancelled { errorMessage = reason }
             lastOutcome = cancelled ? "Download cancelled" : "Download failed"
             log("failed \(activeID): \(reason)")
+            if !error.isEmpty { log("engine said: \(error)") }
             if cancelled { queue.removeAll() } else { queueFailed += 1; updateRow(activeID, state: .failed) }
             // A stalled transfer keeps its half-written files, so one quiet retry can carry on from
             // the chunks that already landed instead of starting the whole download again.
@@ -1693,6 +1741,7 @@ final class WorkshopStore: ObservableObject {
         } else { record(id, title: activeTitle, result: result, error: error) }
     }
     func cancel() {
+        log("cancel requested (queue \(queue.count), active \(activeID)")
         if let task = devTask {
             task.cancel()
             devTask = nil
@@ -2292,14 +2341,18 @@ final class WorkshopStore: ObservableObject {
         }
     }
 
-    /// Bytes written under a folder, used to follow a download Steam is not reporting on.
+    /// Bytes allocated under a folder, used to follow a download Steam is not reporting on. This is
+    /// the allocated size rather than the logical size: files are pre-allocated to their full length
+    /// before any data arrives, so only the allocated size grows as chunks are written.
     nonisolated static func directoryBytes(_ url: URL) -> Int64 {
         let fm = FileManager.default
-        guard let en = fm.enumerator(at: url, includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey]) else { return 0 }
+        guard let en = fm.enumerator(at: url, includingPropertiesForKeys: [.isRegularFileKey, .totalFileAllocatedSizeKey, .fileSizeKey]) else { return 0 }
         var bytes: Int64 = 0
         for case let file as URL in en {
-            let values = try? file.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
-            if values?.isRegularFile == true { bytes += Int64(values?.fileSize ?? 0) }
+            let values = try? file.resourceValues(forKeys: [.isRegularFileKey, .totalFileAllocatedSizeKey, .fileSizeKey])
+            if values?.isRegularFile == true {
+                bytes += Int64(values?.totalFileAllocatedSize ?? values?.fileSize ?? 0)
+            }
         }
         return bytes
     }
@@ -2791,7 +2844,9 @@ final class WorkshopStore: ObservableObject {
     }
 
     /// A line for the runtime log: time, then what happened. Kept short so a long session stays useful.
+    /// Nothing is recorded until the developer menu has been unlocked, so a normal user never pays for it.
     func log(_ message: String) {
+        guard UserDefaults.standard.bool(forKey: "dev.unlocked") else { return }
         let stamp = Date().formatted(.dateTime.hour().minute().second())
         let line = "\(stamp)  \(message)"
         runtimeLog.append(line)
@@ -3569,6 +3624,7 @@ struct ContentView: View {
         WorkshopBrowserView(onOpenInApp: { id in
                                 inputWasSubmitted = false
                                 selectedTab = 0
+                                store.log("open in app: \(id)")
                                 if autoDownload {
                                     if confirmAutoDownload {
                                         pendingAutoDownload = id
@@ -3988,7 +4044,7 @@ struct ContentView: View {
             HStack(spacing: 10) {
                 Text(store.queueTotal > 1
                      ? "Downloading \(min(store.queueStep, store.queueTotal)) of \(store.queueTotal)"
-                     : "Downloading")
+                     : (store.queueTotal == 0 ? "Finished" : "Downloading"))
                     .font(.system(size: 16, weight: .bold, design: .rounded))
                 Spacer(minLength: 8)
                 Button { Haptics.tap(); store.cancel() } label: {
