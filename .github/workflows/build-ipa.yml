@@ -20,6 +20,9 @@ env:
   HOMEBREW_NO_INSTALL_CLEANUP: "1"
   HOMEBREW_NO_ENV_HINTS: "1"
   HOMEBREW_NO_ANALYTICS: "1"
+  # go-steam and x/mobile now ask for Go 1.26; allow setup-go to fetch it rather than
+  # failing on the runner's default local toolchain.
+  GOTOOLCHAIN: auto
 
 jobs:
   build:
@@ -46,7 +49,9 @@ jobs:
         if: steps.engine-cache.outputs.cache-hit != 'true'
         uses: actions/setup-go@v7
         with:
-          go-version: '1.25.x'
+          # The engine module states the Go version it needs, so it is never guessed here.
+          go-version-file: ios-engine/go.mod
+          check-latest: true
           cache: true
           cache-dependency-path: ios-engine/go.*
 

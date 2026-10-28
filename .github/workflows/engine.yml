@@ -14,6 +14,10 @@ on:
 permissions:
   contents: read
 
+env:
+  # The engine and x/mobile now ask for Go 1.26, so the toolchain may be fetched.
+  GOTOOLCHAIN: auto
+
 concurrency:
   group: engine-${{ github.ref }}
   cancel-in-progress: true
@@ -34,7 +38,9 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          go-version: '1.25.x'
+          # The cloned engine states its own Go version, so it is taken from there.
+          go-version-file: engine/go.mod
+          check-latest: true
           cache: true
           cache-dependency-path: engine/go.sum
 
