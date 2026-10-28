@@ -2,9 +2,16 @@ name: Build ModShelf IPA
 
 on:
   workflow_dispatch:
-  # Every push to main builds and republishes the IPA, so the download link is always current.
+  # Every push that can change the app runs the build; documentation, licences and the
+  # repository's own housekeeping files cannot, so they don't spend a Mac runner on it.
   push:
     branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+      - 'assets/**'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/dependabot.yml'
 
 permissions:
   contents: write
