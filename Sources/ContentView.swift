@@ -4341,7 +4341,7 @@ struct ContentView: View {
                 }
                 .font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
                 .frame(maxWidth: .infinity).frame(height: 40)
-                .background(RoundedRectangle(cornerRadius: 11).fill(Color.accentColor))
+                .background(RoundedRectangle(cornerRadius: 11).fill(Color.accentColor.opacity(0.8)))
             }
             .buttonStyle(.plain)
             .disabled(store.isFetching)
@@ -4630,40 +4630,67 @@ struct ContentView: View {
         .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(Color.accentColor.opacity(0.14)))
     }
 
-    /// A compact bar rather than a page title: what is in the library and how big it is, with the
-    /// actions beside it and the sort order on its own line underneath.
+    /// The library's top area: the mod count and size in their own box, the sort beside it, and the
+    /// actions as a row of labelled tiles ordered by how often they are reached for.
     private var libraryBar: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack(alignment: .center, spacing: 8) {
+        VStack(spacing: 8) {
+            HStack(spacing: 8) {
                 Text(librarySubtitle)
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                    .padding(.horizontal, 10).padding(.vertical, 7)
+                    .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                 Spacer(minLength: 0)
-                if showingHistory {
-                    IconButton(symbol: "trash", size: 36) { if confirmDelete { confirmClearHistory = true } else { store.clearHistory() } }.disabled(store.history.isEmpty)
-                    IconButton(symbol: "xmark", size: 36) { showingHistory = false }
-                } else {
-                    IconButton(symbol: "clock.arrow.circlepath", size: 36) { showingHistory = true }
-                    Button { Haptics.tap(); store.checkAllUpdates() } label: { iconLabel("arrow.clockwise", spinning: store.isCheckingUpdates) }
-                        .buttonStyle(.plain).disabled(store.isCheckingUpdates)
-                    Button { Haptics.tap(); store.verifyAllFiles() } label: { iconLabel("checkmark.shield", spinning: store.isVerifyingAll) }
-                        .buttonStyle(.plain).disabled(store.isVerifyingAll)
-                    moreMenu
-                }
+                sortMenu
             }
-            if !showingHistory {
-                HStack(spacing: 8) {
-                    sortMenu
-                    Text(sortOrder)
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                    Spacer(minLength: 0)
+            HStack(spacing: 8) {
+                if showingHistory {
+                    libraryAction("trash", "Clear") { if confirmDelete { confirmClearHistory = true } else { store.clearHistory() } }
+                        .disabled(store.history.isEmpty)
+                    libraryAction("xmark", "Close") { showingHistory = false }
+                } else {
+                    libraryAction("arrow.clockwise", "Updates", spinning: store.isCheckingUpdates) { store.checkAllUpdates() }
+                        .disabled(store.isCheckingUpdates)
+                    libraryAction("checkmark.shield", "Verify", spinning: store.isVerifyingAll) { store.verifyAllFiles() }
+                        .disabled(store.isVerifyingAll)
+                    libraryAction("clock.arrow.circlepath", "History") { showingHistory = true }
+                    moreMenu
                 }
             }
         }
         .padding(.horizontal, 15).padding(.top, 6).padding(.bottom, 8)
+    }
+
+    private func libraryAction(_ symbol: String, _ label: String, spinning: Bool = false, action: @escaping () -> Void) -> some View {
+        Button {
+            Haptics.tap(); action()
+        } label: {
+            libraryActionLabel(symbol, label, spinning: spinning)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func libraryActionLabel(_ symbol: String, _ label: String, spinning: Bool = false) -> some View {
+        VStack(spacing: 3) {
+            Group {
+                if spinning {
+                    ProgressView().scaleEffect(0.75)
+                } else {
+                    Image(systemName: symbol)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(Color.accentColor)
+                }
+            }
+            .frame(height: 17)
+            Text(label)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 8)
+        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
     }
 
     private var sortMenu: some View {
@@ -4712,7 +4739,25 @@ struct ContentView: View {
                 }
                 .disabled(store.library.isEmpty)
             }
-        } label: { iconLabel("ellipsis", waving: selecting) }
+        } label: {
+            VStack(spacing: 3) {
+                Group {
+                    if selecting { SelectionWaveDots() } else {
+                        Image(systemName: "ellipsis")
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundStyle(Color.accentColor)
+                    }
+                }
+                .frame(height: 17)
+                Text(selecting ? "Done" : "More")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 8)
+            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+        }
     }
 
     private var libraryBody: some View {
@@ -4730,12 +4775,7 @@ struct ContentView: View {
 
             let items = visibleItems
             if store.library.isEmpty {
-                emptyState("Your library is empty", detail: "Downloaded mods will appear here.", symbol: "square.grid.2x2")
-                Button { selectedTab = 1 } label: {
-                    Label("Browse Workshop", systemImage: "safari").font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
-                        .frame(maxWidth: .infinity).frame(height: 44)
-                        .background(RoundedRectangle(cornerRadius: 12).fill(Color.accentColor))
-                }.buttonStyle(.plain).padding(.horizontal, 24).padding(.bottom, 20)
+                emptyState("Your library is empty", detail: "Downloaded mods will appear here, go to the workshop to pick some up.", symbol: "square.grid.2x2")
             } else if items.isEmpty {
                 emptyState("No matches", detail: "Try a different search or filter.", symbol: "magnifyingglass")
             } else if compactLibrary {
@@ -6640,11 +6680,11 @@ enum GameListStore {
 }
 
 struct BrowserHome: View {
-    @Binding var query: String
     let lastPage: URL?
     let onOpenURL: (URL) -> Void
     let onScroll: (CGFloat) -> Void
 
+    @State private var query = ""
     @State private var results: [GameHit] = []
     @State private var searching = false
     @FocusState private var searchFocused: Bool
@@ -6662,10 +6702,11 @@ struct BrowserHome: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 ScrollSpy(onChange: onScroll)
+                if let lastPage { continueCard(lastPage) }
+                searchField
                 if !query.trimmingCharacters(in: .whitespaces).isEmpty {
                     resultsSection
                 } else {
-                    if let lastPage { continueCard(lastPage) }
                     if !favourites.isEmpty { favouritesSection }
                     if !viewedMods.isEmpty { viewedModsSection }
                     if !recentlyOpened.isEmpty { recentsSection }
@@ -6700,7 +6741,7 @@ struct BrowserHome: View {
                 .foregroundStyle(.white)
                 .frame(width: 28, height: 28)
                 .background(Circle().fill(Color.accentColor))
-            TextField("Search a game", text: $query)
+            TextField("Search for a game", text: $query)
                 .font(.system(size: 16))
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
@@ -6750,7 +6791,7 @@ struct BrowserHome: View {
 
     private var viewedModsSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            sectionHeader("Recently viewed", count: viewedMods.count)
+            sectionHeader("Recently viewed mods", count: viewedMods.count)
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 10) {
                     ForEach(viewedMods) { hit in viewedTile(hit) }
@@ -6769,12 +6810,11 @@ struct BrowserHome: View {
         } label: {
             VStack(alignment: .leading, spacing: 6) {
                 Color.clear
-                    .frame(width: 116, height: 65)
-                    .overlay(CachedImage(urlString: hit.tiny_image, fill: true, maxPixel: 300).allowsHitTesting(false))
+                    .frame(width: 78, height: 78)
+                    .overlay(CachedImage(urlString: hit.tiny_image, fill: true, maxPixel: 220).allowsHitTesting(false))
                     .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                Text(hit.name).font(.system(size: 12, weight: .medium)).lineLimit(2)
-                    .frame(width: 116, alignment: .leading)
-                    .multilineTextAlignment(.leading)
+                MarqueeText(text: hit.name, fontSize: 11, weight: .medium, height: 15)
+                    .frame(width: 78, alignment: .leading)
             }
         }
         .buttonStyle(.plain)
@@ -6783,8 +6823,34 @@ struct BrowserHome: View {
     private var recentsSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             sectionHeader("Recently opened", count: recentlyOpened.count)
-            gameList(recentlyOpened)
+            ForEach(recentlyOpened) { hit in landscapeGameCard(hit) }
         }
+    }
+
+    /// A whole card of the game's own landscape capsule, with its name centred over it.
+    private func landscapeGameCard(_ hit: GameHit) -> some View {
+        Button { openGame(hit) } label: {
+            ZStack {
+                Color.clear
+                    .frame(height: 88)
+                    .overlay(CachedImage(urlString: capsuleURL(hit.id), fill: true, maxPixel: 600).allowsHitTesting(false))
+                Text(hit.name)
+                    .font(.system(size: 15, weight: .semibold))
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .padding(.horizontal, 10).padding(.vertical, 6)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .padding(8)
+            }
+            .frame(maxWidth: .infinity)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(alignment: .topTrailing) { starButton(hit).padding(1) }
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func capsuleURL(_ id: Int) -> String {
+        "https://cdn.cloudflare.steamstatic.com/steamcommunity/public/images/apps/\(id)/capsule_231x87.jpg"
     }
 
     /// A game that is already in the favourites above does not need listing twice.
@@ -6814,8 +6880,7 @@ struct BrowserHome: View {
                         .frame(height: 66)
                         .overlay(CachedImage(urlString: hit.tiny_image, fill: true, maxPixel: 300))
                         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    Text(hit.name)
-                        .font(.system(size: 12, weight: .semibold)).lineLimit(1)
+                    MarqueeText(text: hit.name, fontSize: 12, weight: .semibold, height: 15)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .padding(8)
@@ -6929,7 +6994,7 @@ struct BrowserHome: View {
                 Image(systemName: "chevron.right")
                     .font(.system(size: 13, weight: .semibold)).foregroundStyle(.tertiary)
             }
-            .padding(14)
+            .padding(18)
             .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
         .buttonStyle(.plain)
@@ -6959,7 +7024,6 @@ struct WorkshopBrowserView: View {
     @State private var isLoading = false
     @State private var showUse = false
     @State private var showHome = true
-    @State private var homeQuery = ""
     @State private var copied = false
 
     static let lastPageKey = "browser.lastURL"
@@ -6970,7 +7034,7 @@ struct WorkshopBrowserView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            topBar
+            if !showHome { topBar }
             ZStack {
                 WorkshopWebContainer(handle: handle, currentURL: $currentURL, canGoBack: $canGoBack,
                                      canGoForward: $canGoForward, isLoading: $isLoading, showUse: $showUse,
@@ -6979,7 +7043,7 @@ struct WorkshopBrowserView: View {
                     .opacity(showHome ? 0 : 1)
                     .allowsHitTesting(!showHome)
                 if showHome {
-                    BrowserHome(query: $homeQuery, lastPage: savedLastPage,
+                    BrowserHome(lastPage: savedLastPage,
                                 onOpenURL: { open($0) },
                                 onScroll: onScroll)
                 }
@@ -6988,6 +7052,15 @@ struct WorkshopBrowserView: View {
         .background(Color(uiColor: .systemBackground))
         .onChange(of: requestedURL) { url in
             if url != nil { showHome = false }
+        }
+        .onChange(of: currentURL) { url in
+            // Whatever mod page is actually browsed gets remembered, not only the ones looked up here.
+            guard let url, let id = WorkshopStore.workshopID(from: url.absoluteString) else { return }
+            Task {
+                if let meta = await SteamMeta.fetch(id: id, includePage: false) {
+                    WorkshopStore.rememberViewedMod(meta)
+                }
+            }
         }
         .onChange(of: homeToken) { _ in showHome = true }
         .onAppear { if requestedURL != nil { showHome = false } }
@@ -7000,38 +7073,12 @@ struct WorkshopBrowserView: View {
 
     /// Back, Forward, the address (tap to copy) and Home, all across the top. On the launcher only
     /// Home is shown, since there is no page to go back to or copy.
-    /// The launcher's search box, sitting where the address bar sits when a page is open.
-    private var homeSearchField: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 14, weight: .semibold)).foregroundStyle(.secondary)
-            TextField("Search a game", text: $homeQuery)
-                .font(.system(size: 15))
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .submitLabel(.search)
-            if !homeQuery.isEmpty {
-                Button { homeQuery = "" } label: {
-                    Image(systemName: "xmark.circle.fill").font(.system(size: 15)).foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Clear search")
-            }
-        }
-        .padding(.horizontal, 10).padding(.vertical, 8)
-        .background(Color(uiColor: .tertiarySystemFill), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
-    }
-
     private var topBar: some View {
         HStack(spacing: 8) {
-            if showHome {
-                homeSearchField
-            } else {
-                navButton("chevron.left", "Back", enabled: canGoBack) { handle.webView?.goBack() }
-                navButton("chevron.right", "Forward", enabled: canGoForward) { handle.webView?.goForward() }
-                addressField
-                navButton("house.fill", "Browse home", enabled: true) { showHome = true }
-            }
+            navButton("chevron.left", "Back", enabled: canGoBack) { handle.webView?.goBack() }
+            navButton("chevron.right", "Forward", enabled: canGoForward) { handle.webView?.goForward() }
+            addressField
+            navButton("house.fill", "Browse home", enabled: true) { showHome = true }
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
         .background(Color(uiColor: .systemGroupedBackground))
