@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	steam "github.com/BirknerAlex/go-steam"
@@ -199,8 +200,19 @@ func (e *Engine) DownloadWorkshopItem(itemID, targetDir string) string {
 	e.progress, e.currentFile = 0, ""
 	e.mu.Unlock()
 
+	// A big item can leave the library waiting on a chunk that never arrives. If the chunk count has
+	// not moved for two minutes, the transfer is treated as stalled and stopped, so the app can say
+	// so and the user can resume instead of watching it sit there.
+	var stalled atomic.Bool
+	watchdogDone := make(chan struct{})
+
 	go func() {
-		defer func() { e.mu.Lock(); e.cancel = nil; e.mu.Unlock() }()
+		defer func() {
+			e.mu.Lock()
+			e.cancel = nil
+			e.mu.Unlock()
+			close(watchdogDone)
+		}()
 		fail := func(err error) {
 			e.mu.Lock()
 			e.status = "Download failed"
@@ -211,6 +223,42 @@ func (e *Engine) DownloadWorkshopItem(itemID, targetDir string) string {
 			fail(err)
 			return
 		}
+
+		go func() {
+			ticker := time.NewTicker(15 * time.Second)
+			defer ticker.Stop()
+			last := 0.0
+			quiet := 0
+			for {
+				select {
+				case <-watchdogDone:
+					return
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					e.mu.RLock()
+					statusNow, progressNow := e.status, e.progress
+					e.mu.RUnlock()
+					if statusNow == "Downloading" {
+						if progressNow > last+0.0001 {
+							last = progressNow
+							quiet = 0
+						} else {
+							quiet++
+						}
+						if quiet >= 8 {
+							stalled.Store(true)
+							cancel()
+							return
+						}
+					} else {
+						last = progressNow
+						quiet = 0
+					}
+				}
+			}
+		}()
+
 		ch, err := client.DownloadWorkshopItem(ctx, steam.WorkshopDownloadRequest{ItemID: id, TargetDir: targetDir})
 		if err != nil {
 			fail(err)
@@ -255,6 +303,9 @@ func (e *Engine) DownloadWorkshopItem(itemID, targetDir string) string {
 		}
 		e.mu.Lock()
 		switch {
+		case stalled.Load():
+			e.status = "Download failed"
+			e.lastError = "Steam stopped sending data."
 		case ctx.Err() != nil:
 			e.status = "Download cancelled"
 			e.lastError = "Download was cancelled."

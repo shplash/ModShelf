@@ -181,6 +181,7 @@ struct DownloadQueueRow: Identifiable, Equatable {
     let id: String
     var title: String
     var imageURL: String?
+    var gameName: String? = nil
     var progress: Double = 0
     var state: State = .waiting
 }
@@ -295,6 +296,9 @@ enum ErrorText {
             return "Steam is asking us to slow down. Give it a minute and try again."
         }
         if r.contains("without a completion event") { return "The download stopped early. Nothing was replaced." }
+        if r.contains("stopped sending") {
+            return "Steam stopped sending data. Try again — it picks up where it left off."
+        }
         if r.contains("timeout") || r.contains("timed out") || r.contains("network")
             || r.contains("offline") || r.contains("connection") || r.contains("reach") {
             return "We couldn't reach Steam just now. Check the connection and try again."
@@ -758,6 +762,11 @@ final class WorkshopStore: ObservableObject {
     @Published var queueTotal = 0
     /// The rows drawn on the download screen while a batch runs (or a simulated one).
     @Published var queueRows: [DownloadQueueRow] = []
+    /// Everything worth knowing when something goes wrong: download starts, phases, progress and errors.
+    @Published var runtimeLog: [String] = []
+    private var lastLoggedDecade = -1
+    private var autoRetries = 0
+    private var autoRetryItem = ""
     private var queueFailed = 0
     private var devTask: Task<Void, Never>?
     // Progress is drawn from the mod's size and an estimated speed rather than Steam's byte
@@ -858,6 +867,7 @@ final class WorkshopStore: ObservableObject {
         return url.path
     }
     init() {
+        runtimeLog = Self.loadRuntimeLog()
         library = Self.loadLibrary()
         let oldHistory = Self.load([String].self, key: "history") ?? []
         history = Self.load([DownloadRecord].self, key: "modshelf.history") ?? oldHistory.map {
@@ -872,6 +882,8 @@ final class WorkshopStore: ObservableObject {
         }
         if fixed { saveHistory() }
         status = engine?.status() ?? "Ready"
+        log("launch \(modShelfVersion) (\(modShelfBuild)) · iOS \(UIDevice.current.systemVersion) · \(UIDevice.current.model)")
+        log("library \(library.count) mods · \(history.count) history · engine \(status)")
         _ = NetworkWatcher.shared
         _ = sessionPath
         repairFolders()
@@ -1031,6 +1043,7 @@ final class WorkshopStore: ObservableObject {
 
     func revealInFiles(_ item: WorkshopItem) {
         let path = item.folder
+        log("reveal in Files: \(item.id)")
         guard FileManager.default.fileExists(atPath: path) else {
             // Files that were moved into a game aren't here to open, and ModShelf can't know where
             // the game keeps them, so it says what happened instead of opening nothing.
@@ -1094,10 +1107,11 @@ final class WorkshopStore: ObservableObject {
     }
 
     func fetchPreview() {
-        guard !isFetching, !isBusy else { return }
+        guard !isFetching else { return }
         guard let id = Self.workshopID(from: input) else {
             preview = nil
             errorMessage = "Enter a Workshop link or item ID."
+            log("lookup rejected: \"\(input)\"")
             return
         }
         isFetching = true
@@ -1107,8 +1121,10 @@ final class WorkshopStore: ObservableObject {
             let result = await SteamMeta.fetch(id: id, includePage: true)
             if let result {
                 preview = result
+                log("lookup \(id): \"\(result.title)\" · \(result.gameName ?? "-") · \(Fmt.bytes(result.fileSize))")
             } else {
                 errorMessage = "We couldn't load that item just now. It may be private or gone."
+                log("lookup failed \(id)")
                 preview = WorkshopMetadata(id: id, title: "Workshop item \(id)", author: "", description: "Metadata was unavailable. Downloading may still work if this item is accessible to your Steam account.", imageURL: "", updatedAt: 0)
             }
             isFetching = false
@@ -1119,6 +1135,7 @@ final class WorkshopStore: ObservableObject {
 
     func signIn(automatic: Bool = false) async {
         loginError = ""
+        log("sign-in start (\(automatic ? "automatic" : "manual"))")
         if isBusy && needsGuardCode {
             let code = guardCode.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !code.isEmpty else { loginError = "Enter the Steam Guard code."; return }
@@ -1156,9 +1173,11 @@ final class WorkshopStore: ObservableObject {
             Keychain.write(pass, key: "steam.password")
             guardCode = ""; showLogin = false; status = "Signed in to Steam"
             loginError = ""
+            log("signed in as \(user)")
             Haptics.success()
         } else {
             let raw = result.isEmpty ? (engine?.lastError() ?? "") : result
+            log("sign-in failed: \(raw.isEmpty ? "no reason given" : raw)")
             loginError = Self.signInMessage(raw)
             if raw.localizedCaseInsensitiveContains("guard") || raw.localizedCaseInsensitiveContains("code") {
                 status = "Steam Guard code required"
@@ -1201,6 +1220,7 @@ final class WorkshopStore: ObservableObject {
     }
     func signOut() {
         guard !isBusy else { errorMessage = "Let the current download finish first."; return }
+        log("signed out")
         engine?.logout(); Keychain.delete("steam.password"); password = ""; guardCode = ""
         status = "Signed out"
     }
@@ -1240,9 +1260,11 @@ final class WorkshopStore: ObservableObject {
         queue.append(id)
         pendingMeta[id] = meta
         queueRows.append(DownloadQueueRow(id: id, title: meta.title,
-                                         imageURL: meta.imageURL.isEmpty ? nil : meta.imageURL))
+                                         imageURL: meta.imageURL.isEmpty ? nil : meta.imageURL,
+                                         gameName: meta.gameName))
         queueTotal = queueRows.count
         operationMessage = "\(meta.title) joins the queue."
+        log("queued \(id) \"\(meta.title)\" at \(queueRows.count) in line")
         Haptics.tap()
     }
 
@@ -1265,6 +1287,9 @@ final class WorkshopStore: ObservableObject {
         lastReceivedSeen = -1
         stagingProbeInFlight = false
         lastStagingProbe = .distantPast
+        lastLoggedDecade = -1
+        if autoRetryItem != id { autoRetryItem = id; autoRetries = 0 }
+        log("start \(id) \"\(meta.title)\" expected \(Fmt.bytes(downloadExpectedBytes)), game \(meta.gameName ?? "-")")
         // However a download starts (library update, history retry, auto download), the download
         // screen shows that item rather than whatever was looked up last.
         if preview?.id != id {
@@ -1272,13 +1297,15 @@ final class WorkshopStore: ObservableObject {
             preview = meta
             if meta.title == "Workshop item \(id)" { fetchPreview() }
         }
-        // Updates stage next to the current installation, so the swap is a rename rather than a copy.
+        // A fixed staging folder per mod, so a download that stops can be retried and pick up the
+        // chunks it already wrote instead of starting the whole thing again.
         let targetRoot = installRoot(for: library.first(where: { $0.id == id }), appID: meta.appID)
-        let staging = targetRoot.appendingPathComponent(".partial-\(id)-\(UUID().uuidString)", isDirectory: true)
+        let staging = targetRoot.appendingPathComponent(".partial-\(id)", isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
         } catch {
             errorMessage = "We couldn't make a place for that download."
+            log("staging failed for \(id): \(error)")
             record(id, title: meta.title, result: "Failed", error: errorMessage, game: meta.gameName)
             return
         }
@@ -1288,6 +1315,7 @@ final class WorkshopStore: ObservableObject {
             try? FileManager.default.removeItem(at: staging)
             let message = ErrorText.friendly(result)
             errorMessage = message; status = "Download failed"
+            log("engine refused \(id): \(result)")
             record(id, title: meta.title, result: "Failed", error: message, imageURL: meta.imageURL.isEmpty ? nil : meta.imageURL, game: meta.gameName)
             Haptics.error()
             return
@@ -1305,6 +1333,7 @@ final class WorkshopStore: ObservableObject {
         } else {
             queueRows.append(DownloadQueueRow(id: id, title: meta.title,
                                               imageURL: meta.imageURL.isEmpty ? nil : meta.imageURL,
+                                              gameName: meta.gameName,
                                               state: .downloading))
             queueStep = queueRows.count
         }
@@ -1361,7 +1390,7 @@ final class WorkshopStore: ObservableObject {
     func updateAll() {
         guard devTask == nil else { operationMessage = "A simulated run is on screen. Let it finish first."; return }
         let picks = library.filter { $0.updateAvailable }
-        guard !picks.isEmpty else { operationMessage = "Everything is up to date."; return }
+        guard !picks.isEmpty else { operationMessage = "Everything is up to date."; log("update all: nothing to do"); return }
         // If something is already running, these updates join its queue rather than replacing it.
         if isBusy || !queue.isEmpty {
             var added = 0
@@ -1377,7 +1406,8 @@ final class WorkshopStore: ObservableObject {
             return
         }
         queue = picks.map(\.id)
-        queueRows = picks.map { DownloadQueueRow(id: $0.id, title: $0.displayTitle, imageURL: $0.imageURL) }
+        queueRows = picks.map { DownloadQueueRow(id: $0.id, title: $0.displayTitle,
+                                                 imageURL: $0.imageURL, gameName: $0.gameName) }
         queueStep = 0
         queueTotal = queue.count
         queueFailed = 0
@@ -1531,8 +1561,18 @@ final class WorkshopStore: ObservableObject {
         let waitingForCode = nextStatus == "Steam Guard code required"
         if waitingForCode != needsGuardCode { needsGuardCode = waitingForCode }
         if waitingForCode && !showLogin { showLogin = true }
-        if status != nextStatus { status = nextStatus }
-        if abs(progress - nextProgress) > 0.001 { progress = nextProgress }
+        if status != nextStatus {
+            status = nextStatus
+            log("phase: \(nextStatus)")
+        }
+        if abs(progress - nextProgress) > 0.001 {
+            progress = nextProgress
+            let decade = Int(nextProgress * 10)
+            if isDownloading, decade != lastLoggedDecade {
+                lastLoggedDecade = decade
+                log("progress \(Int(nextProgress * 100))% (engine \(String(format: "%.0f", engineValue * 100))%, disk \(Fmt.bytes(receivedBytes)))")
+            }
+        }
         if currentFile != nextFile { currentFile = nextFile }
         if isDownloading, let index = queueRows.firstIndex(where: { $0.id == activeID }),
            queueRows[index].state == .downloading {
@@ -1587,13 +1627,16 @@ final class WorkshopStore: ObservableObject {
                 item.lastVerifiedBytes = done.bytes
                 if let old = library.firstIndex(where: { $0.id == activeID }) { library[old] = item } else { library.insert(item, at: 0) }
                 saveLibrary()
+                log("finalised \(activeID): \(done.files) files, \(Fmt.bytes(done.bytes))")
                 success = true
             } catch {
                 failureText = "Couldn't finish the download."
                 errorMessage = failureText
                 try? FileManager.default.removeItem(at: staging)
             }
-        } else if !stagingPath.isEmpty {
+        } else if cancelled, !stagingPath.isEmpty {
+            // A cancelled download throws its half-written files away; a failed one keeps them so a
+            // retry can resume from the chunks it already has.
             try? FileManager.default.removeItem(at: staging)
         }
         if success {
@@ -1614,7 +1657,20 @@ final class WorkshopStore: ObservableObject {
             updateHistory(id: activeID, result: cancelled ? "Cancelled" : "Failed", error: reason)
             if !cancelled { errorMessage = reason }
             lastOutcome = cancelled ? "Download cancelled" : "Download failed"
+            log("failed \(activeID): \(reason)")
             if cancelled { queue.removeAll() } else { queueFailed += 1; updateRow(activeID, state: .failed) }
+            // A stalled transfer keeps its half-written files, so one quiet retry can carry on from
+            // the chunks that already landed instead of starting the whole download again.
+            if !cancelled, queue.isEmpty, autoRetries < 2,
+               error.localizedCaseInsensitiveContains("stopped sending"),
+               FileManager.default.fileExists(atPath: staging.path) {
+                autoRetries += 1
+                log("auto-retry \(autoRetries) for \(activeID)")
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    self.download(activeID, meta: meta)
+                }
+            }
             Haptics.error()
         }
         saveHistory()
@@ -2063,7 +2119,7 @@ final class WorkshopStore: ObservableObject {
             }
         }
 
-        if changed { saveLibrary(); refreshLibraryBytes() }
+        if changed { saveLibrary(); refreshLibraryBytes(); log("repaired folder paths for \(library.count) mods") }
     }
 
     /// A mod folder whose saved path is gone: matched by name first, then by the Workshop ID in its
@@ -2285,11 +2341,13 @@ final class WorkshopStore: ObservableObject {
         if !item.isInsideModShelf {
             library.removeAll { $0.id == item.id }; saveLibrary(); refreshLibraryBytes()
             operationMessage = "Removed \(item.displayTitle) from your library. Its files are still in the folder you moved it to."
+            log("forgot \(item.id) (files outside ModShelf)")
             return
         }
         do { if FileManager.default.fileExists(atPath: item.folder) { try FileManager.default.removeItem(atPath: item.folder) } }
-        catch { errorMessage = "Those files wouldn't delete."; return }
+        catch { errorMessage = "Those files wouldn't delete."; log("delete failed \(item.id): \(error)"); return }
         library.removeAll { $0.id == item.id }; saveLibrary(); refreshLibraryBytes()
+        log("deleted \(item.id) \"\(item.displayTitle)\"")
     }
     func requestDelete(_ item: WorkshopItem) {
         if UserDefaults.standard.object(forKey: "options.confirmDelete") as? Bool ?? true {
@@ -2322,6 +2380,7 @@ final class WorkshopStore: ObservableObject {
         }
         if failed.isEmpty {
             operationMessage = "Deleted \(removed.count) mod\(removed.count == 1 ? "" : "s")."
+            log("deleted \(removed.count) mods; \(failed.count) failed")
             Haptics.success()
         } else {
             errorMessage = "Couldn't delete \(failed.count) mod\(failed.count == 1 ? "" : "s"): \(failed.joined(separator: ", "))"
@@ -2333,6 +2392,7 @@ final class WorkshopStore: ObservableObject {
         guard let i = library.firstIndex(where: { $0.id == item.id }) else { return }
         library[i].isFavourite.toggle()
         saveLibrary()
+        log("favourite \(item.id): \(library[i].isFavourite)")
         Haptics.tap()
     }
     func export(_ item: WorkshopItem) {
@@ -2402,6 +2462,7 @@ final class WorkshopStore: ObservableObject {
                 ? ""
                 : "Exported \(result.copied) mod\(result.copied == 1 ? "" : "s") and left out \(result.skipped) whose files are outside ModShelf."
             shareURL = zip
+            log("exported \(chosen.count) mods as ZIP")
         }
     }
 
@@ -2494,8 +2555,10 @@ final class WorkshopStore: ObservableObject {
             switch await checkFiles(id: latest.id, folder: latest.folder) {
             case .ok:
                 operationMessage = "\(latest.displayTitle) matches Steam."
+                log("verify \(latest.id): matches Steam")
             case .mismatch:
                 operationMessage = "\(latest.displayTitle) differs from Steam's copy. Downloading it again puts that right."
+                log("verify \(latest.id): differs from Steam")
             case .moved:
                 operationMessage = "\(latest.displayTitle) isn't in ModShelf any more, so its files were probably moved into the game."
             case .unknown:
@@ -2535,6 +2598,7 @@ final class WorkshopStore: ObservableObject {
             if unknown > 0 { parts.append(unknown == 1 ? "1 couldn't be compared" : "\(unknown) couldn't be compared") }
             if moved > 0 { parts.append(moved == 1 ? "1 moved out of ModShelf" : "\(moved) moved out of ModShelf") }
             operationMessage = parts.isEmpty ? "Nothing to validate." : parts.joined(separator: ", ") + "."
+            log("verify all: \(operationMessage.replacingOccurrences(of: "\n", with: " "))")
         }
     }
 
@@ -2554,6 +2618,7 @@ final class WorkshopStore: ObservableObject {
             operationMessage = latest.updateAvailable
                 ? "An update is available for \(latest.displayTitle)."
                 : "\(latest.displayTitle) is up to date."
+            log("check \(latest.id): \(latest.updateAvailable ? "update available" : "up to date")")
             if !latest.isInsideModShelf || latest.filesMoved {
                 operationMessage += "\nIts files are outside ModShelf, so only the Workshop version was checked."
             }
@@ -2633,6 +2698,7 @@ final class WorkshopStore: ObservableObject {
                 if failed > 0 { parts.append("\(failed) couldn't be checked") }
                 operationMessage = parts.joined(separator: ", ") + "."
                 if unverified > 0 { operationMessage += "\nUnverified mods checked: \(unverified)" }
+                log("update check: \(operationMessage.replacingOccurrences(of: "\n", with: " "))")
             }
         }
     }
@@ -2660,7 +2726,10 @@ final class WorkshopStore: ObservableObject {
         if let item = library.first(where: { $0.id == record.workshopID }) { update(item) }
         else { download(record.workshopID) }
     }
-    func clearHistory() { history.removeAll(); saveHistory(); UserDefaults.standard.removeObject(forKey: "history") }
+    func clearHistory() {
+        log("history cleared (\(history.count) entries)")
+        history.removeAll(); saveHistory(); UserDefaults.standard.removeObject(forKey: "history")
+    }
     func clearTemporaryFiles() {
         let fm = FileManager.default
         // An older build kept a visible "ModShelfTemporary" folder in Documents; nothing needs it now.
@@ -2675,6 +2744,7 @@ final class WorkshopStore: ObservableObject {
         for url in Self.partialLeftovers(in: downloadsRoot) { try? fm.removeItem(at: url) }
         status = "Temporary files cleared"
         operationMessage = "Temporary files cleared."
+        log("temporary files cleared")
     }
     // MARK: app updates
 
@@ -2700,6 +2770,7 @@ final class WorkshopStore: ObservableObject {
             appUpdateMessage = Self.version(latest, isNewerThan: modShelfVersion)
                 ? "v\(latest) is available."
                 : "You're on the latest version."
+            log("app update check: latest \(latest), current \(modShelfVersion)")
         }
     }
 
@@ -2717,6 +2788,47 @@ final class WorkshopStore: ObservableObject {
             if a != b { return a > b }
         }
         return false
+    }
+
+    /// A line for the runtime log: time, then what happened. Kept short so a long session stays useful.
+    func log(_ message: String) {
+        let stamp = Date().formatted(.dateTime.hour().minute().second())
+        let line = "\(stamp)  \(message)"
+        runtimeLog.append(line)
+        if runtimeLog.count > 400 { runtimeLog.removeFirst(runtimeLog.count - 400) }
+        Self.appendRuntimeLog(line)
+    }
+
+    nonisolated private static var runtimeLogFile: URL {
+        let fm = FileManager.default
+        let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("ModShelf", isDirectory: true)
+        try? fm.createDirectory(at: base, withIntermediateDirectories: true)
+        return base.appendingPathComponent("runtime.log")
+    }
+
+    /// The log is kept on disk too, so it survives a crash or a relaunch and can still be copied.
+    nonisolated private static func appendRuntimeLog(_ line: String) {
+        guard let data = (line + "\n").data(using: .utf8) else { return }
+        let url = runtimeLogFile
+        if let handle = try? FileHandle(forWritingTo: url) {
+            defer { try? handle.close() }
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: data)
+        } else {
+            try? data.write(to: url)
+        }
+    }
+
+    nonisolated private static func loadRuntimeLog() -> [String] {
+        guard let text = try? String(contentsOf: runtimeLogFile, encoding: .utf8) else { return [] }
+        return text.split(separator: "\n").suffix(200).map(String.init)
+    }
+
+    func clearRuntimeLog() {
+        runtimeLog.removeAll()
+        try? FileManager.default.removeItem(at: Self.runtimeLogFile)
+        log("log cleared")
     }
 
     func refreshLibraryBytes() {
@@ -3437,6 +3549,7 @@ struct ContentView: View {
         .preferredColorScheme(appearance == "System" ? nil : (appearance == "Dark" ? .dark : .light))
         .onChange(of: selectedTab) { tab in
             tabCollapsed = false
+            store.log("tab: \(["Download", "Workshop", "Library", "Options"][min(max(tab, 0), 3)])")
             // Every arrival on the library restarts the scrolling names from their resting place.
             if tab == 2 { marqueeToken += 1 }
         }
@@ -3834,11 +3947,13 @@ struct ContentView: View {
                             HStack(spacing: 10) { ProgressView(); Text("Loading Workshop details…").font(.subheadline).foregroundStyle(.secondary) }.padding(.vertical, 2)
                         }
                         if !store.isDownloading, store.queueRows.isEmpty, let item = store.preview {
-                            metadataCard(item)
-                        }
+            metadataCard(item)
+        }
                         if !store.queueRows.isEmpty {
                             queueCard
-                        } else if let item = store.preview {
+                        }
+                        if let item = store.preview,
+                           !store.queueRows.contains(where: { $0.id == item.id }) {
                             downloadButton(item)
                         }
                         if store.preview == nil && !store.isDownloading { browseRow }
@@ -3863,6 +3978,7 @@ struct ContentView: View {
             logoTapCount = 0
             devUnlocked = true
             showDeveloperMenu = true
+            store.log("developer menu unlocked")
         }
     }
 
@@ -3897,17 +4013,54 @@ struct ContentView: View {
     private func queueRow(_ row: DownloadQueueRow) -> some View {
         HStack(spacing: 12) {
             Color.clear
-                .frame(width: 56, height: 56)
-                .overlay(CachedImage(urlString: row.imageURL, fill: true, maxPixel: 200).allowsHitTesting(false))
+                .frame(width: 84, height: 84)
+                .overlay(CachedImage(urlString: row.imageURL, fill: true, maxPixel: 300).allowsHitTesting(false))
                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-            VStack(alignment: .leading, spacing: 7) {
-                Text(row.title).font(.system(size: 15, weight: .semibold)).lineLimit(1)
-                queueBar(row)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(row.title).font(.system(size: 15, weight: .semibold)).lineLimit(2)
+                if let game = row.gameName, !game.isEmpty {
+                    Text(game).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+                }
+                HStack(spacing: 8) {
+                    queueStateLabel(row)
+                        .frame(width: 78, alignment: .leading)
+                    queueBar(row)
+                    Text("\(Int(row.progress * 100))%")
+                        .font(.system(size: 11, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(width: 34, alignment: .trailing)
+                }
             }
-            Spacer(minLength: 8)
-            queueStatus(row)
+            Spacer(minLength: 0)
         }
-        .padding(.horizontal, 14).padding(.vertical, 8)
+        .padding(.horizontal, 14).padding(.vertical, 10)
+    }
+
+    @ViewBuilder private func queueStateLabel(_ row: DownloadQueueRow) -> some View {
+        switch row.state {
+        case .waiting:
+            Text("Waiting")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.tertiary)
+        case .downloading:
+            if store.isDownloadStalled {
+                DottedLabel(text: "Waiting")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("Downloading")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Color.accentColor)
+            }
+        case .done:
+            Text("Done")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.green)
+        case .failed:
+            Text("Failed")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.red)
+        }
     }
 
     private func queueBar(_ row: DownloadQueueRow) -> some View {
@@ -3916,35 +4069,11 @@ struct ContentView: View {
         return GeometryReader { geo in
             ZStack(alignment: .leading) {
                 Capsule().fill(Color.primary.opacity(0.08))
-                Capsule().fill(tint).frame(width: geo.size.width * fraction)
+                Capsule().fill(tint.opacity(row.state == .waiting ? 0.3 : 1))
+                    .frame(width: max(0, geo.size.width * fraction))
             }
         }
         .frame(height: 5)
-    }
-
-    @ViewBuilder private func queueStatus(_ row: DownloadQueueRow) -> some View {
-        switch row.state {
-        case .waiting:
-            Image(systemName: "clock")
-                .font(.system(size: 12, weight: .semibold)).foregroundStyle(.tertiary)
-        case .downloading:
-            if store.isDownloadStalled {
-                DottedLabel(text: "Waiting")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            } else {
-                Text("\(Int(row.progress * 100))%")
-                    .font(.system(size: 12, weight: .semibold).monospacedDigit())
-                    .foregroundStyle(Color.accentColor)
-            }
-        case .done:
-            Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 15, weight: .semibold)).foregroundStyle(.green)
-        case .failed:
-            Image(systemName: "exclamationmark.circle.fill")
-                .font(.system(size: 15, weight: .semibold)).foregroundStyle(.red)
-        }
     }
 
     private var inputIsInvalid: Bool { inputWasSubmitted && WorkshopStore.workshopID(from: store.input) == nil }
@@ -3980,8 +4109,8 @@ struct ContentView: View {
                 .background(RoundedRectangle(cornerRadius: 11).fill(Color.accentColor))
             }
             .buttonStyle(.plain)
-            .disabled(store.isFetching || store.isBusy)
-            .opacity(store.isFetching || store.isBusy ? 0.6 : 1)
+            .disabled(store.isFetching)
+            .opacity(store.isFetching ? 0.6 : 1)
         }
         .padding(10)
         .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
@@ -5915,15 +6044,6 @@ struct GameHit: Codable, Identifiable, Equatable, Sendable {
     let id: Int
     let name: String
     let tiny_image: String?
-
-    /// Steam's poster art is portrait (600x900), where the capsule in tiny_image is landscape.
-    var posterURL: String { "https://steamcdn-a.akamaihd.net/steam/apps/\(id)/library_600x900.jpg" }
-
-    /// Older or smaller artwork, for the few games with no poster.
-    var posterFallbackURLs: [String] {
-        ["https://steamcdn-a.akamaihd.net/steam/apps/\(id)/library_capsule.jpg",
-         "https://steamcdn-a.akamaihd.net/steam/apps/\(id)/header.jpg"]
-    }
 }
 
 struct GameSearchResponse: Codable { let items: [GameHit] }
@@ -6301,15 +6421,9 @@ struct BrowserHome: View {
         HStack(spacing: 0) {
             Button { openGame(hit) } label: {
                 HStack(spacing: 12) {
-                    ZStack {
-                        Color(uiColor: .tertiarySystemFill)
-                        CachedImage(urlString: hit.posterURL,
-                                    fill: false,
-                                    maxPixel: 200,
-                                    fallbackURLStrings: hit.posterFallbackURLs + [hit.tiny_image ?? ""])
-                    }
-                    .frame(width: 56, height: 56)
-                    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    CachedImage(urlString: hit.tiny_image, fill: true, maxPixel: 160)
+                        .frame(width: 56, height: 56)
+                        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                     Text(hit.name)
                         .font(.system(size: 15, weight: .semibold)).lineLimit(2)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -6783,6 +6897,7 @@ struct DeveloperMenuView: View {
                     Button("Run folder repair") { report = store.devRepairReport() }
                     Button("Rewrite manifests and info files") { report = store.devRewriteManifests() }
                     NavigationLink("Hidden manifests") { DevManifestList(store: store) }
+                    NavigationLink("Runtime log") { DevLogView(store: store) }
                     Button("Storage report") { report = store.devStorageReport() }
                 }
 
@@ -6851,5 +6966,37 @@ struct DevManifestList: View {
             }
         }
         .navigationTitle("Hidden manifests")
+    }
+}
+
+
+struct DevLogView: View {
+    @ObservedObject var store: WorkshopStore
+
+    var body: some View {
+        List {
+            if store.runtimeLog.isEmpty {
+                Text("Nothing logged yet.").foregroundStyle(.secondary)
+            } else {
+                ForEach(store.runtimeLog.indices, id: \.self) { index in
+                    Text(store.runtimeLog[index])
+                        .font(.system(size: 11, design: .monospaced))
+                        .textSelection(.enabled)
+                }
+            }
+        }
+        .navigationTitle("Runtime log")
+        .toolbar {
+            ToolbarItem(placement: .navigationBarLeading) {
+                Button("Clear") { store.clearRuntimeLog() }
+                    .disabled(store.runtimeLog.isEmpty)
+            }
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button("Copy") {
+                    UIPasteboard.general.string = store.runtimeLog.joined(separator: "\n")
+                }
+                .disabled(store.runtimeLog.isEmpty)
+            }
+        }
     }
 }
