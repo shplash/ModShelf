@@ -22,6 +22,7 @@ type Engine struct {
 	lastError     string
 	currentFile   string
 	progress      float64
+	downloadBytes int64
 	authenticated bool
 	cancel        context.CancelFunc
 	guardCh       chan string
@@ -54,6 +55,14 @@ func (e *Engine) Status() string      { e.mu.RLock(); defer e.mu.RUnlock(); retu
 func (e *Engine) LastError() string   { e.mu.RLock(); defer e.mu.RUnlock(); return e.lastError }
 func (e *Engine) Progress() float64   { e.mu.RLock(); defer e.mu.RUnlock(); return e.progress }
 func (e *Engine) CurrentFile() string { e.mu.RLock(); defer e.mu.RUnlock(); return e.currentFile }
+
+// DownloadBytes is the uncompressed size Steam says it will write for the current download, which
+// is a better denominator for progress than the Workshop page's compressed size.
+func (e *Engine) DownloadBytes() int64 {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.downloadBytes
+}
 func (e *Engine) IsAuthenticated() bool {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
@@ -196,7 +205,7 @@ func (e *Engine) DownloadWorkshopItem(itemID, targetDir string) string {
 	e.cancel = cancel
 	client := e.client
 	e.status, e.lastError = "Preparing Workshop download…", ""
-	e.progress, e.currentFile = 0, ""
+	e.progress, e.currentFile, e.downloadBytes = 0, "", 0
 	e.mu.Unlock()
 
 	go func() {
@@ -220,6 +229,9 @@ func (e *Engine) DownloadWorkshopItem(itemID, targetDir string) string {
 		failed := false
 		for p := range ch {
 			e.mu.Lock()
+			if p.TotalBytes > 0 {
+				e.downloadBytes = p.TotalBytes
+			}
 			// The library reports whole chunks completed, not bytes written, so the chunk count is
 			// the only progress it actually gives us.
 			if p.TotalBytes > 0 && p.DoneBytes > 0 {

@@ -769,8 +769,8 @@ final class WorkshopStore: ObservableObject {
     private var autoRetryItem = ""
     private var queueFailed = 0
     private var devTask: Task<Void, Never>?
-    // Progress is drawn from the mod's size and an estimated speed rather than Steam's byte
-    // counters, which it does not expose reliably.
+    // Progress follows the size of the folder the mod is written into, which rises with the bytes as
+    // they land. Steam's own counter only appears in a burst at the end, so it cannot drive the bar.
     @Published var isDownloadStalled = false
     private var downloadActiveSeconds: Double = 0
     private var lastTickAt: Date?
@@ -779,7 +779,6 @@ final class WorkshopStore: ObservableObject {
     private var lastMovementAt: Date?
     private var downloadExpectedBytes: Int64 = 0
     private var downloadBytesPerSecond: Double = 0
-    private var lastProgressSample: (Date, Double)?
     /// Mods waiting their turn, with the details they were started from.
     private var pendingMeta: [String: WorkshopMetadata] = [:]
     // The folder being written is measured now and then, which is the only honest sign of progress
@@ -790,6 +789,7 @@ final class WorkshopStore: ObservableObject {
     private var receivedBytes: Int64 = 0
     private var lastReceivedSeen: Int64 = -1
     private var stagingBaselineBytes: Int64 = 0
+    private var lastDiskSample: (Date, Int64)?
     private var lastProgressLogAt = Date.distantPast
     private var didLaunchChecks = false
 
@@ -1284,7 +1284,7 @@ final class WorkshopStore: ObservableObject {
             ? meta.fileSize
             : (library.first(where: { $0.id == id })?.byteCount ?? 0)
         downloadBytesPerSecond = 0
-        lastProgressSample = nil
+        lastDiskSample = nil
         receivedBytes = 0
         lastReceivedSeen = -1
         stagingBaselineBytes = 0
@@ -1434,9 +1434,11 @@ final class WorkshopStore: ObservableObject {
             queue.removeFirst()
             guard let meta = pendingMeta.removeValue(forKey: id) ?? metaFor(id) else { continue }
             updateRow(id, progress: 0, state: .downloading)
-            log("starting queued \(id) as item \(queueStep) of \(max(queueTotal, queueRows.count))")
             beginDownload(id: id, meta: meta, keepQueue: true)
-            if isBusy { return }
+            if isBusy {
+                log("started queued \(id) as item \(queueStep) of \(max(queueTotal, queueRows.count))")
+                return
+            }
             // Nothing could start (signed out, no space, Wi-Fi only), so the rest cannot run either.
             queue.removeAll()
             finishQueue()
@@ -1469,6 +1471,7 @@ final class WorkshopStore: ObservableObject {
         guard total > 0 else { return }
         if total == 1 {
             operationMessage = cancelled ? "Download cancelled." : (failed > 0 ? "That one didn't finish." : "Downloaded.")
+            log("queue end: \(operationMessage)")
             return
         }
         if cancelled {
@@ -1483,32 +1486,21 @@ final class WorkshopStore: ObservableObject {
         log("queue end: \(operationMessage)")
     }
 
-    /// Progress worked out from the mod's size and an estimated speed, in whole percent steps. It
-    /// slows down near the end if a download runs long, and only shows 100% when it is really done.
-    private func simulatedProgress(engineValue: Double) -> Double {
-        guard isDownloading else { return engineValue }
-        let now = Date()
-        if let sample = lastProgressSample {
-            let dt = now.timeIntervalSince(sample.0)
-            if dt > 0.5 {
-                let gained = engineValue - sample.1
-                if gained > 0, downloadExpectedBytes > 0 {
-                    let measured = gained * Double(downloadExpectedBytes) / dt
-                    downloadBytesPerSecond = downloadBytesPerSecond > 0
-                        ? downloadBytesPerSecond * 0.7 + measured * 0.3
-                        : measured
-                }
-                lastProgressSample = (now, engineValue)
-            }
-        } else {
-            lastProgressSample = (now, engineValue)
-        }
-        let elapsed = downloadActiveSeconds
-        return Self.pacedProgress(elapsed: elapsed, expectedBytes: downloadExpectedBytes,
-                                  bytesPerSecond: downloadBytesPerSecond, engineValue: engineValue)
+    /// Where the bar sits. The folder the mod is written into is measured as it grows, so when the
+    /// file system hands out space with the data the bar only moves once bytes have really landed
+    /// and holds still while a transfer stalls. Some file systems give a file its whole length up
+    /// front, and then the folder size says nothing mid-download; only in that case does an estimate
+    /// from the clock keep the bar moving instead.
+    private func displayProgress(engineValue: Double, diskFraction: Double, diskIsReal: Bool) -> Double {
+        guard isDownloading else { return min(1, max(0, engineValue)) }
+        let known = max(engineValue, diskFraction)
+        guard !diskIsReal else { return min(0.99, known) }
+        return Self.pacedProgress(elapsed: downloadActiveSeconds, expectedBytes: downloadExpectedBytes,
+                                  bytesPerSecond: downloadBytesPerSecond, engineValue: known)
     }
 
-    /// The pacing itself, kept separate so the curve is easy to reason about.
+    /// The estimate used only when the folder cannot be trusted, kept separate so the curve is easy
+    /// to reason about. It slows down near the end and never shows 100% before the download is done.
     nonisolated static func pacedProgress(elapsed: TimeInterval, expectedBytes: Int64,
                                           bytesPerSecond: Double, engineValue: Double) -> Double {
         var value = max(0, engineValue)
@@ -1525,7 +1517,17 @@ final class WorkshopStore: ObservableObject {
             let past = (elapsed - duration) / duration
             value = max(value, 0.9 + 0.08 * (1 - exp(-past)))
         }
-        return min(0.99, (min(1, max(0, value)) * 100).rounded(.down) / 100)
+        // Smooth, so the bar creeps forward even between whole percent marks; the label rounds.
+        return min(0.99, min(1, max(0, value)))
+    }
+
+    /// Small mods finish in a second or two, so their folder is re-measured often; a big item has
+    /// thousands of files, so it is measured less often to keep the cost down.
+    private var stagingProbeInterval: TimeInterval {
+        if downloadExpectedBytes <= 0 { return 1 }
+        if downloadExpectedBytes < 100_000_000 { return 0.4 }
+        if downloadExpectedBytes < 500_000_000 { return 1 }
+        return 2
     }
 
     /// Whether Steam is still resolving, fetching manifests or checking files already on disk: a
@@ -1540,6 +1542,12 @@ final class WorkshopStore: ObservableObject {
         // Each new step Steam reports becomes its own segment of the progress bar.
         if isDownloading, !nextStatus.isEmpty, phases.last != nextStatus { phases.append(nextStatus) }
         let engineValue = min(1, max(0, engine?.progress() ?? 0))
+        // Steam knows the uncompressed size it will write, which can differ from the compressed
+        // figure the Workshop page shows; prefer the larger of the two as the denominator.
+        if let engineBytes = engine?.downloadBytes(), engineBytes > 0,
+           Int64(engineBytes) > downloadExpectedBytes {
+            downloadExpectedBytes = Int64(engineBytes)
+        }
         let now = Date()
         let statusChanged = nextStatus != lastStatusSeen
         let valueChanged = engineValue != lastEngineSeen
@@ -1549,44 +1557,53 @@ final class WorkshopStore: ObservableObject {
         let dt = lastTickAt.map { max(0, min(1.5, now.timeIntervalSince($0))) } ?? 0
         lastTickAt = now
         // The folder on disk is the only honest sign of life for large items, where Steam's own
-        // counter can sit at zero for the whole download. Files are pre-allocated before any data
-        // arrives, so the allocated size (not the logical size) is what actually grows.
-        if isDownloading, let staging = activeStaging, !stagingProbeInFlight,
-           now.timeIntervalSince(lastStagingProbe) > 2 {
+        // counter can sit at zero for the whole download. Files are pre-allocated to their full
+        // length before any data arrives, so the allocated size (not the logical size) is what grows.
+        if isDownloading, !isPreparingDownload, let staging = activeStaging, !stagingProbeInFlight,
+           now.timeIntervalSince(lastStagingProbe) > stagingProbeInterval {
             stagingProbeInFlight = true
             lastStagingProbe = now
             Task { @MainActor in
                 let size = await Task.detached(priority: .utility) { Self.directoryBytes(staging) }.value
                 stagingProbeInFlight = false
                 if lastReceivedSeen < 0 {
-                    // First reading: pre-allocation may already have produced the full size on a
-                    // filesystem without sparse files, so this becomes the baseline rather than
-                    // counting as downloaded bytes.
                     lastReceivedSeen = size
                     receivedBytes = size
-                    stagingBaselineBytes = size
-                    log("disk baseline \(Fmt.bytes(size)) of \(Fmt.bytes(downloadExpectedBytes)) expected")
-                } else if size > lastReceivedSeen {
-                    lastReceivedSeen = size
-                    receivedBytes = size
-                    lastMovementAt = Date()
+                    // Space handed out up front shows the folder already at its full size, and that
+                    // reading is a baseline rather than progress. Anything under the full size is
+                    // bytes that really are here (a retry picking up where it stopped), so those
+                    // count towards the bar straight away.
+                    let preAllocated = downloadExpectedBytes > 0
+                        && size >= downloadExpectedBytes - downloadExpectedBytes / 50
+                    stagingBaselineBytes = preAllocated ? size : 0
+                    log(preAllocated
+                        ? "disk baseline \(Fmt.bytes(size)) of \(Fmt.bytes(downloadExpectedBytes)) expected"
+                        : "disk start \(Fmt.bytes(size)) of \(Fmt.bytes(downloadExpectedBytes)) counts as progress")
                 } else {
+                    if size > lastReceivedSeen {
+                        lastReceivedSeen = size
+                        lastMovementAt = Date()
+                    }
                     receivedBytes = size
+                    // Steam's counter arrives in one burst near the end, so the speed is taken from
+                    // the folder instead: what landed, over the time it took to land.
+                    if let sample = lastDiskSample {
+                        let elapsed = now.timeIntervalSince(sample.0)
+                        if elapsed > 0.2, size > sample.1 {
+                            let measured = Double(size - sample.1) / elapsed
+                            downloadBytesPerSecond = downloadBytesPerSecond > 0
+                                ? downloadBytesPerSecond * 0.7 + measured * 0.3
+                                : measured
+                        }
+                    }
                 }
+                lastDiskSample = (now, size)
             }
         }
-        if isDownloading, !isPreparingDownload {
-            // Where the allocated size can move, only the part of this tick before Steam last
-            // reported anything counts. A filesystem without sparse files never grows here, so then
-            // the wall clock keeps the estimate moving instead.
-            let diskNotUseful = downloadExpectedBytes > 0 && stagingBaselineBytes >= downloadExpectedBytes / 2
-            if diskNotUseful {
-                downloadActiveSeconds += dt
-            } else {
-                let quiet = lastMovementAt.map { max(0, now.timeIntervalSince($0)) } ?? 0
-                downloadActiveSeconds += max(0, dt - min(dt, quiet))
-            }
-        }
+        // A folder that was handed its whole size up front got a baseline, and then its size says
+        // nothing about progress; otherwise what it holds is exactly what has landed.
+        let diskIsReal = lastReceivedSeen >= 0 && stagingBaselineBytes == 0
+        if isDownloading, !isPreparingDownload, !diskIsReal { downloadActiveSeconds += dt }
         let preparing = isPreparingDownload
         let stalled = isDownloading && !preparing && (lastMovementAt.map { now.timeIntervalSince($0) > 8 } ?? false)
         if isDownloadStalled != stalled {
@@ -1594,10 +1611,13 @@ final class WorkshopStore: ObservableObject {
             log(stalled ? "download looks stalled at \(Int(progress * 100))%" : "download moving again")
         }
         let grownBytes = max(0, receivedBytes - stagingBaselineBytes)
-        let diskFraction = downloadExpectedBytes > 0 && stagingBaselineBytes > 0
+        let diskFraction = diskIsReal && downloadExpectedBytes > 0
             ? min(0.99, Double(grownBytes) / Double(downloadExpectedBytes))
             : 0
-        let nextProgress = preparing ? 0 : simulatedProgress(engineValue: max(engineValue, diskFraction))
+        var nextProgress = displayProgress(engineValue: engineValue, diskFraction: diskFraction, diskIsReal: diskIsReal)
+        // The denominator can grow when Steam reports a larger uncompressed total, so the figure on
+        // screen only ever moves forward within one download.
+        if isDownloading, nextProgress < progress { nextProgress = progress }
         let nextFile = engine?.currentFile() ?? ""
         let waitingForCode = nextStatus == "Steam Guard code required"
         if waitingForCode != needsGuardCode { needsGuardCode = waitingForCode }
@@ -2852,6 +2872,10 @@ final class WorkshopStore: ObservableObject {
         runtimeLog.append(line)
         if runtimeLog.count > 400 { runtimeLog.removeFirst(runtimeLog.count - 400) }
         Self.appendRuntimeLog(line)
+        // Keep the file from growing without bound, and rewrite it with what is still in memory.
+        if runtimeLog.count % 200 == 0, let data = runtimeLog.joined(separator: "\n").data(using: .utf8) {
+            try? data.write(to: Self.runtimeLogFile, options: .atomic)
+        }
     }
 
     nonisolated private static var runtimeLogFile: URL {
@@ -3305,6 +3329,7 @@ struct DottedLabel: View {
         TimelineView(.periodic(from: .now, by: interval)) { context in
             let step = Int(abs(context.date.timeIntervalSinceReferenceDate) / interval) % 4
             Text(text + String(repeating: ".", count: step))
+                .lineLimit(1)
         }
     }
 }
@@ -3930,7 +3955,7 @@ struct ContentView: View {
                     Text(store.activeTitle.isEmpty ? "Downloading" : store.activeTitle)
                         .font(.footnote.weight(.semibold)).lineLimit(1)
                     Spacer(minLength: 6)
-                    Text("\(Int(store.progress * 100))%")
+                    Text(store.isPreparingDownload ? "Initialising…" : "\(Int(store.progress * 100))%")
                         .font(.footnote.monospacedDigit().weight(.semibold))
                         .foregroundStyle(Color.accentColor)
                     Button { store.cancel() } label: {
@@ -4010,6 +4035,7 @@ struct ContentView: View {
                         }
                         if let item = store.preview,
                            !store.queueRows.contains(where: { $0.id == item.id }) {
+                            if store.isBusy { queuedDownloadCard(item) }
                             downloadButton(item)
                         }
                         if store.preview == nil && !store.isDownloading { browseRow }
@@ -4079,9 +4105,10 @@ struct ContentView: View {
                 }
                 HStack(spacing: 8) {
                     queueStateLabel(row)
-                        .frame(width: 78, alignment: .leading)
+                        .frame(width: 96, alignment: .leading)
                     queueBar(row)
-                    Text("\(Int(row.progress * 100))%")
+                    Text(row.state == .downloading && store.isPreparingDownload
+                         ? "" : "\(Int(row.progress * 100))%")
                         .font(.system(size: 11, weight: .semibold).monospacedDigit())
                         .foregroundStyle(.secondary)
                         .frame(width: 34, alignment: .trailing)
@@ -4099,7 +4126,11 @@ struct ContentView: View {
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.tertiary)
         case .downloading:
-            if store.isDownloadStalled {
+            if store.isPreparingDownload {
+                DottedLabel(text: "Initialising")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+            } else if store.isDownloadStalled {
                 DottedLabel(text: "Waiting")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
@@ -4206,10 +4237,34 @@ struct ContentView: View {
         .padding(11).background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
     }
 
+    /// The mod that a button is about to add to the queue, with its name visible while another
+    /// download runs. Without it the Download tab only showed the lookup field.
+    private func queuedDownloadCard(_ item: WorkshopMetadata) -> some View {
+        HStack(spacing: 10) {
+            Color.clear
+                .frame(width: 44, height: 44)
+                .overlay(CachedImage(urlString: item.imageURL, fill: true, maxPixel: 160).allowsHitTesting(false))
+                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(item.title).font(.system(size: 15, weight: .semibold)).lineLimit(2)
+                if let game = item.gameName, !game.isEmpty {
+                    Text(game).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+                }
+            }
+            Spacer(minLength: 0)
+            if item.fileSize > 0 {
+                Text(Fmt.bytes(item.fileSize)).font(.system(size: 12)).foregroundStyle(.secondary)
+            }
+        }
+        .padding(10)
+        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+    }
+
     private func downloadButton(_ item: WorkshopMetadata) -> some View {
         let existing = store.library.first(where: { $0.id == item.id })
         var label = "Download mod"
-        if let existing { label = existing.updateAvailable ? "Update mod" : "Download again" }
+        if store.isBusy { label = "Add to queue" }
+        else if let existing { label = existing.updateAvailable ? "Update mod" : "Download again" }
         return Button {
             dismissKeyboard(); Haptics.medium(); store.download(item.id)
         } label: {
