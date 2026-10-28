@@ -1113,6 +1113,17 @@ final class WorkshopStore: ObservableObject {
         return id
     }
 
+    /// Keeps the last dozen mods that were looked at, so the Workshop launcher can offer them again.
+    nonisolated static func rememberViewedMod(_ meta: WorkshopMetadata) {
+        guard let id = Int(meta.id) else { return }
+        let key = "browser.recentMods"
+        let defaults = UserDefaults.standard
+        var list = GameListStore.decode(defaults.string(forKey: key) ?? "[]")
+        list.removeAll { $0.id == id }
+        list.insert(GameHit(id: id, name: meta.title, tiny_image: meta.imageURL.isEmpty ? nil : meta.imageURL), at: 0)
+        defaults.set(GameListStore.encode(Array(list.prefix(12))), forKey: key)
+    }
+
     func fetchPreview() {
         guard !isFetching else { return }
         guard let id = Self.workshopID(from: input) else {
@@ -1128,6 +1139,7 @@ final class WorkshopStore: ObservableObject {
             let result = await SteamMeta.fetch(id: id, includePage: true)
             if let result {
                 preview = result
+                Self.rememberViewedMod(result)
                 log("lookup \(id): \"\(result.title)\" · \(result.gameName ?? "-") · \(Fmt.bytes(result.fileSize))")
             } else {
                 errorMessage = "We couldn't load that item just now. It may be private or gone."
@@ -2598,6 +2610,14 @@ final class WorkshopStore: ObservableObject {
         return abs(disk - steam) <= tolerance
     }
 
+    /// Puts the Download tab back to its default view, with no mod on display.
+    func clearDisplayedMod() {
+        guard !isBusy else { return }
+        preview = nil
+        input = ""
+        errorMessage = ""
+    }
+
     private func applyCheck(_ id: String, broken: Bool) {
         if let i = library.firstIndex(where: { $0.id == id }) { library[i].filesBroken = broken; saveLibrary() }
     }
@@ -3484,6 +3504,7 @@ struct ContentView: View {
     @State private var upwardRun: CGFloat = 0
     @State private var browserHomeToken = 0
     @State private var lastWorkshopTap = Date.distantPast
+    @State private var lastDownloadTap = Date.distantPast
     @State private var showDeveloperMenu = false
     @AppStorage("dev.unlocked") private var devUnlocked = false
     @State private var logoTapCount = 0
@@ -4095,7 +4116,26 @@ struct ContentView: View {
     }
 
     private func tabTapped(_ index: Int) {
-        guard index == 1 else { lastWorkshopTap = .distantPast; return }
+        if index == 0 {
+            // Two taps on the Download tab take the mod on display away and return to the default view.
+            let now = Date()
+            let gap = now.timeIntervalSince(lastDownloadTap)
+            if selectedTab == 0, gap > 0.08, gap < 0.45, !store.isBusy, store.preview != nil {
+                store.clearDisplayedMod()
+                inputWasSubmitted = false
+                Haptics.tap()
+                lastDownloadTap = .distantPast
+                return
+            }
+            lastDownloadTap = now
+            lastWorkshopTap = .distantPast
+            return
+        }
+        guard index == 1 else {
+            lastWorkshopTap = .distantPast
+            lastDownloadTap = .distantPast
+            return
+        }
         // Two taps on the Workshop tab within about half a second go back to the start page.
         let now = Date()
         let gap = now.timeIntervalSince(lastWorkshopTap)
@@ -4130,7 +4170,7 @@ struct ContentView: View {
                         }
                         if downloadIntro {
                             browseRow
-                            downloadSteps
+                            glanceCard
                         }
                         if !store.isDownloading, store.queueRows.isEmpty, let item = store.preview {
             metadataCard(item)
@@ -4142,9 +4182,6 @@ struct ContentView: View {
                            !store.queueRows.contains(where: { $0.id == item.id }) {
                             if store.isBusy { queuedDownloadCard(item) }
                             downloadButton(item)
-                        }
-                        if downloadIntro, !recentInstalls.isEmpty {
-                            recentInstallsSection
                         }
                     }
                     .padding(.horizontal, 15).padding(.top, 10).padding(.bottom, tabBarReserve)
@@ -4337,74 +4374,58 @@ struct ContentView: View {
         }
     }
 
-    /// The three steps that make up a download.
-    private var downloadSteps: some View {
-        VStack(spacing: 0) {
-            welcomeStep("link", "Paste a Workshop link", "A sharedfiles link or a workshop ID both work.")
-            Divider().padding(.leading, 46)
-            welcomeStep("safari.fill", "Or browse the Workshop", "Pick a game, then the mod you want.")
-            Divider().padding(.leading, 46)
-            welcomeStep("folder.fill", "It lands in Files", "ModShelf → Downloaded Mods → game → mod.")
+    /// Three numbers at a glance: what is installed, how many games it covers and how many have an
+    /// update, plus the storage the library takes and what is left on the device.
+    private var glanceCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("AT A GLANCE")
+                .font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                .kerning(0.4)
+            HStack(spacing: 10) {
+                glanceStat("\(store.library.count)", "mods")
+                glanceStat("\(gameCount)", gameCount == 1 ? "game" : "games")
+                glanceStat("\(store.library.filter { $0.updateAvailable }.count)", "updates")
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(Color.primary.opacity(0.08))
+                        Capsule().fill(Color.accentColor.opacity(0.85))
+                            .frame(width: max(2, geo.size.width * storageFraction))
+                    }
+                }
+                .frame(height: 6)
+                Text("\(Fmt.bytes(store.libraryStorageBytes)) on this device · \(Fmt.bytes(freeSpaceBytes)) free")
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+            }
         }
+        .padding(14)
         .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
-    /// The mods that really installed, last, as a way straight back to them.
-    private var recentInstallsSection: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            Text("RECENTLY INSTALLED")
-                .font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
-                .kerning(0.4)
-                .padding(.horizontal, 4)
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 10) {
-                    ForEach(recentInstalls) { record in recentTile(record) }
-                }
-                .padding(.horizontal, 1).padding(.vertical, 2)
-            }
+    private func glanceStat(_ value: String, _ label: String) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(value).font(.system(size: 20, weight: .bold, design: .rounded))
+            Text(label).font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func welcomeStep(_ symbol: String, _ title: String, _ detail: String) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: symbol)
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(Color.accentColor)
-                .frame(width: 22)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.system(size: 14, weight: .semibold))
-                Text(detail).font(.system(size: 12)).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 14).padding(.vertical, 12)
+    private var gameCount: Int {
+        Set(store.library.compactMap { $0.appID }).count
     }
 
-    /// The last few mods that really installed, as a way straight back to them.
-    private var recentInstalls: [DownloadRecord] {        var seen = Set<String>()
-        let list = store.history.filter { $0.result == "Downloaded" && seen.insert($0.workshopID).inserted }
-        return Array(list.prefix(8))
+    private var freeSpaceBytes: Int64 {
+        let values = try? URL(fileURLWithPath: NSHomeDirectory())
+            .resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        return Int64(values?.volumeAvailableCapacityForImportantUsage ?? 0)
     }
 
-    private func recentTile(_ record: DownloadRecord) -> some View {
-        Button {
-            Haptics.tap()
-            store.input = "https://steamcommunity.com/sharedfiles/filedetails/?id=\(record.workshopID)"
-            submitLookup()
-        } label: {
-            VStack(alignment: .leading, spacing: 6) {
-                Color.clear
-                    .frame(width: 104, height: 74)
-                    .overlay(CachedImage(urlString: record.imageURL, fill: true, maxPixel: 260).allowsHitTesting(false))
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                Text(record.title)
-                    .font(.system(size: 12, weight: .medium)).lineLimit(2)
-                    .frame(width: 104, alignment: .leading)
-                    .multilineTextAlignment(.leading)
-            }
-        }
-        .buttonStyle(.plain)
+    private var storageFraction: Double {
+        let used = Double(store.libraryStorageBytes)
+        let total = used + Double(freeSpaceBytes)
+        guard total > 0 else { return 0 }
+        return min(1, used / total)
     }
 
     private var browseRow: some View {
@@ -4577,7 +4598,7 @@ struct ContentView: View {
     private var libraryView: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                libraryHeader
+                libraryBar
                 if showingHistory { historyContent } else { libraryBody }
             }
             .background(Color(uiColor: .systemGroupedBackground))
@@ -4609,28 +4630,40 @@ struct ContentView: View {
         .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(Color.accentColor.opacity(0.14)))
     }
 
-    private var libraryHeader: some View {
-        HStack(alignment: .center, spacing: 8) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(showingHistory ? "Download history" : "Library")
-                    .font(.system(size: 27, weight: .bold, design: .rounded)).lineLimit(1).minimumScaleFactor(0.75)
-                Text(librarySubtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+    /// A compact bar rather than a page title: what is in the library and how big it is, with the
+    /// actions beside it and the sort order on its own line underneath.
+    private var libraryBar: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(alignment: .center, spacing: 8) {
+                Text(librarySubtitle)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                if showingHistory {
+                    IconButton(symbol: "trash", size: 36) { if confirmDelete { confirmClearHistory = true } else { store.clearHistory() } }.disabled(store.history.isEmpty)
+                    IconButton(symbol: "xmark", size: 36) { showingHistory = false }
+                } else {
+                    IconButton(symbol: "clock.arrow.circlepath", size: 36) { showingHistory = true }
+                    Button { Haptics.tap(); store.checkAllUpdates() } label: { iconLabel("arrow.clockwise", spinning: store.isCheckingUpdates) }
+                        .buttonStyle(.plain).disabled(store.isCheckingUpdates)
+                    Button { Haptics.tap(); store.verifyAllFiles() } label: { iconLabel("checkmark.shield", spinning: store.isVerifyingAll) }
+                        .buttonStyle(.plain).disabled(store.isVerifyingAll)
+                    moreMenu
+                }
             }
-            Spacer(minLength: 0)
-            if showingHistory {
-                IconButton(symbol: "trash", size: 36) { if confirmDelete { confirmClearHistory = true } else { store.clearHistory() } }.disabled(store.history.isEmpty)
-                IconButton(symbol: "xmark", size: 36) { showingHistory = false }
-            } else {
-                IconButton(symbol: "clock.arrow.circlepath", size: 36) { showingHistory = true }
-                sortMenu
-                Button { Haptics.tap(); store.checkAllUpdates() } label: { iconLabel("arrow.clockwise", spinning: store.isCheckingUpdates) }
-                    .buttonStyle(.plain).disabled(store.isCheckingUpdates)
-                Button { Haptics.tap(); store.verifyAllFiles() } label: { iconLabel("checkmark.shield", spinning: store.isVerifyingAll) }
-                    .buttonStyle(.plain).disabled(store.isVerifyingAll)
-                moreMenu
+            if !showingHistory {
+                HStack(spacing: 8) {
+                    sortMenu
+                    Text(sortOrder)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                }
             }
         }
-        .padding(.horizontal, 15).padding(.top, 10).padding(.bottom, 10)
+        .padding(.horizontal, 15).padding(.top, 6).padding(.bottom, 8)
     }
 
     private var sortMenu: some View {
@@ -6607,19 +6640,21 @@ enum GameListStore {
 }
 
 struct BrowserHome: View {
+    @Binding var query: String
     let lastPage: URL?
     let onOpenURL: (URL) -> Void
     let onScroll: (CGFloat) -> Void
 
-    @State private var query = ""
     @State private var results: [GameHit] = []
     @State private var searching = false
     @FocusState private var searchFocused: Bool
     @AppStorage("browser.recentGames") private var recentJSON = "[]"
     @AppStorage("browser.favGames") private var favJSON = "[]"
+    @AppStorage("browser.recentMods") private var viewedJSON = "[]"
 
     private var recent: [GameHit] { GameListStore.decode(recentJSON) }
     private var favourites: [GameHit] { GameListStore.decode(favJSON) }
+    private var viewedMods: [GameHit] { GameListStore.decode(viewedJSON) }
     /// True until the first game is opened or favourited; the search box is then ready to type in.
     private var isFirstRun: Bool { recent.isEmpty && favourites.isEmpty && lastPage == nil }
 
@@ -6627,13 +6662,12 @@ struct BrowserHome: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 ScrollSpy(onChange: onScroll)
-                header
-                searchField
                 if !query.trimmingCharacters(in: .whitespaces).isEmpty {
                     resultsSection
                 } else {
                     if let lastPage { continueCard(lastPage) }
                     if !favourites.isEmpty { favouritesSection }
+                    if !viewedMods.isEmpty { viewedModsSection }
                     if !recentlyOpened.isEmpty { recentsSection }
                     if isFirstRun { firstRunCard }
                 }
@@ -6645,20 +6679,6 @@ struct BrowserHome: View {
         .background(Color(uiColor: .systemGroupedBackground))
         .task(id: query) { await runSearch() }
         .onAppear { if isFirstRun { searchFocused = true } }
-    }
-
-    /// The start page's own header, so the tab reads as a place to begin rather than a bare search box.
-    private var header: some View {
-        HStack(spacing: 13) {
-            Image(systemName: "safari.fill")
-                .font(.system(size: 22, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .frame(width: 50, height: 50)
-                .background(RoundedRectangle(cornerRadius: 15, style: .continuous).fill(Color.primary.opacity(0.07)))
-            Text("Workshop").font(.system(size: 25, weight: .bold, design: .rounded))
-            Spacer(minLength: 0)
-        }
-        .padding(.top, 6)
     }
 
     private func runSearch() async {
@@ -6726,6 +6746,38 @@ struct BrowserHome: View {
                 ForEach(Array(favourites.prefix(4))) { hit in favouriteTile(hit) }
             }
         }
+    }
+
+    private var viewedModsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionHeader("Recently viewed", count: viewedMods.count)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    ForEach(viewedMods) { hit in viewedTile(hit) }
+                }
+                .padding(.horizontal, 1).padding(.vertical, 2)
+            }
+        }
+    }
+
+    private func viewedTile(_ hit: GameHit) -> some View {
+        Button {
+            Haptics.tap()
+            if let url = URL(string: "https://steamcommunity.com/sharedfiles/filedetails/?id=\(hit.id)") {
+                onOpenURL(url)
+            }
+        } label: {
+            VStack(alignment: .leading, spacing: 6) {
+                Color.clear
+                    .frame(width: 116, height: 65)
+                    .overlay(CachedImage(urlString: hit.tiny_image, fill: true, maxPixel: 300).allowsHitTesting(false))
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                Text(hit.name).font(.system(size: 12, weight: .medium)).lineLimit(2)
+                    .frame(width: 116, alignment: .leading)
+                    .multilineTextAlignment(.leading)
+            }
+        }
+        .buttonStyle(.plain)
     }
 
     private var recentsSection: some View {
@@ -6907,6 +6959,7 @@ struct WorkshopBrowserView: View {
     @State private var isLoading = false
     @State private var showUse = false
     @State private var showHome = true
+    @State private var homeQuery = ""
     @State private var copied = false
 
     static let lastPageKey = "browser.lastURL"
@@ -6926,7 +6979,7 @@ struct WorkshopBrowserView: View {
                     .opacity(showHome ? 0 : 1)
                     .allowsHitTesting(!showHome)
                 if showHome {
-                    BrowserHome(lastPage: savedLastPage,
+                    BrowserHome(query: $homeQuery, lastPage: savedLastPage,
                                 onOpenURL: { open($0) },
                                 onScroll: onScroll)
                 }
@@ -6945,13 +6998,40 @@ struct WorkshopBrowserView: View {
         requestedURL = url
     }
 
-    /// Back, Forward, the address (tap to copy) and Home, all across the top.
+    /// Back, Forward, the address (tap to copy) and Home, all across the top. On the launcher only
+    /// Home is shown, since there is no page to go back to or copy.
+    /// The launcher's search box, sitting where the address bar sits when a page is open.
+    private var homeSearchField: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 14, weight: .semibold)).foregroundStyle(.secondary)
+            TextField("Search a game", text: $homeQuery)
+                .font(.system(size: 15))
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .submitLabel(.search)
+            if !homeQuery.isEmpty {
+                Button { homeQuery = "" } label: {
+                    Image(systemName: "xmark.circle.fill").font(.system(size: 15)).foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Clear search")
+            }
+        }
+        .padding(.horizontal, 10).padding(.vertical, 8)
+        .background(Color(uiColor: .tertiarySystemFill), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+    }
+
     private var topBar: some View {
         HStack(spacing: 8) {
-            navButton("chevron.left", "Back", enabled: canGoBack && !showHome) { handle.webView?.goBack() }
-            navButton("chevron.right", "Forward", enabled: canGoForward && !showHome) { handle.webView?.goForward() }
-            addressField
-            navButton("house.fill", "Browse home", enabled: true) { showHome = true }
+            if showHome {
+                homeSearchField
+            } else {
+                navButton("chevron.left", "Back", enabled: canGoBack) { handle.webView?.goBack() }
+                navButton("chevron.right", "Forward", enabled: canGoForward) { handle.webView?.goForward() }
+                addressField
+                navButton("house.fill", "Browse home", enabled: true) { showHome = true }
+            }
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
         .background(Color(uiColor: .systemGroupedBackground))
