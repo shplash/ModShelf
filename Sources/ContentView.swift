@@ -728,6 +728,9 @@ final class WorkshopStore: ObservableObject {
     @Published var currentFile = ""
     @Published var isBusy = false
     @Published var isDownloading = false
+    /// A finished transfer is moved into the library after Steam is done with it, which for a big
+    /// item means tens of thousands of files and takes a few seconds.
+    @Published var isInstalling = false
     @Published var isFetching = false
     @Published var preview: WorkshopMetadata?
     @Published var library: [WorkshopItem] = []
@@ -1280,6 +1283,7 @@ final class WorkshopStore: ObservableObject {
         lastStatusSeen = ""
         lastMovementAt = nil
         isDownloadStalled = false
+        isInstalling = false
         downloadExpectedBytes = meta.fileSize > 0
             ? meta.fileSize
             : (library.first(where: { $0.id == id })?.byteCount ?? 0)
@@ -1566,6 +1570,8 @@ final class WorkshopStore: ObservableObject {
             Task { @MainActor in
                 let size = await Task.detached(priority: .utility) { Self.directoryBytes(staging) }.value
                 stagingProbeInFlight = false
+                // A measurement that arrives after the download ended belongs to nothing.
+                guard isDownloading, activeStaging == staging else { return }
                 if lastReceivedSeen < 0 {
                     lastReceivedSeen = size
                     receivedBytes = size
@@ -1664,6 +1670,7 @@ final class WorkshopStore: ObservableObject {
         var success = false
         var failureText = ""
         if successStatus, !stagingPath.isEmpty {
+            isInstalling = true
             do {
                 let existing = library.first(where: { $0.id == activeID })
                 let previousVersion = existing?.publishedUpdatedAt ?? 0
@@ -1697,10 +1704,21 @@ final class WorkshopStore: ObservableObject {
                 log("finalised \(activeID): \(done.files) files, \(Fmt.bytes(done.bytes))")
                 success = true
             } catch {
-                failureText = "Couldn't finish the download."
+                // The reason a finished download could not be put in place is the only way to see
+                // whether it is a bad file name, a refused move or an empty folder.
+                let failure = error as NSError
+                let staged = visibleChildren(staging).count
+                log("install failed \(activeID): \(failure.domain) \(failure.code) - \(failure.localizedDescription) · \(staged) items, \(Fmt.bytes(Self.directoryBytes(staging)))")
+                failureText = failure.code == 1 ? "The download came back empty." : "Couldn't finish the download."
                 errorMessage = failureText
-                try? FileManager.default.removeItem(at: staging)
+                // What was downloaded is kept for a retry; only an empty folder has nothing to keep.
+                if staged == 0 {
+                    try? FileManager.default.removeItem(at: staging)
+                } else {
+                    log("kept the downloaded files for \(activeID)")
+                }
             }
+            isInstalling = false
         } else if cancelled, !stagingPath.isEmpty {
             // A cancelled download throws its half-written files away; a failed one keeps them so a
             // retry can resume from the chunks it already has.
@@ -1772,6 +1790,7 @@ final class WorkshopStore: ObservableObject {
         }
         queue.removeAll()
         engine?.cancelDownload()
+        isInstalling = false
         status = "Cancelling download…"
     }
 
@@ -2238,7 +2257,16 @@ final class WorkshopStore: ObservableObject {
             if mods.count == 1, dirs.count == 1 { payload = dirs[0]; singleMod = true }
             else if !mods.isEmpty { payload = modsDir }
         }
-        let name = singleMod ? sanitize(payload.lastPathComponent, fallback: id) : sanitize(meta.title, fallback: id)
+        let name: String
+        // Some items unpack a level deeper than expected, which would move nothing into place; in
+        // that case whatever really came down is used instead of an empty folder.
+        if Self.scan(folder: payload.path).count == 0,
+           let filled = [base, staging].first(where: { isDir($0) && Self.scan(folder: $0.path).count > 0 }) {
+            log("unpacked \(id) deeper than expected, using \(filled.lastPathComponent)")
+            payload = filled
+            singleMod = false
+        }
+        name = singleMod ? sanitize(payload.lastPathComponent, fallback: id) : sanitize(meta.title, fallback: id)
 
         // An update replaces the installation in the folder it already lives in; a new download, or one
         // whose files were moved into a game, goes into the game's folder inside ModShelf.
@@ -3955,7 +3983,9 @@ struct ContentView: View {
                     Text(store.activeTitle.isEmpty ? "Downloading" : store.activeTitle)
                         .font(.footnote.weight(.semibold)).lineLimit(1)
                     Spacer(minLength: 6)
-                    Text(store.isPreparingDownload ? "Initialising…" : "\(Int(store.progress * 100))%")
+                    Text(store.isPreparingDownload
+                         ? "Initialising…"
+                         : (store.isInstalling ? "Installing…" : "\(Int(store.progress * 100))%"))
                         .font(.footnote.monospacedDigit().weight(.semibold))
                         .foregroundStyle(Color.accentColor)
                     Button { store.cancel() } label: {
@@ -4128,6 +4158,10 @@ struct ContentView: View {
         case .downloading:
             if store.isPreparingDownload {
                 DottedLabel(text: "Initialising")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+            } else if store.isInstalling {
+                DottedLabel(text: "Installing")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
             } else if store.isDownloadStalled {
