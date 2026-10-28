@@ -4641,6 +4641,7 @@ struct ContentView: View {
     /// the actions as a row of labelled tiles below.
     private var libraryBar: some View {
         VStack(spacing: 8) {
+            if !showingHistory {
             HStack(spacing: 8) {
                 sortMenu
                 Spacer(minLength: 0)
@@ -4669,6 +4670,7 @@ struct ContentView: View {
             HStack(spacing: 8) {
                 librarySearchField
                 selectPill
+            }
             }
         }
         .padding(.horizontal, 15).padding(.top, 6).padding(.bottom, 8)
@@ -4705,6 +4707,24 @@ struct ContentView: View {
         .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
     }
 
+    private func filterSymbol(_ filter: String) -> String {
+        switch filter {
+        case "Updates": return "arrow.down.circle"
+        case "Favourites": return "star.fill"
+        case "Problems": return "exclamationmark.triangle"
+        default: return "line.3.horizontal.decrease.circle"
+        }
+    }
+
+    private func filterTint(_ filter: String) -> Color {
+        switch filter {
+        case "Updates": return .accentColor
+        case "Favourites": return .yellow
+        case "Problems": return .red
+        default: return .accentColor
+        }
+    }
+
     /// The library filter as a chip whose icon has no backing of its own, with the chosen filter named.
     private var filterMenu: some View {
         Menu {
@@ -4716,12 +4736,17 @@ struct ContentView: View {
                 }
             }
         } label: {
-            HStack(spacing: 5) {
+            HStack(spacing: 4) {
                 Image(systemName: "line.3.horizontal.decrease.circle")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(Color.accentColor)
-                Text(libraryFilter).font(.system(size: 12, weight: .medium))
-                    .foregroundColor(Color(uiColor: .secondaryLabel))
+                if libraryFilter != "All" {
+                    Text("-").font(.system(size: 12, weight: .medium))
+                        .foregroundColor(Color(uiColor: .secondaryLabel))
+                    Image(systemName: filterSymbol(libraryFilter))
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(filterTint(libraryFilter))
+                }
             }
             .foregroundStyle(.secondary)
             .padding(.horizontal, 10).padding(.vertical, 7)
@@ -5129,17 +5154,6 @@ struct ContentView: View {
                 emptyState("No download history", detail: "Download attempts and results will appear here.", symbol: "clock.arrow.circlepath")
             } else {
                 VStack(spacing: 0) {
-                    HStack(spacing: 9) {
-                        Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                        TextField("Search history", text: $historySearch).textInputAutocapitalization(.never).autocorrectionDisabled()
-                        if !historySearch.isEmpty {
-                            Button { historySearch = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
-                        }
-                    }
-                    .padding(.horizontal, 12).padding(.vertical, 10)
-                    .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
-                    .padding(.horizontal, 14).padding(.bottom, 8)
-
                     if filteredHistory.isEmpty {
                         emptyState("Nothing matches", detail: "No attempt matches “\(historySearch)”.", symbol: "magnifyingglass")
                     } else {
@@ -5195,17 +5209,17 @@ struct ContentView: View {
                         .font(.system(size: 12, weight: .semibold)).foregroundStyle(historyColor(record.result))
                         .padding(.horizontal, 8).padding(.vertical, 3)
                         .background(Capsule().fill(historyColor(record.result).opacity(0.15)))
+                    if let game = record.gameName {
+                        Text(game).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                    Spacer(minLength: 4)
                     TimelineView(.everyMinute) { _ in
                         Text(Fmt.historyTime(record.date)).font(.system(size: 12)).foregroundStyle(.secondary)
-                    }
-                    if let attempt = record.attempt, attempt > 1 {
-                        Text("Attempt \(attempt)").font(.system(size: 12)).foregroundStyle(.secondary)
                     }
                 }
                 if failed, let error = record.error, !error.isEmpty {
                     Text(error).font(.system(size: 12)).foregroundStyle(Color.red.opacity(0.9)).lineLimit(3).fixedSize(horizontal: false, vertical: true)
                 }
-                if let game = record.gameName { Text(game).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1) }
                 if failed {
                     Button { Haptics.tap(); store.retry(record); selectedTab = 0 } label: {
                         Label("Try again", systemImage: "arrow.clockwise").font(.system(size: 13, weight: .semibold))
