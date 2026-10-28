@@ -4342,9 +4342,9 @@ struct ContentView: View {
                     if store.isFetching { ProgressView().tint(.white) } else { Image(systemName: "magnifyingglass") }
                     Text(store.isFetching ? "Looking up…" : "Look up item")
                 }
-                .font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
+                .font(.system(size: 15, weight: .semibold)).foregroundStyle(.primary)
                 .frame(maxWidth: .infinity).frame(height: 40)
-                .background(RoundedRectangle(cornerRadius: 11).fill(Color.accentColor.opacity(0.6)))
+                .background(RoundedRectangle(cornerRadius: 11).fill(Color(uiColor: .secondarySystemGroupedBackground)))
             }
             .buttonStyle(.plain)
             .disabled(store.isFetching)
@@ -4639,12 +4639,15 @@ struct ContentView: View {
         .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(Color.accentColor.opacity(0.14)))
     }
 
-    /// The library's top area: the mod count and size in their own box, the sort beside it, and the
-    /// actions as a row of labelled tiles ordered by how often they are reached for.
+    /// The library's top area: search and the select toggle, then sort, filter and the counts, with
+    /// the actions as a row of labelled tiles below.
     private var libraryBar: some View {
         VStack(spacing: 8) {
             HStack(spacing: 8) {
+                librarySearchField
                 selectPill
+            }
+            HStack(spacing: 8) {
                 sortMenu
                 Spacer(minLength: 0)
                 filterMenu
@@ -4725,7 +4728,6 @@ struct ContentView: View {
             .padding(.horizontal, 10).padding(.vertical, 7)
             .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
-        .tint(Color.secondary)
     }
 
     private var sortMenu: some View {
@@ -4753,7 +4755,6 @@ struct ContentView: View {
             .padding(.horizontal, 10).padding(.vertical, 7)
             .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
-        .tint(Color.secondary)
     }
 
     private var moreMenu: some View {
@@ -4806,20 +4807,22 @@ struct ContentView: View {
             .padding(.vertical, 8)
             .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
         }
-        .tint(Color.secondary)
+    }
+
+    private var librarySearchField: some View {
+        HStack(spacing: 9) {
+            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+            TextField("Search library", text: $searchText).textInputAutocapitalization(.never).autocorrectionDisabled()
+            if !searchText.isEmpty {
+                Button { searchText = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
+            }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
     private var libraryBody: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 9) {
-                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                TextField("Search library", text: $searchText).textInputAutocapitalization(.never).autocorrectionDisabled()
-                if !searchText.isEmpty { Button { searchText = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) } }
-            }
-            .padding(.horizontal, 12).padding(.vertical, 10)
-            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
-            .padding(.horizontal, 14).padding(.bottom, 8)
-
             if !store.library.isEmpty { filterRow }
 
             let items = visibleItems
@@ -4917,12 +4920,10 @@ struct ContentView: View {
         } label: {
             HStack(spacing: 5) {
                 Image(systemName: selecting ? "checkmark.circle.fill" : "checkmark.circle")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(Color.accentColor)
-                Text(selecting ? "Done" : "Select").font(.system(size: 12, weight: .medium)).lineLimit(1)
             }
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 10).padding(.vertical, 7)
+            .padding(.horizontal, 10).padding(.vertical, 8)
             .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .buttonStyle(.plain)
@@ -6862,7 +6863,6 @@ struct BrowserHome: View {
                 Color.clear
                     .frame(width: 78, height: 78)
                     .overlay(CachedImage(urlString: hit.tiny_image, fill: false, maxPixel: 220).allowsHitTesting(false))
-                    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                 MarqueeText(text: hit.name, fontSize: 11, weight: .medium, height: 15)
                     .frame(width: 78, alignment: .leading)
             }
