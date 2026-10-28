@@ -3928,14 +3928,11 @@ struct ContentView: View {
             Image(systemName: "clock")
                 .font(.system(size: 12, weight: .semibold)).foregroundStyle(.tertiary)
         case .downloading:
-            if store.isPreparingDownload {
-                Text("Preparing")
+            if store.isDownloadStalled {
+                DottedLabel(text: "Waiting")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.secondary)
-            } else if store.isDownloadStalled {
-                Text("Waiting")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             } else {
                 Text("\(Int(row.progress * 100))%")
                     .font(.system(size: 12, weight: .semibold).monospacedDigit())
