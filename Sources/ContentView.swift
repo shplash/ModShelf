@@ -4635,13 +4635,15 @@ struct ContentView: View {
     private var libraryBar: some View {
         VStack(spacing: 8) {
             HStack(spacing: 8) {
+                selectPill
+                filterMenu
+                Spacer(minLength: 0)
                 Text(librarySubtitle)
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .padding(.horizontal, 10).padding(.vertical, 7)
                     .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                Spacer(minLength: 0)
                 sortMenu
             }
             HStack(spacing: 8) {
@@ -4691,6 +4693,29 @@ struct ContentView: View {
         .frame(maxWidth: .infinity)
         .padding(.vertical, 8)
         .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+    }
+
+    /// The library filter as a chip whose icon has no backing of its own, with the chosen filter named.
+    private var filterMenu: some View {
+        Menu {
+            ForEach(["All", "Updates", "Favourites", "Problems"], id: \.self) { name in
+                Button {
+                    Haptics.select(); libraryFilter = name
+                } label: {
+                    if libraryFilter == name { Label(name, systemImage: "checkmark") } else { Text(name) }
+                }
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "line.3.horizontal.decrease.circle")
+                    .font(.system(size: 13, weight: .semibold))
+                Text(libraryFilter).font(.system(size: 12, weight: .medium))
+            }
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 10).padding(.vertical, 7)
+            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+        .tint(Color.secondary)
     }
 
     private var sortMenu: some View {
@@ -4758,6 +4783,7 @@ struct ContentView: View {
             .padding(.vertical, 8)
             .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
         }
+        .tint(Color.secondary)
     }
 
     private var libraryBody: some View {
@@ -4771,7 +4797,7 @@ struct ContentView: View {
             .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
             .padding(.horizontal, 14).padding(.bottom, 8)
 
-            if !store.library.isEmpty { chipRow; filterRow }
+            if !store.library.isEmpty { filterRow }
 
             let items = visibleItems
             if store.library.isEmpty {
@@ -6812,18 +6838,22 @@ struct BrowserHome: View {
                 Color.clear
                     .frame(width: 78, height: 78)
                     .overlay(CachedImage(urlString: hit.tiny_image, fill: true, maxPixel: 220).allowsHitTesting(false))
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                 MarqueeText(text: hit.name, fontSize: 11, weight: .medium, height: 15)
                     .frame(width: 78, alignment: .leading)
             }
+            .padding(6)
+            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
         .buttonStyle(.plain)
     }
 
     private var recentsSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            sectionHeader("Recently opened", count: recentlyOpened.count)
-            ForEach(recentlyOpened) { hit in landscapeGameCard(hit) }
+            sectionHeader("Recently opened games", count: recentlyOpened.count)
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
+                ForEach(Array(recentlyOpened.prefix(4))) { hit in favouriteTile(hit) }
+            }
         }
     }
 
