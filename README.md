@@ -45,7 +45,6 @@ If you found ModShelf useful, a GitHub star is always appreciated.
 - Downloads sorted into a folder per game inside ModShelf's storage
 - Library with search, tags, game filter, favourites and bulk select
 - Update checks, file verification and ZIP export
-- Native SwiftUI, with Files app access for every mod
 
 ## Example
 
