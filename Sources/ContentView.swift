@@ -4096,9 +4096,10 @@ struct ContentView: View {
             .padding(12)
             .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             .shadow(color: .black.opacity(0.06), radius: 8, y: 3)
-            .padding(.horizontal, 14).padding(.top, 8).padding(.bottom, 4)
+            .padding(.horizontal, 14).padding(.top, 8)
             .transition(.move(edge: .top).combined(with: .opacity))
             fadingLine
+                .padding(.top, 8)
                 .padding(.bottom, 4)
         }
     }
