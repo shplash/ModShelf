@@ -3491,6 +3491,7 @@ struct ContentView: View {
     @State private var mediaViewer: MediaViewer?
     @State private var mediaIndex = 0
     @State private var marqueeToken = 0
+    @State private var freeSpaceCache: Int64 = 0
     @State private var pendingAutoDownload: String?
     @State private var selectedGame: String? = nil
     @State private var selectedTag: String? = nil
@@ -3666,6 +3667,7 @@ struct ContentView: View {
         .onChange(of: scenePhase) { phase in
             // Coming back from another app restarts the scrolling names, like arriving on the tab does.
             if phase == .active, selectedTab == 2 { marqueeToken += 1 }
+            if phase == .active { refreshFreeSpace() }
         }
         .onChange(of: store.errorMessage) { message in
             guard !message.isEmpty, !store.showLogin else { return }
@@ -3746,6 +3748,7 @@ struct ContentView: View {
         .onAppear {
             // A sort saved by an older build may name an option that is no longer offered.
             if !sortOrders.contains(sortOrder) { sortOrder = "Recently added" }
+            refreshFreeSpace()
         }
     }
 
@@ -4341,7 +4344,7 @@ struct ContentView: View {
                 }
                 .font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
                 .frame(maxWidth: .infinity).frame(height: 40)
-                .background(RoundedRectangle(cornerRadius: 11).fill(Color.accentColor.opacity(0.8)))
+                .background(RoundedRectangle(cornerRadius: 11).fill(Color.accentColor.opacity(0.6)))
             }
             .buttonStyle(.plain)
             .disabled(store.isFetching)
@@ -4416,9 +4419,15 @@ struct ContentView: View {
     }
 
     private var freeSpaceBytes: Int64 {
+        freeSpaceCache
+    }
+
+    /// Reading free space touches the file system, so it is done when the app opens or returns rather
+    /// than on every redraw of the card that shows it.
+    private func refreshFreeSpace() {
         let values = try? URL(fileURLWithPath: NSHomeDirectory())
             .resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
-        return Int64(values?.volumeAvailableCapacityForImportantUsage ?? 0)
+        freeSpaceCache = Int64(values?.volumeAvailableCapacityForImportantUsage ?? 0)
     }
 
     private var storageFraction: Double {
@@ -4636,15 +4645,15 @@ struct ContentView: View {
         VStack(spacing: 8) {
             HStack(spacing: 8) {
                 selectPill
-                filterMenu
+                sortMenu
                 Spacer(minLength: 0)
+                filterMenu
                 Text(librarySubtitle)
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .padding(.horizontal, 10).padding(.vertical, 7)
                     .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                sortMenu
             }
             HStack(spacing: 8) {
                 if showingHistory {
@@ -4709,6 +4718,7 @@ struct ContentView: View {
             HStack(spacing: 5) {
                 Image(systemName: "line.3.horizontal.decrease.circle")
                     .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
                 Text(libraryFilter).font(.system(size: 12, weight: .medium))
             }
             .foregroundStyle(.secondary)
@@ -4730,7 +4740,20 @@ struct ContentView: View {
                     }
                 }
             }
-        } label: { iconLabel("arrow.up.arrow.down") }
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "arrow.up.arrow.down")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                Text(sortOrder)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 10).padding(.vertical, 7)
+            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+        .tint(Color.secondary)
     }
 
     private var moreMenu: some View {
@@ -4895,11 +4918,12 @@ struct ContentView: View {
             HStack(spacing: 5) {
                 Image(systemName: selecting ? "checkmark.circle.fill" : "checkmark.circle")
                     .font(.system(size: 13, weight: .semibold))
-                Text(selecting ? "Done" : "Select").font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                    .foregroundStyle(Color.accentColor)
+                Text(selecting ? "Done" : "Select").font(.system(size: 12, weight: .medium)).lineLimit(1)
             }
-            .foregroundStyle(selecting ? Color.white : Color.primary)
-            .padding(.horizontal, 12).padding(.vertical, 7)
-            .background(Capsule().fill(selecting ? Color.accentColor : Color(uiColor: .secondarySystemGroupedBackground)))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 10).padding(.vertical, 7)
+            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .buttonStyle(.plain)
         .accessibilityLabel(selecting ? "Finish selecting" : "Select mods")
@@ -6837,7 +6861,7 @@ struct BrowserHome: View {
             VStack(alignment: .leading, spacing: 6) {
                 Color.clear
                     .frame(width: 78, height: 78)
-                    .overlay(CachedImage(urlString: hit.tiny_image, fill: true, maxPixel: 220).allowsHitTesting(false))
+                    .overlay(CachedImage(urlString: hit.tiny_image, fill: false, maxPixel: 220).allowsHitTesting(false))
                     .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                 MarqueeText(text: hit.name, fontSize: 11, weight: .medium, height: 15)
                     .frame(width: 78, alignment: .leading)
@@ -7012,7 +7036,7 @@ struct BrowserHome: View {
         Button { Haptics.tap(); onOpenURL(url) } label: {
             HStack(spacing: 12) {
                 Image(systemName: "arrow.uturn.forward")
-                    .font(.system(size: 16, weight: .semibold)).foregroundStyle(Color.accentColor)
+                    .font(.system(size: 16, weight: .semibold)).foregroundStyle(.secondary)
                     .frame(width: 36, height: 36)
                     .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.accentColor.opacity(0.14)))
                 VStack(alignment: .leading, spacing: 2) {
