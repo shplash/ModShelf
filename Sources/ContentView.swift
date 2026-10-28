@@ -2834,6 +2834,10 @@ final class WorkshopStore: ObservableObject {
         guard !didLaunchChecks else { return }
         didLaunchChecks = true
         repairFolders()
+        // ZIPs and abandoned partial downloads count against the app's storage, so every launch
+        // starts from the library and nothing else.
+        let freed = purgeTemporaryFiles()
+        if freed > 0 { log("launch cleanup freed \(Fmt.bytes(freed))") }
         var changed = false
         let fm = FileManager.default
         for i in library.indices {
@@ -2857,20 +2861,46 @@ final class WorkshopStore: ObservableObject {
         history.removeAll(); saveHistory(); UserDefaults.standard.removeObject(forKey: "history")
     }
     func clearTemporaryFiles() {
+        let freed = purgeTemporaryFiles()
+        status = "Temporary files cleared"
+        operationMessage = freed > 0
+            ? "Cleared \(Fmt.bytes(freed)) of temporary files."
+            : "Temporary files cleared."
+        log("temporary files cleared: \(Fmt.bytes(freed))")
+    }
+
+    /// Removes what the library does not need: shared ZIPs, stale partial downloads and replaced
+    /// copies. Run at launch as well as from Options, so nothing quietly piles up in storage.
+    @discardableResult
+    private func purgeTemporaryFiles() -> Int64 {
         let fm = FileManager.default
+        var freed: Int64 = 0
         // An older build kept a visible "ModShelfTemporary" folder in Documents; nothing needs it now.
         let legacy = documents.appendingPathComponent("ModShelfTemporary", isDirectory: true)
-        if fm.fileExists(atPath: legacy.path) { try? fm.removeItem(at: legacy) }
+        if fm.fileExists(atPath: legacy.path) {
+            freed += sizeOnDisk(legacy)
+            try? fm.removeItem(at: legacy)
+        }
         // The app's own temporary folder is where ZIP builds work, and iOS may clear it anyway.
         for url in (try? fm.contentsOfDirectory(at: fm.temporaryDirectory, includingPropertiesForKeys: nil)) ?? [] {
+            freed += sizeOnDisk(url)
             try? fm.removeItem(at: url)
         }
         // Leftover partial downloads and replaced copies from interrupted sessions, in any game
         // folder they were left in.
-        for url in Self.partialLeftovers(in: downloadsRoot) { try? fm.removeItem(at: url) }
-        status = "Temporary files cleared"
-        operationMessage = "Temporary files cleared."
-        log("temporary files cleared")
+        for url in Self.partialLeftovers(in: downloadsRoot) {
+            freed += sizeOnDisk(url)
+            try? fm.removeItem(at: url)
+        }
+        return freed
+    }
+
+    /// What a file or folder takes up on disk, for saying how much a cleanup recovered.
+    private func sizeOnDisk(_ url: URL) -> Int64 {
+        let keys: Set<URLResourceKey> = [.isDirectoryKey, .totalFileAllocatedSizeKey, .fileAllocatedSizeKey, .fileSizeKey]
+        let values = try? url.resourceValues(forKeys: keys)
+        if values?.isDirectory == true { return Self.directoryBytes(url) }
+        return Int64(values?.totalFileAllocatedSize ?? values?.fileAllocatedSize ?? values?.fileSize ?? 0)
     }
     // MARK: app updates
 
@@ -3594,7 +3624,16 @@ struct ContentView: View {
         }
         .sheet(isPresented: $store.showLogin) { loginSheet.presentationDetents([.medium, .large]) }
         .sheet(isPresented: $showDeveloperMenu) { DeveloperMenuView(store: store) }
-        .sheet(isPresented: $showShare, onDismiss: { store.shareURL = nil }) { if let url = store.shareURL { ShareSheet(activityItems: [url]) } }
+        .sheet(isPresented: $showShare, onDismiss: {
+            // A ZIP exists only to be handed over: once the sheet is gone it is deleted, so nothing
+            // large is left behind in the app's storage.
+            if let url = store.shareURL,
+               url.isFileURL,
+               url.path.hasPrefix(FileManager.default.temporaryDirectory.path + "/") {
+                try? FileManager.default.removeItem(at: url)
+            }
+            store.shareURL = nil
+        }) { if let url = store.shareURL { ShareSheet(activityItems: [url]) } }
         .sheet(isPresented: Binding(get: { store.revealFolderURL != nil },
                                     set: { if !$0 { store.revealFolderURL = nil } })) {
             if let folder = store.revealFolderURL {
@@ -4084,12 +4123,14 @@ struct ContentView: View {
                 VStack(spacing: 0) {
                     ScrollSpy(onChange: handleScroll)
                     VStack(alignment: .leading, spacing: 14) {
-                        if store.preview == nil, !store.isDownloading, store.queueRows.isEmpty {
-                            downloadWelcome
-                        }
+                        if downloadIntro { downloadHeader }
                         lookupCard
                         if store.isFetching {
                             HStack(spacing: 10) { ProgressView(); Text("Loading Workshop details…").font(.subheadline).foregroundStyle(.secondary) }.padding(.vertical, 2)
+                        }
+                        if downloadIntro {
+                            browseRow
+                            downloadSteps
                         }
                         if !store.isDownloading, store.queueRows.isEmpty, let item = store.preview {
             metadataCard(item)
@@ -4101,6 +4142,9 @@ struct ContentView: View {
                            !store.queueRows.contains(where: { $0.id == item.id }) {
                             if store.isBusy { queuedDownloadCard(item) }
                             downloadButton(item)
+                        }
+                        if downloadIntro, !recentInstalls.isEmpty {
+                            recentInstallsSection
                         }
                     }
                     .padding(.horizontal, 15).padding(.top, 10).padding(.bottom, tabBarReserve)
@@ -4236,7 +4280,7 @@ struct ContentView: View {
         VStack(spacing: 8) {
             HStack(spacing: 10) {
                 Image(systemName: "link").foregroundStyle(.secondary)
-                TextField("Workshop URL or ID", text: $store.input)
+                TextField("URL or ID…", text: $store.input)
                     .accessibilityLabel("Workshop URL or ID")
                     .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL).submitLabel(.go)
                     .onSubmit { submitLookup() }
@@ -4270,48 +4314,54 @@ struct ContentView: View {
         .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
     }
 
-    /// The Download tab with nothing on it yet: what it does and a way back to recent mods, so the
-    /// screen is not a lookup box floating above empty space.
-    private var downloadWelcome: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(alignment: .top, spacing: 12) {
-                Image(systemName: "arrow.down.circle.dotted")
-                    .font(.system(size: 26, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 54, height: 54)
-                    .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color.accentColor))
-                    .shadow(color: Color.accentColor.opacity(0.28), radius: 10, y: 5)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Download a Workshop mod").font(.system(size: 19, weight: .bold, design: .rounded))
-                    Text("Paste a link into the box below, or browse the Workshop to find one.")
-                        .font(.system(size: 13)).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+    /// True while the Download tab has nothing on it, so the intro shows only then.
+    private var downloadIntro: Bool {
+        store.preview == nil && !store.isDownloading && store.queueRows.isEmpty
+    }
+
+    /// The heading of the empty tab. Its icon stays neutral so the accent colour is kept for actions.
+    private var downloadHeader: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "arrow.down.circle.dotted")
+                .font(.system(size: 26, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 54, height: 54)
+                .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color.primary.opacity(0.07)))
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Download a Workshop mod").font(.system(size: 19, weight: .bold, design: .rounded))
+                Text("Paste a link into the box below, or browse the Workshop to find one.")
+                    .font(.system(size: 13)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    /// The three steps that make up a download.
+    private var downloadSteps: some View {
+        VStack(spacing: 0) {
+            welcomeStep("link", "Paste a Workshop link", "A sharedfiles link or a workshop ID both work.")
+            Divider().padding(.leading, 46)
+            welcomeStep("safari.fill", "Or browse the Workshop", "Pick a game, then the mod you want.")
+            Divider().padding(.leading, 46)
+            welcomeStep("folder.fill", "It lands in Files", "ModShelf → Downloaded Mods → game → mod.")
+        }
+        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    /// The mods that really installed, last, as a way straight back to them.
+    private var recentInstallsSection: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Text("RECENTLY INSTALLED")
+                .font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                .kerning(0.4)
+                .padding(.horizontal, 4)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    ForEach(recentInstalls) { record in recentTile(record) }
                 }
-                Spacer(minLength: 0)
+                .padding(.horizontal, 1).padding(.vertical, 2)
             }
-            VStack(spacing: 0) {
-                welcomeStep("link", "Paste a Workshop link", "A sharedfiles link or a workshop ID both work.")
-                Divider().padding(.leading, 46)
-                welcomeStep("safari.fill", "Or browse the Workshop", "Pick a game, then the mod you want.")
-                Divider().padding(.leading, 46)
-                welcomeStep("folder.fill", "It lands in Files", "ModShelf → Downloaded Mods → game → mod.")
-            }
-            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            if !recentDownloads.isEmpty {
-                VStack(alignment: .leading, spacing: 9) {
-                    Text("RECENTLY DOWNLOADED")
-                        .font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
-                        .kerning(0.4)
-                        .padding(.horizontal, 4)
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 10) {
-                            ForEach(recentDownloads) { record in recentTile(record) }
-                        }
-                        .padding(.horizontal, 1).padding(.vertical, 2)
-                    }
-                }
-            }
-            browseRow
         }
     }
 
@@ -4332,8 +4382,7 @@ struct ContentView: View {
     }
 
     /// The last few mods that really installed, as a way straight back to them.
-    private var recentDownloads: [DownloadRecord] {
-        var seen = Set<String>()
+    private var recentInstalls: [DownloadRecord] {        var seen = Set<String>()
         let list = store.history.filter { $0.result == "Downloaded" && seen.insert($0.workshopID).inserted }
         return Array(list.prefix(8))
     }
@@ -4346,7 +4395,7 @@ struct ContentView: View {
         } label: {
             VStack(alignment: .leading, spacing: 6) {
                 Color.clear
-                    .frame(width: 104, height: 58)
+                    .frame(width: 104, height: 74)
                     .overlay(CachedImage(urlString: record.imageURL, fill: true, maxPixel: 260).allowsHitTesting(false))
                     .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                 Text(record.title)
@@ -6585,7 +6634,7 @@ struct BrowserHome: View {
                 } else {
                     if let lastPage { continueCard(lastPage) }
                     if !favourites.isEmpty { favouritesSection }
-                    if !recent.isEmpty { recentsSection }
+                    if !recentlyOpened.isEmpty { recentsSection }
                     if isFirstRun { firstRunCard }
                 }
             }
@@ -6603,15 +6652,10 @@ struct BrowserHome: View {
         HStack(spacing: 13) {
             Image(systemName: "safari.fill")
                 .font(.system(size: 22, weight: .semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(.secondary)
                 .frame(width: 50, height: 50)
-                .background(RoundedRectangle(cornerRadius: 15, style: .continuous).fill(Color.accentColor))
-                .shadow(color: Color.accentColor.opacity(0.3), radius: 9, y: 4)
-            VStack(alignment: .leading, spacing: 3) {
-                Text("Workshop").font(.system(size: 25, weight: .bold, design: .rounded))
-                Text("Find a game and browse its mods")
-                    .font(.system(size: 13)).foregroundStyle(.secondary)
-            }
+                .background(RoundedRectangle(cornerRadius: 15, style: .continuous).fill(Color.primary.opacity(0.07)))
+            Text("Workshop").font(.system(size: 25, weight: .bold, design: .rounded))
             Spacer(minLength: 0)
         }
         .padding(.top, 6)
@@ -6686,9 +6730,15 @@ struct BrowserHome: View {
 
     private var recentsSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            sectionHeader("Recently opened", count: recent.count)
-            gameList(recent)
+            sectionHeader("Recently opened", count: recentlyOpened.count)
+            gameList(recentlyOpened)
         }
+    }
+
+    /// A game that is already in the favourites above does not need listing twice.
+    private var recentlyOpened: [GameHit] {
+        let favs = Set(favourites.map(\.id))
+        return recent.filter { !favs.contains($0.id) }
     }
 
     /// Rows share one rounded card with hairlines between them, so the page reads as a list rather
