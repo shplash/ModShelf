@@ -189,26 +189,30 @@ jobs:
           shasum -a 256 ModShelf.ipa
           ls -lh ModShelf.ipa
 
-      # One published release, tagged "latest", always holds the current IPA under the name the
-      # README and the AltStore source use, so releases/latest/download/ModShelf.ipa keeps working.
-      - name: Publish the current IPA
+      # Every run keeps its IPA as a real file on a draft release, which only people with write
+      # access can see or download. Publishing is done by hand when a release is wanted.
+      - name: Attach the IPA to the private build draft
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          TAG="latest"
+          PLIST="build/Build/Products/Release-iphoneos/ModShelf.app/Info.plist"
+          VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$PLIST")
+          BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$PLIST")
+          TAG="builds"
           if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release create "$TAG" \
-              --title "ModShelf (latest build)" \
-              --notes "The current build of ModShelf. The IPA attached here is replaced on every push." \
+            gh release create "$TAG" --draft \
+              --title "ModShelf builds" \
+              --notes "Draft release holding CI builds. It is never published, so only people with write access can see it." \
               --repo "$GITHUB_REPOSITORY"
           fi
-          gh release upload "$TAG" ModShelf.ipa --clobber --repo "$GITHUB_REPOSITORY"
-          # Keep only the current IPA there, so the release stays one small asset.
+          cp ModShelf.ipa "ModShelf-$VERSION-$BUILD.ipa"
+          gh release upload "$TAG" "ModShelf-$VERSION-$BUILD.ipa" --clobber --repo "$GITHUB_REPOSITORY"
+          # Keep only the newest build on the draft.
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' |
             while read -r asset; do
               [ -z "$asset" ] && continue
-              [ "$asset" = "ModShelf.ipa" ] && continue
+              [ "$asset" = "ModShelf-$VERSION-$BUILD.ipa" ] && continue
               gh release delete-asset "$TAG" "$asset" --yes --repo "$GITHUB_REPOSITORY" || true
             done
 
