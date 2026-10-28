@@ -4034,6 +4034,8 @@ struct ContentView: View {
             .shadow(color: .black.opacity(0.06), radius: 8, y: 3)
             .padding(.horizontal, 14).padding(.top, 8).padding(.bottom, 4)
             .transition(.move(edge: .top).combined(with: .opacity))
+            fadingLine
+                .padding(.bottom, 4)
         }
     }
 
@@ -4210,103 +4212,164 @@ struct ContentView: View {
         }
     }
 
-    /// The running batch: a header saying which one it is on, then a row per mod with its progress.
+    /// The running batch: what it is on, a line of progress for the whole set, then a row per mod.
     private var queueCard: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 10) {
-                Text(store.queueTotal > 1
-                     ? "Downloading \(min(store.queueStep, store.queueTotal)) of \(store.queueTotal)"
-                     : (store.queueTotal == 0 ? "Finished" : "Downloading"))
-                    .font(.system(size: 16, weight: .bold, design: .rounded))
+            HStack(alignment: .center, spacing: 10) {
+                ZStack {
+                    Circle().fill(Color.accentColor.opacity(0.14))
+                    Image(systemName: "arrow.down")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(Color.accentColor)
+                }
+                .frame(width: 30, height: 30)
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(queueHeadline)
+                        .font(.system(size: 15, weight: .semibold))
+                        .lineLimit(1)
+                    Text(queueSubline)
+                        .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                }
                 Spacer(minLength: 8)
+                Text("\(Int(queueOverallProgress * 100))%")
+                    .font(.system(size: 15, weight: .semibold).monospacedDigit())
+                    .foregroundStyle(Color.accentColor)
                 Button { Haptics.tap(); store.cancel() } label: {
-                    Image(systemName: "xmark").font(.system(size: 12, weight: .bold))
+                    Image(systemName: "xmark").font(.system(size: 11, weight: .bold))
                         .foregroundStyle(.secondary)
-                        .frame(width: 30, height: 30)
-                        .background(Circle().fill(Color.primary.opacity(0.08)))
+                        .frame(width: 28, height: 28)
+                        .background(Circle().fill(Color.primary.opacity(0.07)))
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Cancel downloads")
             }
-            .padding(.horizontal, 14).padding(.top, 12).padding(.bottom, 8)
+            .padding(.horizontal, 14).padding(.top, 12).padding(.bottom, 10)
 
-            ForEach(store.queueRows) { row in
-                queueRow(row)
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.primary.opacity(0.06))
+                    Capsule().fill(Color.accentColor)
+                        .frame(width: max(2, geo.size.width * queueOverallProgress))
+                }
             }
+            .frame(height: 4)
+            .padding(.horizontal, 14)
+
+            VStack(spacing: 0) {
+                ForEach(Array(store.queueRows.enumerated()), id: \.element.id) { index, row in
+                    if index > 0 { Divider().padding(.horizontal, 14) }
+                    queueRow(row)
+                }
+            }
+            .padding(.top, 6)
         }
         .padding(.bottom, 6)
         .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
     }
 
+    private var queueHeadline: String {
+        if store.queueTotal == 0 { return "Finished" }
+        if store.queueTotal > 1 {
+            return "Downloading \(min(store.queueStep, store.queueTotal)) of \(store.queueTotal)"
+        }
+        return "Downloading"
+    }
+
+    private var queueSubline: String {
+        let done = store.queueRows.filter { $0.state == .done }.count
+        let failed = store.queueRows.filter { $0.state == .failed }.count
+        let waiting = store.queueRows.filter { $0.state == .waiting }.count
+        if failed > 0 { return "\(done) done · \(failed) didn't finish" }
+        if waiting > 0 { return "\(done) done · \(waiting) waiting" }
+        if done == store.queueRows.count, !store.queueRows.isEmpty { return "All done" }
+        return "\(done) of \(store.queueRows.count) done"
+    }
+
+    /// How far the whole batch has come, so the card can show one line of progress as well as each row.
+    private var queueOverallProgress: Double {
+        guard !store.queueRows.isEmpty else { return 0 }
+        let total = store.queueRows.reduce(0.0) { sum, row in
+            sum + (row.state == .done ? 1 : min(1, max(0, row.progress)))
+        }
+        return min(1, total / Double(store.queueRows.count))
+    }
+
+    private func queueTint(_ row: DownloadQueueRow) -> Color {
+        switch row.state {
+        case .done: return .green
+        case .failed: return .red
+        case .waiting: return .secondary
+        case .downloading:
+            if store.isPreparingDownload || store.isInstalling || store.isDownloadStalled { return .secondary }
+            return .accentColor
+        }
+    }
+
     private func queueRow(_ row: DownloadQueueRow) -> some View {
-        HStack(spacing: 12) {
-            Color.clear
-                .frame(width: 84, height: 84)
-                .overlay(CachedImage(urlString: row.imageURL, fill: true, maxPixel: 300).allowsHitTesting(false))
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-            VStack(alignment: .leading, spacing: 4) {
-                Text(row.title).font(.system(size: 15, weight: .semibold)).lineLimit(2)
-                if let game = row.gameName, !game.isEmpty {
-                    Text(game).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
-                }
-                HStack(spacing: 8) {
-                    queueStateLabel(row)
-                        .frame(width: 96, alignment: .leading)
-                    queueBar(row)
-                    Text(row.state == .downloading && store.isPreparingDownload
-                         ? "" : "\(Int(row.progress * 100))%")
-                        .font(.system(size: 11, weight: .semibold).monospacedDigit())
-                        .foregroundStyle(.secondary)
-                        .frame(width: 34, alignment: .trailing)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 12) {
+                Color.clear
+                    .frame(width: 72, height: 54)
+                    .overlay(CachedImage(urlString: row.imageURL, fill: true, maxPixel: 260).allowsHitTesting(false))
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 8) {
+                        Text(row.title).font(.system(size: 14, weight: .semibold)).lineLimit(1)
+                        Spacer(minLength: 6)
+                        Text(row.state == .downloading && store.isPreparingDownload
+                             ? "" : "\(Int(row.progress * 100))%")
+                            .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                            .foregroundStyle(queueTint(row))
+                    }
+                    HStack(spacing: 6) {
+                        queueStateChip(row)
+                        if let game = row.gameName, !game.isEmpty {
+                            Text(game).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                        }
+                        Spacer(minLength: 0)
+                    }
                 }
             }
-            Spacer(minLength: 0)
+            queueBar(row)
         }
         .padding(.horizontal, 14).padding(.vertical, 10)
     }
 
-    @ViewBuilder private func queueStateLabel(_ row: DownloadQueueRow) -> some View {
-        switch row.state {
-        case .waiting:
-            Text("Waiting")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.tertiary)
-        case .downloading:
-            if store.isPreparingDownload {
-                DottedLabel(text: "Initialising")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
-            } else if store.isInstalling {
-                DottedLabel(text: "Installing")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
-            } else if store.isDownloadStalled {
-                DottedLabel(text: "Waiting")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
-            } else {
-                Text("Downloading")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(Color.accentColor)
-            }
-        case .done:
+    private func queueStateChip(_ row: DownloadQueueRow) -> some View {
+        let tint = queueTint(row)
+        return queueChipContent(row)
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(tint)
+            .padding(.horizontal, 7).padding(.vertical, 2)
+            .background(Capsule().fill(tint.opacity(0.14)))
+    }
+
+    @ViewBuilder private func queueChipContent(_ row: DownloadQueueRow) -> some View {
+        if row.state == .downloading && store.isPreparingDownload {
+            DottedLabel(text: "Initialising")
+        } else if row.state == .downloading && store.isInstalling {
+            DottedLabel(text: "Installing")
+        } else if row.state == .downloading && store.isDownloadStalled {
+            DottedLabel(text: "Waiting")
+        } else if row.state == .done {
             Text("Done")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.green)
-        case .failed:
+        } else if row.state == .failed {
             Text("Failed")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.red)
+        } else if row.state == .waiting {
+            Text("Waiting")
+        } else {
+            Text("Downloading")
         }
     }
 
     private func queueBar(_ row: DownloadQueueRow) -> some View {
         let fraction = row.state == .done ? 1 : min(1, max(0, row.progress))
-        let tint: Color = row.state == .failed ? .red : (row.state == .done ? .green : Color.accentColor)
+        let tint = queueTint(row)
         return GeometryReader { geo in
             ZStack(alignment: .leading) {
-                Capsule().fill(Color.primary.opacity(0.08))
-                Capsule().fill(tint.opacity(row.state == .waiting ? 0.3 : 1))
+                Capsule().fill(Color.primary.opacity(0.07))
+                Capsule().fill(tint.opacity(row.state == .waiting ? 0.4 : 1))
                     .frame(width: max(0, geo.size.width * fraction))
             }
         }
@@ -4490,6 +4553,7 @@ struct ContentView: View {
         }
         .padding(10)
         .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.05), lineWidth: 1))
     }
 
     private func downloadButton(_ item: WorkshopMetadata) -> some View {
@@ -4510,8 +4574,9 @@ struct ContentView: View {
                 }
             }
             .foregroundStyle(.white)
-            .frame(maxWidth: .infinity).frame(height: 46)
-            .background(RoundedRectangle(cornerRadius: 13).fill(Color.accentColor))
+            .frame(maxWidth: .infinity).frame(height: 48)
+            .background(RoundedRectangle(cornerRadius: 14).fill(Color.accentColor))
+            .shadow(color: Color.accentColor.opacity(0.25), radius: 10, y: 4)
         }
         .buttonStyle(.plain)
     }
@@ -4670,6 +4735,8 @@ struct ContentView: View {
             HStack(spacing: 8) {
                 librarySearchField
                 selectPill
+                if !installedGameOptions.isEmpty { gameFilterMenu }
+                if !installedTagOptions.isEmpty { tagFilterMenu }
             }
             }
         }
@@ -4849,8 +4916,7 @@ struct ContentView: View {
 
     private var libraryBody: some View {
         VStack(spacing: 0) {
-            if !store.library.isEmpty { filterRow }
-
+            if !store.library.isEmpty { }
             let items = visibleItems
             if store.library.isEmpty {
                 emptyState("Your library is empty", detail: "Downloaded mods will appear here, go to the workshop to pick some up.", symbol: "square.grid.2x2")
@@ -4898,41 +4964,45 @@ struct ContentView: View {
     }
 
     private var filterRow: some View {
-        HStack(spacing: 8) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 9) {
-                    if !installedGameOptions.isEmpty {
-                        Menu {
-                            Button { Haptics.select(); selectedGame = nil; selectedTag = nil } label: {
-                                if selectedGame == nil { Label("All games", systemImage: "checkmark") } else { Text("All games") }
-                            }
-                            Divider()
-                            ForEach(installedGameOptions, id: \.id) { game in
-                                Button { Haptics.select(); selectedGame = game.id; selectedTag = nil } label: {
-                                    if selectedGame == game.id { Label(game.name, systemImage: "checkmark") } else { Text(game.name) }
-                                }
-                            }
-                        } label: { FilterPill(symbol: "gamecontroller.fill", title: selectedGameName ?? "All games", active: selectedGame != nil) }
-                    }
-                    if !installedTagOptions.isEmpty {
-                        Menu {
-                            Button { Haptics.select(); selectedTag = nil } label: {
-                                if selectedTag == nil { Label("All tags", systemImage: "checkmark") } else { Text("All tags") }
-                            }
-                            Divider()
-                            ForEach(installedTagOptions, id: \.self) { tag in
-                                Button { Haptics.select(); selectedTag = tag } label: {
-                                    if selectedTag == tag { Label(tag, systemImage: "checkmark") } else { Text(tag) }
-                                }
-                            }
-                        } label: { FilterPill(symbol: "tag.fill", title: selectedTag ?? "Tags", active: selectedTag != nil) }
-                    }
-                    selectPill
-                }
-                .padding(.horizontal, 14)
+        EmptyView()
+    }
+
+    /// The game and tag filters, icon-only beside the search box like the select toggle.
+    private var gameFilterMenu: some View {
+        Menu {
+            Button { Haptics.select(); selectedGame = nil; selectedTag = nil } label: {
+                if selectedGame == nil { Label("All games", systemImage: "checkmark") } else { Text("All games") }
             }
-        }
-        .padding(.bottom, 8)
+            Divider()
+            ForEach(installedGameOptions, id: \.id) { game in
+                Button { Haptics.select(); selectedGame = game.id; selectedTag = nil } label: {
+                    if selectedGame == game.id { Label(game.name, systemImage: "checkmark") } else { Text(game.name) }
+                }
+            }
+        } label: { filterIconLabel("gamecontroller.fill") }
+    }
+
+    private var tagFilterMenu: some View {
+        Menu {
+            Button { Haptics.select(); selectedTag = nil } label: {
+                if selectedTag == nil { Label("All tags", systemImage: "checkmark") } else { Text("All tags") }
+            }
+            Divider()
+            ForEach(installedTagOptions, id: \.self) { tag in
+                Button { Haptics.select(); selectedTag = tag } label: {
+                    if selectedTag == tag { Label(tag, systemImage: "checkmark") } else { Text(tag) }
+                }
+            }
+        } label: { filterIconLabel("tag.fill") }
+    }
+
+    private func filterIconLabel(_ symbol: String) -> some View {
+        Image(systemName: symbol)
+            .font(.system(size: 14, weight: .semibold))
+            .foregroundStyle(Color.accentColor)
+            .frame(width: 20, height: 18)
+            .padding(.horizontal, 8).padding(.vertical, 8)
+            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
     /// Selection lives beside the tags, so bulk actions are one tap away without a second menu.
