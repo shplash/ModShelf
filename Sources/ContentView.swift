@@ -733,6 +733,8 @@ final class WorkshopStore: ObservableObject {
     @Published var isInstalling = false
     /// A ZIP is being written from the library's own folders.
     @Published var isExporting = false
+    /// A transfer stopped on purpose, keeping what it had already written so it can carry on.
+    @Published var isPaused = false
     @Published var isFetching = false
     @Published var preview: WorkshopMetadata?
     @Published var library: [WorkshopItem] = []
@@ -1680,6 +1682,16 @@ final class WorkshopStore: ObservableObject {
         let error = engine?.lastError() ?? ""
         let successStatus = s.contains("download complete")
         let cancelled = s.contains("download cancelled")
+        // A paused transfer stops the engine but keeps its staging folder, so resuming carries on
+        // from the chunks already written instead of starting again.
+        if cancelled, isPaused {
+            if let index = queueRows.firstIndex(where: { $0.id == activeID }) {
+                queueRows[index].state = .waiting
+            }
+            status = "Paused"
+            log("paused \(activeID)")
+            return
+        }
         let meta = activeMeta ?? WorkshopMetadata(id: activeID, title: activeTitle, author: "", description: "", imageURL: "", updatedAt: 0)
         var success = false
         var failureText = ""
@@ -1781,6 +1793,8 @@ final class WorkshopStore: ObservableObject {
                 try? await Task.sleep(nanoseconds: 700_000_000)
                 self.startNextInQueue()
             }
+        } else if !success, !cancelled {
+            // The run is over but something failed: its row stays on screen to be read and retried.
         } else {
             finishQueue(cancelled: cancelled)
         }
@@ -1792,7 +1806,25 @@ final class WorkshopStore: ObservableObject {
             if let m = activeMeta, m.id == id, !m.imageURL.isEmpty { history[index].imageURL = m.imageURL }
         } else { record(id, title: activeTitle, result: result, error: error) }
     }
+    /// Stops or carries on with the transfer in progress. Pausing keeps the files that already
+    /// landed, so resuming picks up from them rather than downloading everything again.
+    func togglePause() {
+        if isPaused {
+            isPaused = false
+            let meta = activeMeta ?? WorkshopMetadata(id: activeID, title: activeTitle, author: "",
+                                                      description: "", imageURL: "", updatedAt: 0)
+            log("resume \(activeID)")
+            beginDownload(id: activeID, meta: meta, keepQueue: true)
+        } else if isDownloading {
+            isPaused = true
+            status = "Paused"
+            engine?.cancelDownload()
+            log("pause requested")
+        }
+    }
+
     func cancel() {
+        isPaused = false
         log("cancel requested (queue \(queue.count), active \(activeID)")
         if let task = devTask {
             task.cancel()
@@ -3724,7 +3756,6 @@ struct ContentView: View {
         VStack(spacing: 0) {
             accountHeader
             if !store.showLogin { errorBanner }
-            downloadBanner
             tabContent
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
@@ -3928,11 +3959,29 @@ struct ContentView: View {
                     .accessibilityLabel("Developer")
                 }
                 Spacer()
+                if store.isDownloading { downloadRing }
                 signInPill
             }
             .padding(.horizontal, 16).padding(.top, 0).padding(.bottom, 14)
             fadingLine
         }
+    }
+
+    /// A quiet ring beside the sign-in pill while a download runs: grey, filling blue, with an arrow.
+    private var downloadRing: some View {
+        ZStack {
+            Circle().stroke(Color.primary.opacity(0.1), lineWidth: 2.5)
+            Circle()
+                .trim(from: 0, to: max(0.04, min(1, store.progress)))
+                .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+            Image(systemName: "arrow.down")
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(.secondary)
+        }
+        .frame(width: 26, height: 26)
+        .animation(.easeOut(duration: 0.3), value: store.progress)
+        .accessibilityLabel("Downloading \(Int(store.progress * 100)) percent")
     }
 
     /// The artwork lives in the asset catalogue: a white one for the dark appearance, a black one
@@ -4173,6 +4222,27 @@ struct ContentView: View {
                         if store.isFetching {
                             HStack(spacing: 10) { ProgressView(); Text("Loading Workshop details…").font(.subheadline).foregroundStyle(.secondary) }.padding(.vertical, 2)
                         }
+                        if store.isBusy || store.isPaused {
+                            HStack(spacing: 10) {
+                                Button { Haptics.tap(); store.togglePause() } label: {
+                                    Label(store.isPaused ? "Resume" : "Pause",
+                                          systemImage: store.isPaused ? "play.fill" : "pause.fill")
+                                        .font(.system(size: 13, weight: .semibold))
+                                        .foregroundStyle(Color.accentColor)
+                                        .frame(maxWidth: .infinity).frame(height: 36)
+                                        .background(RoundedRectangle(cornerRadius: 10).fill(Color.accentColor.opacity(0.14)))
+                                }
+                                .buttonStyle(.plain)
+                                Button { Haptics.tap(); store.cancel() } label: {
+                                    Label("Cancel", systemImage: "xmark")
+                                        .font(.system(size: 13, weight: .semibold))
+                                        .foregroundStyle(.red)
+                                        .frame(maxWidth: .infinity).frame(height: 36)
+                                        .background(RoundedRectangle(cornerRadius: 10).fill(Color.red.opacity(0.12)))
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
                         if downloadIntro {
                             glanceCard
                         }
@@ -4214,7 +4284,10 @@ struct ContentView: View {
 
     /// The running batch: what it is on, a line of progress for the whole set, then a row per mod.
     private var queueCard: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        let active = store.queueRows.filter { $0.state != .failed }
+        let failed = store.queueRows.filter { $0.state == .failed }
+        return VStack(alignment: .leading, spacing: 0) {
+            if store.queueTotal > 1 {
             HStack(alignment: .center, spacing: 10) {
                 ZStack {
                     Circle().fill(Color.accentColor.opacity(0.14))
@@ -4245,24 +4318,30 @@ struct ContentView: View {
                 .accessibilityLabel("Cancel downloads")
             }
             .padding(.horizontal, 14).padding(.top, 12).padding(.bottom, 10)
-
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(Color.primary.opacity(0.06))
-                    Capsule().fill(Color.accentColor)
-                        .frame(width: max(2, geo.size.width * queueOverallProgress))
-                }
             }
-            .frame(height: 4)
-            .padding(.horizontal, 14)
 
             VStack(spacing: 0) {
-                ForEach(Array(store.queueRows.enumerated()), id: \.element.id) { index, row in
+                ForEach(Array(active.enumerated()), id: \.element.id) { index, row in
                     if index > 0 { Divider().padding(.horizontal, 14) }
                     queueRow(row)
                 }
+                if !failed.isEmpty {
+                    if !active.isEmpty { Divider().padding(.horizontal, 14) }
+                    HStack(spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 11, weight: .semibold)).foregroundStyle(.red)
+                        Text("Didn't finish")
+                            .font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 14).padding(.top, 10).padding(.bottom, 2)
+                    ForEach(Array(failed.enumerated()), id: \.element.id) { index, row in
+                        if index > 0 { Divider().padding(.horizontal, 14) }
+                        queueRow(row)
+                    }
+                }
             }
-            .padding(.top, 6)
+            .padding(.top, store.queueTotal > 1 ? 6 : 2)
         }
         .padding(.bottom, 6)
         .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
@@ -4307,73 +4386,55 @@ struct ContentView: View {
     }
 
     private func queueRow(_ row: DownloadQueueRow) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .top, spacing: 12) {
-                Color.clear
-                    .frame(width: 72, height: 54)
-                    .overlay(CachedImage(urlString: row.imageURL, fill: true, maxPixel: 260).allowsHitTesting(false))
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 8) {
-                        Text(row.title).font(.system(size: 14, weight: .semibold)).lineLimit(1)
-                        Spacer(minLength: 6)
+        let failed = row.state == .failed
+        return HStack(alignment: .top, spacing: 12) {
+            Color.clear
+                .frame(width: 64, height: 86)
+                .overlay(CachedImage(urlString: row.imageURL, fill: true, maxPixel: 260).allowsHitTesting(false))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            VStack(alignment: .leading, spacing: 3) {
+                MarqueeText(text: row.title, fontSize: 14, weight: .semibold, height: 18,
+                            active: row.state == .downloading)
+                if let game = row.gameName, !game.isEmpty {
+                    Text(game).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                }
+                HStack(spacing: 8) {
+                    queueStatusText(row)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(queueTint(row))
+                        .lineLimit(2)
+                    Spacer(minLength: 6)
+                    if failed {
+                        Button { Haptics.tap(); store.download(row.id) } label: {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundStyle(Color.accentColor)
+                                .frame(width: 42, height: 24)
+                                .background(Capsule().fill(Color.accentColor.opacity(0.14)))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Retry download")
+                    } else {
                         Text(row.state == .downloading && store.isPreparingDownload
                              ? "" : "\(Int(row.progress * 100))%")
                             .font(.system(size: 12, weight: .semibold).monospacedDigit())
                             .foregroundStyle(queueTint(row))
-                    }
-                    HStack(spacing: 6) {
-                        queueStateChip(row)
-                        if let game = row.gameName, !game.isEmpty {
-                            Text(game).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
-                        }
-                        Spacer(minLength: 0)
+                            .frame(width: 44, alignment: .trailing)
                     }
                 }
             }
-            queueBar(row)
         }
         .padding(.horizontal, 14).padding(.vertical, 10)
     }
 
-    private func queueStateChip(_ row: DownloadQueueRow) -> some View {
-        let tint = queueTint(row)
-        return queueChipContent(row)
-            .font(.system(size: 10, weight: .semibold))
-            .foregroundStyle(tint)
-            .padding(.horizontal, 7).padding(.vertical, 2)
-            .background(Capsule().fill(tint.opacity(0.14)))
-    }
-
-    @ViewBuilder private func queueChipContent(_ row: DownloadQueueRow) -> some View {
-        if row.state == .downloading && store.isPreparingDownload {
-            DottedLabel(text: "Initialising")
-        } else if row.state == .downloading && store.isInstalling {
-            DottedLabel(text: "Installing")
-        } else if row.state == .downloading && store.isDownloadStalled {
-            DottedLabel(text: "Waiting")
-        } else if row.state == .done {
-            Text("Done")
-        } else if row.state == .failed {
-            Text("Failed")
-        } else if row.state == .waiting {
-            Text("Waiting")
-        } else {
-            Text("Downloading")
-        }
-    }
-
-    private func queueBar(_ row: DownloadQueueRow) -> some View {
-        let fraction = row.state == .done ? 1 : min(1, max(0, row.progress))
-        let tint = queueTint(row)
-        return GeometryReader { geo in
-            ZStack(alignment: .leading) {
-                Capsule().fill(Color.primary.opacity(0.07))
-                Capsule().fill(tint.opacity(row.state == .waiting ? 0.4 : 1))
-                    .frame(width: max(0, geo.size.width * fraction))
-            }
-        }
-        .frame(height: 5)
+    @ViewBuilder private func queueStatusText(_ row: DownloadQueueRow) -> some View {
+        if row.state == .failed { Text("Failed") }
+        else if row.state == .done { Text("Done") }
+        else if row.state == .waiting { Text("Waiting") }
+        else if store.isPreparingDownload { Text("Initialising…") }
+        else if store.isInstalling { Text("Installing…") }
+        else if store.isDownloadStalled { Text("Waiting") }
+        else { Text("Downloading") }
     }
 
     private var inputIsInvalid: Bool { inputWasSubmitted && WorkshopStore.workshopID(from: store.input) == nil }
