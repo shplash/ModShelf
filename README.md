@@ -42,7 +42,6 @@ If you found ModShelf useful, a GitHub star is always appreciated.
 
 - Sign in to Steam and keep the session between launches
 - Paste a Workshop link, or browse the Workshop in the built-in browser
-- A download queue, with pause and resume, that carries on when one mod fails
 - Downloads sorted into a folder per game inside ModShelf's storage
 - Library with search, tags, game filter, favourites and bulk select
 - Update checks, file verification and ZIP export
