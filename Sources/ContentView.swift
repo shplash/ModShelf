@@ -731,6 +731,8 @@ final class WorkshopStore: ObservableObject {
     /// A finished transfer is moved into the library after Steam is done with it, which for a big
     /// item means tens of thousands of files and takes a few seconds.
     @Published var isInstalling = false
+    /// A ZIP is being written from the library's own folders.
+    @Published var isExporting = false
     @Published var isFetching = false
     @Published var preview: WorkshopMetadata?
     @Published var library: [WorkshopItem] = []
@@ -2496,75 +2498,98 @@ final class WorkshopStore: ObservableObject {
         log("favourite \(item.id): \(library[i].isFavourite)")
         Haptics.tap()
     }
-    func export(_ item: WorkshopItem) {
-        let source = URL(fileURLWithPath: item.folder, isDirectory: true)
-        guard FileManager.default.fileExists(atPath: source.path) else {
-            errorMessage = item.filesMoved || !item.isInsideModShelf
-                ? "\(item.displayTitle)'s files were moved out of ModShelf, so there's nothing to export here."
-                : "Those files are missing. Download the mod again."
-            return
-        }
-        let name = Self.sanitizedName(item.displayTitle, fallback: item.id)
-        let zip = FileManager.default.temporaryDirectory.appendingPathComponent("\(name).zip")
-        do { try? FileManager.default.removeItem(at: zip); try FileManager.default.zipItem(at: source, to: zip, shouldKeepParent: true); shareURL = zip }
-        catch { errorMessage = "The ZIP didn't build." }
-    }
-    /// Zips just the chosen mods, so part of a library can be shared without exporting all of it.
+    func export(_ item: WorkshopItem) { export([item.id]) }
+
+    /// Zips the chosen mods into one archive, written straight out of the folders the mods already
+    /// live in. Copying them somewhere first doubled the space needed, which is what made a ZIP of
+    /// the big mods fail on a device with little room left.
     func export(_ ids: [String]) {
+        guard !isExporting else { operationMessage = "A ZIP is already being built."; return }
         let wanted = Set(ids)
         let chosen = library.filter { wanted.contains($0.id) }
         guard !chosen.isEmpty else { return }
-        let folders = chosen.filter { FileManager.default.fileExists(atPath: $0.folder) }.map(\.folder)
+        var folders: [(url: URL, name: String)] = []
+        var used = Set<String>()
+        var missing = 0
+        for item in chosen {
+            let url = URL(fileURLWithPath: item.folder, isDirectory: true)
+            guard FileManager.default.fileExists(atPath: url.path) else { missing += 1; continue }
+            var name = Self.sanitizedName(item.displayTitle, fallback: item.id)
+            var copy = 2
+            // Two mods can share a name; keep them apart rather than overwriting one in the archive.
+            while used.contains(name.lowercased()) { name = "\(Self.sanitizedName(item.displayTitle, fallback: item.id)) \(copy)"; copy += 1 }
+            used.insert(name.lowercased())
+            folders.append((url, name))
+        }
         guard !folders.isEmpty else {
-            errorMessage = "Those mods' files aren't in ModShelf any more, so there's nothing to export."
+            errorMessage = chosen.count == 1
+                ? "That mod's files aren't in ModShelf any more, so there's nothing to export."
+                : "Those mods' files aren't in ModShelf any more, so there's nothing to export."
             return
         }
-        let name = chosen.count == 1
-            ? Self.sanitizedName(chosen[0].displayTitle, fallback: chosen[0].id)
-            : "ModShelf-Selected"
-        let staging = FileManager.default.temporaryDirectory.appendingPathComponent("ModShelf-Export", isDirectory: true)
-        let zip = FileManager.default.temporaryDirectory.appendingPathComponent("\(name).zip")
+        let archiveName = folders.count == 1 ? folders[0].name : "ModShelf-Export"
+        let zip = FileManager.default.temporaryDirectory.appendingPathComponent("\(archiveName).zip")
+        isExporting = true
         operationMessage = folders.count == 1
             ? "Preparing the ZIP…"
             : "Preparing \(folders.count) mods as one ZIP…"
+        log("zip start: \(folders.count) mods, \(missing) missing")
         Task { @MainActor in
-            let result = await Task.detached(priority: .utility) { () -> (ok: Bool, copied: Int, skipped: Int) in
-                let fm = FileManager.default
-                try? fm.removeItem(at: staging); try? fm.removeItem(at: zip)
+            let failure = await Task.detached(priority: .utility) { () -> String? in
+                try? FileManager.default.removeItem(at: zip)
                 do {
-                    try fm.createDirectory(at: staging, withIntermediateDirectories: true)
-                    var copied = 0
-                    var skipped = 0
-                    for folder in folders {
-                        let source = URL(fileURLWithPath: folder, isDirectory: true)
-                        guard fm.fileExists(atPath: source.path) else { skipped += 1; continue }
-                        let target = staging.appendingPathComponent(source.lastPathComponent, isDirectory: true)
-                        // Two mods can share a folder name; keep them apart rather than losing one.
-                        let destination = fm.fileExists(atPath: target.path)
-                            ? staging.appendingPathComponent("\(source.lastPathComponent) \(UUID().uuidString.prefix(4))", isDirectory: true)
-                            : target
-                        if (try? fm.copyItem(at: source, to: destination)) == nil { skipped += 1 } else { copied += 1 }
-                    }
-                    // An archive with nothing in it helps no one.
-                    guard copied > 0 else {
-                        try? fm.removeItem(at: staging)
-                        return (false, 0, skipped)
-                    }
-                    try fm.zipItem(at: staging, to: zip, shouldKeepParent: false)
-                    try? fm.removeItem(at: staging)
-                    return (true, copied, skipped)
-                } catch { return (false, 0, 0) }
+                    let archive = try Archive(url: zip, accessMode: .create)
+                    for folder in folders { try Self.add(folder: folder.url, as: folder.name, to: archive) }
+                    return nil
+                } catch {
+                    try? FileManager.default.removeItem(at: zip)
+                    let reason = error as NSError
+                    return "\(reason.domain) \(reason.code): \(reason.localizedDescription)"
+                }
             }.value
-            guard result.ok else {
-                operationMessage = "None of those mods' files are in ModShelf any more, so there was nothing to zip."
+            isExporting = false
+            guard let failure else {
+                shareURL = zip
+                operationMessage = missing == 0
+                    ? (folders.count == 1 ? "" : "Zipped \(folders.count) mods.")
+                    : "Zipped \(folders.count) mod\(folders.count == 1 ? "" : "s") and left out \(missing) whose files are not in ModShelf."
+                log("zip done: \(folders.count) mods, \(Fmt.bytes(Int64((try? zip.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)))")
+                Haptics.success()
                 return
             }
-            operationMessage = result.skipped == 0
-                ? ""
-                : "Exported \(result.copied) mod\(result.copied == 1 ? "" : "s") and left out \(result.skipped) whose files are outside ModShelf."
-            shareURL = zip
-            log("exported \(chosen.count) mods as ZIP")
+            log("zip failed: \(failure)")
+            errorMessage = Self.exportMessage(failure)
+            Haptics.error()
         }
+    }
+
+    /// Adds one mod's folder under its own name, a file at a time, so a big mod is read where it
+    /// already is instead of being copied somewhere first.
+    nonisolated private static func add(folder: URL, as name: String, to archive: Archive) throws {
+        let fm = FileManager.default
+        let keys: [URLResourceKey] = [.isDirectoryKey, .isRegularFileKey]
+        guard let walker = fm.enumerator(at: folder, includingPropertiesForKeys: keys) else { return }
+        for case let file as URL in walker {
+            let values = try? file.resourceValues(forKeys: Set(keys))
+            guard values?.isRegularFile == true else { continue }
+            // ModShelf's own hidden record of the install has no place in a shared archive.
+            guard !file.lastPathComponent.hasPrefix(".modshelf") else { continue }
+            let prefix = folder.path + "/"
+            let relative = file.path.hasPrefix(prefix) ? String(file.path.dropFirst(prefix.count)) : file.lastPathComponent
+            try archive.addEntry(with: "\(name)/\(relative)", fileURL: file, compressionMethod: .deflate)
+        }
+    }
+
+    /// The reason a ZIP failed, put in terms that can be acted on.
+    nonisolated static func exportMessage(_ failure: String) -> String {
+        let text = failure.lowercased()
+        if text.contains("nsposixerrordomain 28") || text.contains("nscocoaerrordomain 640") || text.contains("space") {
+            return "There wasn't enough free space to build the ZIP."
+        }
+        if text.contains("nsposixerrordomain 2") || text.contains("nscocoaerrordomain 4") || text.contains("no such file") {
+            return "Some of those mods' files have moved, so the ZIP didn't build."
+        }
+        return "The ZIP didn't build."
     }
 
     /// Steam's size and the files on disk are close, not always identical, so allow a small margin.
@@ -3441,7 +3466,7 @@ struct ContentView: View {
         ["Recently added", "Recently updated", "Oldest added"],
         ["Name", "Game"],
         ["Largest first", "Smallest first"],
-        ["Updates first", "Highest rated", "Most ratings", "Favourites first"]
+        ["Updates first", "Highest rated", "Favourites first"]
     ]
     private var sortOrders: [String] { sortGroups.flatMap { $0 } }
 
@@ -3489,11 +3514,6 @@ struct ContentView: View {
         case "Oldest added": return filtered.sorted { $0.addedAt < $1.addedAt }
         case "Largest first": return filtered.sorted { ($0.byteCount ?? 0) > ($1.byteCount ?? 0) }
         case "Smallest first": return filtered.sorted { ($0.byteCount ?? Int64.max) < ($1.byteCount ?? Int64.max) }
-        case "Most ratings": return filtered.sorted { a, b in
-            let ca = a.ratingCount ?? 0, cb = b.ratingCount ?? 0
-            if ca != cb { return ca > cb }
-            return (a.rating ?? 0) > (b.rating ?? 0)
-        }
         case "Highest rated": return filtered.sorted { a, b in
             let ra = a.rating ?? -1, rb = b.rating ?? -1
             if ra != rb { return ra > rb }
@@ -3522,6 +3542,7 @@ struct ContentView: View {
 
     /// Only mods whose files are still in ModShelf can go into a ZIP, so say so before starting.
     private func beginExport(all: Bool) {
+        guard !store.isExporting else { store.operationMessage = "A ZIP is already being built."; return }
         let pool = all ? store.library : store.library.filter { selection.contains($0.id) }
         guard !pool.isEmpty else { return }
         let present = pool.filter { FileManager.default.fileExists(atPath: $0.folder) }
@@ -3595,7 +3616,8 @@ struct ContentView: View {
         .onChange(of: store.operationMessage) { message in
             guard !message.isEmpty else { return }
             DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
-                if store.operationMessage == message { withAnimation { store.operationMessage = "" } }
+                // A ZIP of a big library takes a while; its message stays until it is done.
+                if store.operationMessage == message, !store.isExporting { withAnimation { store.operationMessage = "" } }
             }
         }
         .onChange(of: store.library.count) { count in
@@ -3660,6 +3682,10 @@ struct ContentView: View {
             store.log("tab: \(["Download", "Workshop", "Library", "Options"][min(max(tab, 0), 3)])")
             // Every arrival on the library restarts the scrolling names from their resting place.
             if tab == 2 { marqueeToken += 1 }
+        }
+        .onAppear {
+            // A sort saved by an older build may name an option that is no longer offered.
+            if !sortOrders.contains(sortOrder) { sortOrder = "Recently added" }
         }
     }
 
@@ -3917,9 +3943,13 @@ struct ContentView: View {
             let text = isError ? friendlyError(store.errorMessage) : store.operationMessage
             let tint: Color = isError ? .orange : Color.accentColor
             HStack(alignment: .top, spacing: 10) {
-                Image(systemName: isError ? "exclamationmark.circle" : "info.circle")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(tint)
+                if store.isExporting || store.isCheckingUpdates || store.isVerifyingAll {
+                    ProgressView().scaleEffect(0.7).frame(width: 16, height: 18)
+                } else {
+                    Image(systemName: isError ? "exclamationmark.circle" : "info.circle")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(tint)
+                }
                 VStack(alignment: .leading, spacing: 2) {
                     Text(isError ? "That didn't finish" : bannerTitle)
                         .font(.system(size: 14, weight: .semibold)).foregroundStyle(.primary)
@@ -3951,6 +3981,7 @@ struct ContentView: View {
 
     /// The heading of the info banner, so it names what is actually running.
     private var bannerTitle: String {
+        if store.isExporting { return "Building a ZIP" }
         if store.isVerifyingAll { return "Validating files" }
         if store.isCheckingUpdates { return "Checking for updates" }
         if store.isDownloading { return "Downloading" }
@@ -4053,6 +4084,9 @@ struct ContentView: View {
                 VStack(spacing: 0) {
                     ScrollSpy(onChange: handleScroll)
                     VStack(alignment: .leading, spacing: 14) {
+                        if store.preview == nil, !store.isDownloading, store.queueRows.isEmpty {
+                            downloadWelcome
+                        }
                         lookupCard
                         if store.isFetching {
                             HStack(spacing: 10) { ProgressView(); Text("Loading Workshop details…").font(.subheadline).foregroundStyle(.secondary) }.padding(.vertical, 2)
@@ -4068,7 +4102,6 @@ struct ContentView: View {
                             if store.isBusy { queuedDownloadCard(item) }
                             downloadButton(item)
                         }
-                        if store.preview == nil && !store.isDownloading { browseRow }
                     }
                     .padding(.horizontal, 15).padding(.top, 10).padding(.bottom, tabBarReserve)
                 }
@@ -4235,6 +4268,94 @@ struct ContentView: View {
         }
         .padding(10)
         .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    /// The Download tab with nothing on it yet: what it does and a way back to recent mods, so the
+    /// screen is not a lookup box floating above empty space.
+    private var downloadWelcome: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "arrow.down.circle.dotted")
+                    .font(.system(size: 26, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 54, height: 54)
+                    .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color.accentColor))
+                    .shadow(color: Color.accentColor.opacity(0.28), radius: 10, y: 5)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Download a Workshop mod").font(.system(size: 19, weight: .bold, design: .rounded))
+                    Text("Paste a link into the box below, or browse the Workshop to find one.")
+                        .font(.system(size: 13)).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+            }
+            VStack(spacing: 0) {
+                welcomeStep("link", "Paste a Workshop link", "A sharedfiles link or a workshop ID both work.")
+                Divider().padding(.leading, 46)
+                welcomeStep("safari.fill", "Or browse the Workshop", "Pick a game, then the mod you want.")
+                Divider().padding(.leading, 46)
+                welcomeStep("folder.fill", "It lands in Files", "ModShelf → Downloaded Mods → game → mod.")
+            }
+            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            if !recentDownloads.isEmpty {
+                VStack(alignment: .leading, spacing: 9) {
+                    Text("RECENTLY DOWNLOADED")
+                        .font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                        .kerning(0.4)
+                        .padding(.horizontal, 4)
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 10) {
+                            ForEach(recentDownloads) { record in recentTile(record) }
+                        }
+                        .padding(.horizontal, 1).padding(.vertical, 2)
+                    }
+                }
+            }
+            browseRow
+        }
+    }
+
+    private func welcomeStep(_ symbol: String, _ title: String, _ detail: String) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: symbol)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 22)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.system(size: 14, weight: .semibold))
+                Text(detail).font(.system(size: 12)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 14).padding(.vertical, 12)
+    }
+
+    /// The last few mods that really installed, as a way straight back to them.
+    private var recentDownloads: [DownloadRecord] {
+        var seen = Set<String>()
+        let list = store.history.filter { $0.result == "Downloaded" && seen.insert($0.workshopID).inserted }
+        return Array(list.prefix(8))
+    }
+
+    private func recentTile(_ record: DownloadRecord) -> some View {
+        Button {
+            Haptics.tap()
+            store.input = "https://steamcommunity.com/sharedfiles/filedetails/?id=\(record.workshopID)"
+            submitLookup()
+        } label: {
+            VStack(alignment: .leading, spacing: 6) {
+                Color.clear
+                    .frame(width: 104, height: 58)
+                    .overlay(CachedImage(urlString: record.imageURL, fill: true, maxPixel: 260).allowsHitTesting(false))
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                Text(record.title)
+                    .font(.system(size: 12, weight: .medium)).lineLimit(2)
+                    .frame(width: 104, alignment: .leading)
+                    .multilineTextAlignment(.leading)
+            }
+        }
+        .buttonStyle(.plain)
     }
 
     private var browseRow: some View {
@@ -4487,7 +4608,7 @@ struct ContentView: View {
                 Button { exportSelection() } label: {
                     Label(selection.isEmpty ? "Export as ZIP" : "Export selected (\(selection.count)) as ZIP", systemImage: "square.and.arrow.up")
                 }
-                .disabled(selection.isEmpty)
+                .disabled(selection.isEmpty || store.isExporting)
                 Button(role: .destructive) { requestDeleteSelected() } label: {
                     Label("Delete selected (\(selection.count))", systemImage: "trash")
                 }
@@ -4497,9 +4618,9 @@ struct ContentView: View {
                 Button { store.updateAll(); selectedTab = 0 } label: { Label("Update all (\(pending))", systemImage: "arrow.down.circle") }
                     .disabled(pending == 0 || store.isBusy)
                 Button { startExportSelection() } label: { Label("Select and export as ZIP", systemImage: "square.and.arrow.up.on.square") }
-                    .disabled(store.library.isEmpty)
-                Button { beginExport(all: true) } label: { Label("Export all as ZIP", systemImage: "square.and.arrow.up") }
-                    .disabled(store.library.isEmpty)
+                    .disabled(store.library.isEmpty || store.isExporting)
+                Button { beginExport(all: true) } label: { Label(store.isExporting ? "Exporting…" : "Export all as ZIP", systemImage: "square.and.arrow.up") }
+                    .disabled(store.library.isEmpty || store.isExporting)
                 Button {
                     UIPasteboard.general.string = store.library.map(\.id).joined(separator: "\n")
                     Haptics.success()
@@ -6455,36 +6576,45 @@ struct BrowserHome: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 14) {
                 ScrollSpy(onChange: onScroll)
-                Text("Browse Workshop")
-                    .font(.system(size: 27, weight: .bold, design: .rounded))
-                    .padding(.top, 6)
+                header
                 searchField
                 if !query.trimmingCharacters(in: .whitespaces).isEmpty {
                     resultsSection
                 } else {
                     if let lastPage { continueCard(lastPage) }
-                    if !favourites.isEmpty {
-                        sectionTitle("Favourites")
-                        favouritesGrid
-                    }
-                    if !recent.isEmpty {
-                        sectionTitle("Recently opened")
-                        ForEach(recent) { hit in gameRow(hit) }
-                    }
-                    if isFirstRun {
-                        Text("Search for a game above to start browsing its Workshop.")
-                            .font(.subheadline).foregroundStyle(.secondary).padding(.top, 4)
-                    }
+                    if !favourites.isEmpty { favouritesSection }
+                    if !recent.isEmpty { recentsSection }
+                    if isFirstRun { firstRunCard }
                 }
             }
-            .padding(15)
+            .padding(.horizontal, 15)
+            .padding(.top, 4)
             .padding(.bottom, 110)
         }
         .background(Color(uiColor: .systemGroupedBackground))
         .task(id: query) { await runSearch() }
         .onAppear { if isFirstRun { searchFocused = true } }
+    }
+
+    /// The start page's own header, so the tab reads as a place to begin rather than a bare search box.
+    private var header: some View {
+        HStack(spacing: 13) {
+            Image(systemName: "safari.fill")
+                .font(.system(size: 22, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 50, height: 50)
+                .background(RoundedRectangle(cornerRadius: 15, style: .continuous).fill(Color.accentColor))
+                .shadow(color: Color.accentColor.opacity(0.3), radius: 9, y: 4)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Workshop").font(.system(size: 25, weight: .bold, design: .rounded))
+                Text("Find a game and browse its mods")
+                    .font(.system(size: 13)).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.top, 6)
     }
 
     private func runSearch() async {
@@ -6502,7 +6632,10 @@ struct BrowserHome: View {
     private var searchField: some View {
         HStack(spacing: 10) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 16, weight: .semibold)).foregroundStyle(.secondary)
+                .font(.system(size: 14, weight: .bold))
+                .foregroundStyle(.white)
+                .frame(width: 28, height: 28)
+                .background(Circle().fill(Color.accentColor))
             TextField("Search a game", text: $query)
                 .font(.system(size: 16))
                 .textInputAutocapitalization(.never)
@@ -6519,43 +6652,74 @@ struct BrowserHome: View {
                 .accessibilityLabel("Clear search")
             }
         }
-        .padding(.horizontal, 14).padding(.vertical, 12)
-        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .padding(.leading, 10).padding(.trailing, 6).padding(.vertical, 9)
+        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .shadow(color: .black.opacity(0.05), radius: 8, y: 3)
     }
 
     private var resultsSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             if searching {
-                ProgressView().frame(maxWidth: .infinity).padding(.top, 8)
+                HStack(spacing: 10) {
+                    ProgressView().scaleEffect(0.8)
+                    Text("Searching…").font(.system(size: 13)).foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 4)
             } else if results.isEmpty {
-                Text("No games found for \"\(query)\".").font(.subheadline).foregroundStyle(.secondary)
+                Text("No games found for \"\(query)\".")
+                    .font(.subheadline).foregroundStyle(.secondary)
+                    .padding(.vertical, 4)
+            } else {
+                gameList(results)
             }
-            ForEach(results) { hit in gameRow(hit) }
         }
     }
 
-    private var favouritesGrid: some View {
-        LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
-            ForEach(Array(favourites.prefix(4))) { hit in favouriteTile(hit) }
+    private var favouritesSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionHeader("Favourites", count: favourites.count)
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
+                ForEach(Array(favourites.prefix(4))) { hit in favouriteTile(hit) }
+            }
         }
+    }
+
+    private var recentsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionHeader("Recently opened", count: recent.count)
+            gameList(recent)
+        }
+    }
+
+    /// Rows share one rounded card with hairlines between them, so the page reads as a list rather
+    /// than a stack of loose boxes.
+    private func gameList(_ hits: [GameHit]) -> some View {
+        VStack(spacing: 0) {
+            ForEach(Array(hits.enumerated()), id: \.element.id) { index, hit in
+                if index > 0 { Divider().padding(.leading, 68) }
+                gameRow(hit)
+            }
+        }
+        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
     private func favouriteTile(_ hit: GameHit) -> some View {
         ZStack(alignment: .topTrailing) {
             Button { openGame(hit) } label: {
-                VStack(alignment: .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: 7) {
                     Color.clear
                         .frame(maxWidth: .infinity)
-                        .frame(height: 54)
+                        .frame(height: 66)
                         .overlay(CachedImage(urlString: hit.tiny_image, fill: true, maxPixel: 300))
-                        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                     Text(hit.name)
                         .font(.system(size: 12, weight: .semibold)).lineLimit(1)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .padding(7)
+                .padding(8)
                 .frame(maxWidth: .infinity)
-                .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color(uiColor: .secondarySystemGroupedBackground)))
+                .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color(uiColor: .secondarySystemGroupedBackground)))
+                .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(Color.primary.opacity(0.06), lineWidth: 1))
             }
             .buttonStyle(.plain)
             starButton(hit).padding(2)
@@ -6573,15 +6737,14 @@ struct BrowserHome: View {
                         .font(.system(size: 15, weight: .semibold)).lineLimit(2)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 13, weight: .semibold)).foregroundStyle(.tertiary)
+                        .font(.system(size: 12, weight: .semibold)).foregroundStyle(.tertiary)
                 }
-                .padding(.leading, 10).padding(.vertical, 10)
+                .padding(.leading, 12).padding(.vertical, 10)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            starButton(hit).padding(.trailing, 4)
+            starButton(hit)
         }
-        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 
     /// The star has a large invisible tap area, so you only favourite when you mean to.
@@ -6613,11 +6776,39 @@ struct BrowserHome: View {
         onOpenURL(URL(string: "https://steamcommunity.com/app/\(hit.id)/workshop/")!)
     }
 
-    private func sectionTitle(_ title: String) -> some View {
-        Text(title.uppercased())
-            .font(.system(size: 12, weight: .semibold))
-            .foregroundStyle(.secondary)
-            .padding(.leading, 4)
+    private func sectionHeader(_ title: String, count: Int? = nil) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(title.uppercased())
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .kerning(0.4)
+            if let count {
+                Text("\(count)").font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 4)
+    }
+
+    /// What the page is for on a fresh install, in place of one lonely line of grey text.
+    private var firstRunCard: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "sparkle.magnifyingglass")
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 40, height: 40)
+                .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.accentColor.opacity(0.14)))
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Start with a game").font(.system(size: 15, weight: .semibold))
+                Text("Type the name of a game in your Steam library — Project Zomboid, for example — then tap it to open its Workshop.")
+                    .font(.system(size: 13)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(14)
+        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
     private func continueCard(_ url: URL) -> some View {
