@@ -4172,7 +4172,6 @@ struct ContentView: View {
                             HStack(spacing: 10) { ProgressView(); Text("Loading Workshop details…").font(.subheadline).foregroundStyle(.secondary) }.padding(.vertical, 2)
                         }
                         if downloadIntro {
-                            browseRow
                             glanceCard
                         }
                         if !store.isDownloading, store.queueRows.isEmpty, let item = store.preview {
@@ -4318,6 +4317,17 @@ struct ContentView: View {
 
     private var lookupCard: some View {
         VStack(spacing: 8) {
+            Button { selectedTab = 1 } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "safari.fill").font(.system(size: 16, weight: .semibold)).foregroundStyle(.secondary)
+                    Text("Browse the Workshop").font(.system(size: 15, weight: .semibold))
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.right").font(.caption.bold()).foregroundStyle(.tertiary)
+                }
+                .padding(.horizontal, 12).padding(.vertical, 10)
+                .background(Color(uiColor: .tertiarySystemFill), in: RoundedRectangle(cornerRadius: 11))
+            }
+            .buttonStyle(.plain)
             HStack(spacing: 10) {
                 Image(systemName: "link").foregroundStyle(.secondary)
                 TextField("URL or ID…", text: $store.input)
@@ -4337,18 +4347,6 @@ struct ContentView: View {
             if inputIsInvalid {
                 Text("Enter a Workshop URL or numeric item ID.").font(.caption).foregroundStyle(.red).frame(maxWidth: .infinity, alignment: .leading).padding(.leading, 4)
             }
-            Button(action: submitLookup) {
-                HStack(spacing: 7) {
-                    if store.isFetching { ProgressView().tint(.white) } else { Image(systemName: "magnifyingglass") }
-                    Text(store.isFetching ? "Looking up…" : "Look up item")
-                }
-                .font(.system(size: 15, weight: .semibold)).foregroundStyle(.primary)
-                .frame(maxWidth: .infinity).frame(height: 40)
-                .background(RoundedRectangle(cornerRadius: 11).fill(Color(uiColor: .secondarySystemGroupedBackground)))
-            }
-            .buttonStyle(.plain)
-            .disabled(store.isFetching)
-            .opacity(store.isFetching ? 0.6 : 1)
         }
         .padding(10)
         .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
@@ -4644,10 +4642,6 @@ struct ContentView: View {
     private var libraryBar: some View {
         VStack(spacing: 8) {
             HStack(spacing: 8) {
-                librarySearchField
-                selectPill
-            }
-            HStack(spacing: 8) {
                 sortMenu
                 Spacer(minLength: 0)
                 filterMenu
@@ -4671,6 +4665,10 @@ struct ContentView: View {
                     libraryAction("clock.arrow.circlepath", "History") { showingHistory = true }
                     moreMenu
                 }
+            }
+            HStack(spacing: 8) {
+                librarySearchField
+                selectPill
             }
         }
         .padding(.horizontal, 15).padding(.top, 6).padding(.bottom, 8)
@@ -4723,6 +4721,7 @@ struct ContentView: View {
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(Color.accentColor)
                 Text(libraryFilter).font(.system(size: 12, weight: .medium))
+                    .foregroundColor(Color(uiColor: .secondaryLabel))
             }
             .foregroundStyle(.secondary)
             .padding(.horizontal, 10).padding(.vertical, 7)
@@ -4749,8 +4748,10 @@ struct ContentView: View {
                     .foregroundStyle(Color.accentColor)
                 Text(sortOrder)
                     .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.secondary)
+                    .foregroundColor(Color(uiColor: .secondaryLabel))
                     .lineLimit(1)
+                    .minimumScaleFactor(0.85)
+                    .layoutPriority(1)
             }
             .padding(.horizontal, 10).padding(.vertical, 7)
             .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
@@ -4800,7 +4801,7 @@ struct ContentView: View {
                 .frame(height: 17)
                 Text(selecting ? "Done" : "More")
                     .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.secondary)
+                    .foregroundColor(Color(uiColor: .secondaryLabel))
                     .lineLimit(1)
             }
             .frame(maxWidth: .infinity)
@@ -6867,7 +6868,7 @@ struct BrowserHome: View {
                     .frame(width: 78, alignment: .leading)
             }
             .padding(6)
-            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .background(Color(uiColor: .secondarySystemGroupedBackground), in: UnevenRoundedRectangle(topLeadingRadius: 0, bottomLeadingRadius: 12, bottomTrailingRadius: 12, topTrailingRadius: 0))
         }
         .buttonStyle(.plain)
     }
@@ -7038,7 +7039,7 @@ struct BrowserHome: View {
                 Image(systemName: "arrow.uturn.forward")
                     .font(.system(size: 16, weight: .semibold)).foregroundStyle(.secondary)
                     .frame(width: 36, height: 36)
-                    .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.accentColor.opacity(0.14)))
+                    .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color(uiColor: .tertiarySystemFill)))
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Continue where you left off").font(.system(size: 15, weight: .semibold))
                     Text(url.absoluteString.replacingOccurrences(of: "https://", with: ""))
