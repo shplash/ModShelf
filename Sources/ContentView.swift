@@ -1823,6 +1823,21 @@ final class WorkshopStore: ObservableObject {
         }
     }
 
+    /// Stops one download: a waiting one leaves the queue, and the one running ends the batch.
+    func cancelItem(_ id: String) {
+        if id == activeID, isDownloading || isPaused {
+            cancel()
+            return
+        }
+        queue.removeAll { $0 == id }
+        pendingMeta[id] = nil
+        queueRows.removeAll { $0.id == id }
+        queueTotal = queueRows.count
+        queueStep = min(queueStep, queueTotal)
+        log("removed \(id) from the queue")
+        if queueRows.isEmpty, !isBusy { finishQueue() }
+    }
+
     func cancel() {
         isPaused = false
         log("cancel requested (queue \(queue.count), active \(activeID)")
@@ -4222,23 +4237,32 @@ struct ContentView: View {
                         if store.isFetching {
                             HStack(spacing: 10) { ProgressView(); Text("Loading Workshop details…").font(.subheadline).foregroundStyle(.secondary) }.padding(.vertical, 2)
                         }
-                        if store.isBusy || store.isPaused {
+                        if store.isDownloading || store.isPaused {
                             HStack(spacing: 10) {
                                 Button { Haptics.tap(); store.togglePause() } label: {
-                                    Label(store.isPaused ? "Resume" : "Pause",
-                                          systemImage: store.isPaused ? "play.fill" : "pause.fill")
-                                        .font(.system(size: 13, weight: .semibold))
-                                        .foregroundStyle(Color.accentColor)
-                                        .frame(maxWidth: .infinity).frame(height: 36)
-                                        .background(RoundedRectangle(cornerRadius: 10).fill(Color.accentColor.opacity(0.14)))
+                                    HStack(spacing: 6) {
+                                        Image(systemName: store.isPaused ? "play.fill" : "pause.fill")
+                                            .font(.system(size: 12, weight: .semibold))
+                                            .foregroundStyle(Color.accentColor)
+                                        Text(store.isPaused ? "Resume" : "Pause")
+                                            .font(.system(size: 13, weight: .semibold))
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    .frame(maxWidth: .infinity).frame(height: 38)
+                                    .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                                 }
                                 .buttonStyle(.plain)
                                 Button { Haptics.tap(); store.cancel() } label: {
-                                    Label("Cancel", systemImage: "xmark")
-                                        .font(.system(size: 13, weight: .semibold))
-                                        .foregroundStyle(.red)
-                                        .frame(maxWidth: .infinity).frame(height: 36)
-                                        .background(RoundedRectangle(cornerRadius: 10).fill(Color.red.opacity(0.12)))
+                                    HStack(spacing: 6) {
+                                        Image(systemName: "xmark")
+                                            .font(.system(size: 12, weight: .semibold))
+                                            .foregroundStyle(Color.accentColor)
+                                        Text("Cancel")
+                                            .font(.system(size: 13, weight: .semibold))
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    .frame(maxWidth: .infinity).frame(height: 38)
+                                    .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                                 }
                                 .buttonStyle(.plain)
                             }
@@ -4288,36 +4312,36 @@ struct ContentView: View {
         let failed = store.queueRows.filter { $0.state == .failed }
         return VStack(alignment: .leading, spacing: 0) {
             if store.queueTotal > 1 {
-            HStack(alignment: .center, spacing: 10) {
-                ZStack {
-                    Circle().fill(Color.accentColor.opacity(0.14))
-                    Image(systemName: "arrow.down")
-                        .font(.system(size: 12, weight: .bold))
+            ZStack {
+                HStack(spacing: 8) {
+                    ZStack {
+                        Circle().fill(Color.accentColor.opacity(0.14))
+                        Image(systemName: "arrow.down")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(Color.accentColor)
+                    }
+                    .frame(width: 24, height: 24)
+                    Text(queueHeadline)
+                        .font(.system(size: 14, weight: .semibold))
+                        .lineLimit(1)
+                    Text("\(Int(queueOverallProgress * 100))%")
+                        .font(.system(size: 13, weight: .semibold).monospacedDigit())
                         .foregroundStyle(Color.accentColor)
                 }
-                .frame(width: 30, height: 30)
-
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(queueHeadline)
-                        .font(.system(size: 15, weight: .semibold))
-                        .lineLimit(1)
-                    Text(queueSubline)
-                        .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                .frame(maxWidth: .infinity)
+                HStack {
+                    Spacer(minLength: 0)
+                    Button { Haptics.tap(); store.cancel() } label: {
+                        Image(systemName: "xmark").font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 26, height: 26)
+                            .background(Circle().fill(Color.primary.opacity(0.07)))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Cancel downloads")
                 }
-                Spacer(minLength: 8)
-                Text("\(Int(queueOverallProgress * 100))%")
-                    .font(.system(size: 15, weight: .semibold).monospacedDigit())
-                    .foregroundStyle(Color.accentColor)
-                Button { Haptics.tap(); store.cancel() } label: {
-                    Image(systemName: "xmark").font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 28, height: 28)
-                        .background(Circle().fill(Color.primary.opacity(0.07)))
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Cancel downloads")
             }
-            .padding(.horizontal, 14).padding(.top, 12).padding(.bottom, 10)
+            .padding(.horizontal, 14).padding(.top, 12).padding(.bottom, 8)
             }
 
             VStack(spacing: 0) {
@@ -4389,27 +4413,38 @@ struct ContentView: View {
         let failed = row.state == .failed
         return HStack(alignment: .top, spacing: 12) {
             Color.clear
-                .frame(width: 64, height: 86)
-                .overlay(CachedImage(urlString: row.imageURL, fill: true, maxPixel: 260).allowsHitTesting(false))
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            VStack(alignment: .leading, spacing: 3) {
-                MarqueeText(text: row.title, fontSize: 14, weight: .semibold, height: 18,
-                            active: row.state == .downloading)
+                .frame(width: 84, height: 84)
+                .overlay(CachedImage(urlString: row.imageURL, fill: false, maxPixel: 320).allowsHitTesting(false))
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    MarqueeText(text: row.title, fontSize: 14, weight: .semibold, height: 18,
+                                active: row.state == .downloading)
+                    Button { Haptics.tap(); store.cancelItem(row.id) } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 22, height: 22)
+                            .background(Circle().fill(Color.primary.opacity(0.06)))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Cancel this download")
+                }
                 if let game = row.gameName, !game.isEmpty {
                     Text(game).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
                 }
+                queueStatusText(row)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(queueTint(row))
+                    .lineLimit(1)
+                Spacer(minLength: 2)
                 HStack(spacing: 8) {
-                    queueStatusText(row)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(queueTint(row))
-                        .lineLimit(2)
-                    Spacer(minLength: 6)
+                    queueBar(row)
                     if failed {
                         Button { Haptics.tap(); store.download(row.id) } label: {
                             Image(systemName: "arrow.clockwise")
-                                .font(.system(size: 12, weight: .bold))
+                                .font(.system(size: 11, weight: .bold))
                                 .foregroundStyle(Color.accentColor)
-                                .frame(width: 42, height: 24)
+                                .frame(width: 40, height: 22)
                                 .background(Capsule().fill(Color.accentColor.opacity(0.14)))
                         }
                         .buttonStyle(.plain)
@@ -4417,14 +4452,28 @@ struct ContentView: View {
                     } else {
                         Text(row.state == .downloading && store.isPreparingDownload
                              ? "" : "\(Int(row.progress * 100))%")
-                            .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                            .font(.system(size: 11, weight: .semibold).monospacedDigit())
                             .foregroundStyle(queueTint(row))
-                            .frame(width: 44, alignment: .trailing)
+                            .frame(width: 36, alignment: .trailing)
                     }
                 }
             }
+            .frame(height: 84, alignment: .top)
         }
         .padding(.horizontal, 14).padding(.vertical, 10)
+    }
+
+    private func queueBar(_ row: DownloadQueueRow) -> some View {
+        let fraction = row.state == .done ? 1 : min(1, max(0, row.progress))
+        let tint = queueTint(row)
+        return GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.primary.opacity(0.07))
+                Capsule().fill(tint.opacity(row.state == .waiting ? 0.4 : 1))
+                    .frame(width: max(0, geo.size.width * fraction))
+            }
+        }
+        .frame(height: 5)
     }
 
     @ViewBuilder private func queueStatusText(_ row: DownloadQueueRow) -> some View {
@@ -4661,7 +4710,7 @@ struct ContentView: View {
             }
             Text(item.title).font(.title3.bold()).fixedSize(horizontal: false, vertical: true)
             infoRow(item)
-            if !item.description.isEmpty { ExpandableDescription(text: item.description, lineLimit: 7) }
+            if !item.description.isEmpty { ExpandableDescription(text: item.description, lineLimit: 8) }
             workshopRow(item)
         }
         .padding(14).background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
@@ -4767,24 +4816,35 @@ struct ContentView: View {
     /// the actions as a row of labelled tiles below.
     private var libraryBar: some View {
         VStack(spacing: 8) {
-            if !showingHistory {
-            HStack(spacing: 8) {
-                sortMenu
-                Spacer(minLength: 0)
-                filterMenu
-                Text(librarySubtitle)
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .padding(.horizontal, 10).padding(.vertical, 7)
+            if showingHistory {
+                HStack(spacing: 8) {
+                    HStack(spacing: 9) {
+                        Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                        TextField("Search history", text: $historySearch).textInputAutocapitalization(.never).autocorrectionDisabled()
+                        if !historySearch.isEmpty {
+                            Button { historySearch = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
+                        }
+                    }
+                    .padding(.horizontal, 12).padding(.vertical, 8)
                     .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-            }
-            HStack(spacing: 8) {
-                if showingHistory {
-                    libraryAction("trash", "Clear") { if confirmDelete { confirmClearHistory = true } else { store.clearHistory() } }
+                    libraryIconTile("trash") { if confirmDelete { confirmClearHistory = true } else { store.clearHistory() } }
                         .disabled(store.history.isEmpty)
-                    libraryAction("xmark", "Close") { showingHistory = false }
-                } else {
+                        .opacity(store.history.isEmpty ? 0.5 : 1)
+                    libraryIconTile("xmark") { showingHistory = false }
+                }
+            } else {
+                HStack(spacing: 8) {
+                    sortMenu
+                    filterMenu
+                    Spacer(minLength: 0)
+                    Text(librarySubtitle)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .padding(.horizontal, 10).padding(.vertical, 7)
+                        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+                HStack(spacing: 8) {
                     libraryAction("arrow.clockwise", "Updates", spinning: store.isCheckingUpdates) { store.checkAllUpdates() }
                         .disabled(store.isCheckingUpdates)
                     libraryAction("checkmark.shield", "Verify", spinning: store.isVerifyingAll) { store.verifyAllFiles() }
@@ -4792,16 +4852,27 @@ struct ContentView: View {
                     libraryAction("clock.arrow.circlepath", "History") { showingHistory = true }
                     moreMenu
                 }
-            }
-            HStack(spacing: 8) {
-                librarySearchField
-                selectPill
-                if !installedGameOptions.isEmpty { gameFilterMenu }
-                if !installedTagOptions.isEmpty { tagFilterMenu }
-            }
+                HStack(spacing: 8) {
+                    librarySearchField
+                    selectPill
+                    if !installedGameOptions.isEmpty { gameFilterMenu }
+                    if !installedTagOptions.isEmpty { tagFilterMenu }
+                }
             }
         }
         .padding(.horizontal, 15).padding(.top, 6).padding(.bottom, 8)
+    }
+
+    /// A single icon in the same grey tile as the other library controls.
+    private func libraryIconTile(_ symbol: String, action: @escaping () -> Void) -> some View {
+        Button { Haptics.tap(); action() } label: {
+            Image(systemName: symbol)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 38, height: 34)
+                .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+        .buttonStyle(.plain)
     }
 
     private func libraryAction(_ symbol: String, _ label: String, spinning: Bool = false, action: @escaping () -> Void) -> some View {
@@ -4845,12 +4916,7 @@ struct ContentView: View {
     }
 
     private func filterTint(_ filter: String) -> Color {
-        switch filter {
-        case "Updates": return .accentColor
-        case "Favourites": return .yellow
-        case "Problems": return .red
-        default: return .accentColor
-        }
+        .secondary
     }
 
     /// The library filter as a chip whose icon has no backing of its own, with the chosen filter named.
@@ -4869,7 +4935,7 @@ struct ContentView: View {
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(Color.accentColor)
                 if libraryFilter != "All" {
-                    Text("-").font(.system(size: 12, weight: .medium))
+                    Text("•").font(.system(size: 12, weight: .medium))
                         .foregroundColor(Color(uiColor: .secondaryLabel))
                     Image(systemName: filterSymbol(libraryFilter))
                         .font(.system(size: 12, weight: .semibold))
