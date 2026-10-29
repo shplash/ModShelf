@@ -82,6 +82,10 @@ It bundles [go-steam](https://github.com/BirknerAlex/go-steam) by Alexander Birk
 
 Also bundles [ZIPFoundation](https://github.com/weichsel/ZIPFoundation) by Thomas Zoechling, which is MIT licensed.
 
+Third-party notices and the full licence texts are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), and in the app under Options → Credits.
+
+The complete source for every release is this repository, with the engine in `ios-engine/` and the build in `.github/workflows/build-ipa.yml`.
+
 ## <a href="https://ko-fi.com/shplash"><img src="https://img.shields.io/badge/Support-ko--fi-FF5E5B?style=for-the-badge" alt="Support"></a>
 
 If ModShelf has been useful to you, you can support its development as well as future projects.

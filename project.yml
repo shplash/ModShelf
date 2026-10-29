@@ -19,6 +19,7 @@ targets:
     sources:
       - Sources
       - Assets.xcassets
+      - THIRD_PARTY_NOTICES.md
     info:
       path: Sources/Info.plist
       properties:

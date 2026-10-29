@@ -3955,6 +3955,7 @@ struct ContentView: View {
     @State private var dragOffsetY: CGFloat = 0
     @State private var dragTarget: Int?
     @State private var confirmReorder: ReorderRequest?
+    @State private var showThirdPartyNotices = false
 
     /// Space reserved under every tab for the tab bar, so content can always scroll clear of it.
     private var tabBarReserve: CGFloat { tabStyle == "bar" ? 84 : 100 }
@@ -6108,6 +6109,7 @@ struct ContentView: View {
             .coordinateSpace(name: "scroll")
             .background(Color(uiColor: .systemGroupedBackground))
             .toolbar(.hidden, for: .navigationBar)
+            .sheet(isPresented: $showThirdPartyNotices) { ThirdPartyNoticesView() }
         }
     }
 
@@ -6308,6 +6310,11 @@ struct ContentView: View {
                 creditLicenseRow("go-steam", "Engine by Alexander Birkner (@BirknerAlex)", license: "MIT License")
                 divider
                 creditLicenseRow("ZIPFoundation", "ZIP handling by Thomas Zoechling (@weichsel)", license: "MIT License")
+                divider
+                Button { Haptics.tap(); showThirdPartyNotices = true } label: {
+                    rowContent("Third-party notices", symbol: "doc.text", detail: nil)
+                }
+                .buttonStyle(.plain)
                 divider
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Steam and the Steam Workshop are trademarks of Valve Corporation. ModShelf is not made by or endorsed by Valve.")
@@ -8291,6 +8298,35 @@ struct WorkshopWebContainer: UIViewRepresentable {
     }
 }
 
+
+struct ThirdPartyNoticesView: View {
+    @Environment(\.dismiss) private var dismiss
+
+    private var notices: String {
+        guard let url = Bundle.main.url(forResource: "THIRD_PARTY_NOTICES", withExtension: "md"),
+              let text = try? String(contentsOf: url, encoding: .utf8) else {
+            return "The notices file is missing from this build."
+        }
+        return text
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                Text(notices)
+                    .font(.system(size: 12, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding()
+            }
+            .navigationTitle("Third-party notices")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+            }
+        }
+    }
+}
 
 struct DeveloperMenuView: View {
     @ObservedObject var store: WorkshopStore

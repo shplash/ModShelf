@@ -107,6 +107,7 @@ jobs:
           test -f Sources/ContentView.swift
           test -f ios-engine/go.mod
           test -f ios-engine/bridge.go
+          test -f THIRD_PARTY_NOTICES.md
 
       - name: Generate the Xcode project
         run: xcodegen generate
@@ -159,6 +160,7 @@ jobs:
           done
 
           rm -rf Payload/ModShelf.app/_CodeSignature
+          test -f Payload/ModShelf.app/THIRD_PARTY_NOTICES.md
 
           /usr/bin/codesign --force --deep --sign - --timestamp=none Payload/ModShelf.app
           /usr/bin/codesign --verify --deep --strict Payload/ModShelf.app
