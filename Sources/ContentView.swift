@@ -3373,10 +3373,6 @@ final class WorkshopStore: ObservableObject {
 }
 
 
-struct ScrollOffsetKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
-}
 /// Reads the scroll position from the UIScrollView that contains it, so folding works in every tab.
 struct ScrollSpy: UIViewRepresentable {
     let onChange: (CGFloat) -> Void
@@ -3460,14 +3456,6 @@ struct ScrollToTopSentinel: UIViewRepresentable {
                 probe = view.superview
             }
         }
-    }
-}
-
-struct ScrollOffsetReader: View {
-    var body: some View {
-        GeometryReader { g in
-            Color.clear.preference(key: ScrollOffsetKey.self, value: g.frame(in: .named("scroll")).minY)
-        }.frame(height: 0)
     }
 }
 
@@ -3574,39 +3562,6 @@ struct AppTabBar: View {
     }
 }
 
-
-struct IconButton: View {
-    let symbol: String
-    var size: CGFloat = 38
-    var tint: Color = .accentColor
-    let action: () -> Void
-    var body: some View {
-        Button(action: { Haptics.tap(); action() }) {
-            Image(systemName: symbol)
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(tint)
-                .frame(width: size, height: size)
-                .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(Color.accentColor.opacity(0.14)))
-        }
-        .buttonStyle(.plain)
-    }
-}
-
-struct FilterPill: View {
-    let symbol: String
-    let title: String
-    var active = false
-    var body: some View {
-        HStack(spacing: 5) {
-            Image(systemName: symbol).font(.system(size: 12, weight: .semibold))
-            Text(title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
-            Image(systemName: "chevron.down").font(.system(size: 9, weight: .bold)).opacity(0.7)
-        }
-        .foregroundStyle(active ? Color.white : Color.primary)
-        .padding(.horizontal, 11).padding(.vertical, 7)
-        .background(Capsule().fill(active ? Color.accentColor : Color(uiColor: .secondarySystemGroupedBackground)))
-    }
-}
 
 struct StatusGlyph: View {
     let status: ModStatus
@@ -5001,16 +4956,6 @@ struct ContentView: View {
         return "Finished \(min(done, total)) of \(total)"
     }
 
-    private var queueSubline: String {
-        let done = store.queueRows.filter { $0.state == .done }.count
-        let failed = store.queueRows.filter { $0.state == .failed }.count
-        let waiting = store.queueRows.filter { $0.state == .waiting }.count
-        if failed > 0 { return "\(done) done · \(failed) didn't finish" }
-        if waiting > 0 { return "\(done) done · \(waiting) waiting" }
-        if done == store.queueRows.count, !store.queueRows.isEmpty { return "All done" }
-        return "\(done) of \(store.queueRows.count) done"
-    }
-
     private var queueOverallProgress: Double {
         guard !store.queueRows.isEmpty else { return 0 }
         let weights = store.queueRows.map { max(1, Double($0.fileSize)) }
@@ -5328,38 +5273,12 @@ struct ContentView: View {
         return min(1, used / total)
     }
 
-    private var browseRow: some View {
-        Button { selectedTab = 1 } label: {
-            HStack(spacing: 12) {
-                Image(systemName: "safari.fill").font(.system(size: 18)).foregroundStyle(Color.accentColor)
-                    .frame(width: 36, height: 36).background(Color.accentColor.opacity(0.14), in: RoundedRectangle(cornerRadius: 10))
-                Text("Browse the Workshop").font(.system(size: 15, weight: .semibold))
-                Spacer()
-                Image(systemName: "chevron.right").font(.caption.bold()).foregroundStyle(.tertiary)
-            }
-            .padding(10)
-            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
-        }
-        .buttonStyle(.plain)
-    }
-
     private func submitLookup() {
         dismissKeyboard()
         guard WorkshopStore.workshopID(from: store.input) != nil else { inputWasSubmitted = true; return }
         inputWasSubmitted = false
         Haptics.tap()
         store.fetchPreview()
-    }
-
-    private var operationBanner: some View {
-        HStack(alignment: .top, spacing: 9) {
-            if store.isCheckingUpdates || store.isVerifyingAll { ProgressView().scaleEffect(0.8) }
-            else { Image(systemName: "info.circle.fill").foregroundStyle(.secondary) }
-            Text(store.operationMessage).font(.footnote).fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 0)
-            Button { store.operationMessage = "" } label: { Image(systemName: "xmark").font(.caption.bold()).foregroundStyle(.secondary) }.accessibilityLabel("Dismiss status")
-        }
-        .padding(11).background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
     }
 
     /// The mod a button just queued, so its name is visible while another download runs.
@@ -5779,43 +5698,6 @@ struct ContentView: View {
                 listContent(items)
             }
         }
-    }
-
-    private func chipCount(_ name: String) -> Int {
-        switch name {
-        case "Updates": return store.library.filter { $0.updateAvailable }.count
-        case "Favourites": return store.library.filter { $0.isFavourite }.count
-        case "Problems": return store.library.filter { $0.status.needsAttention }.count
-        default: return 0
-        }
-    }
-
-    private var chipRow: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(["All", "Updates", "Favourites", "Problems"], id: \.self) { name in
-                    let count = chipCount(name)
-                    let on = libraryFilter == name
-                    Button { Haptics.select(); libraryFilter = name } label: {
-                        HStack(spacing: 5) {
-                            Text(name)
-                            if count > 0 { Text("\(count)").font(.system(size: 12, weight: .bold).monospacedDigit()).opacity(0.85) }
-                        }
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(on ? Color.white : Color.primary)
-                        .padding(.horizontal, 12).padding(.vertical, 7)
-                        .background(Capsule().fill(on ? Color.accentColor : Color(uiColor: .secondarySystemGroupedBackground)))
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(.horizontal, 14)
-        }
-        .padding(.bottom, 8)
-    }
-
-    private var filterRow: some View {
-        EmptyView()
     }
 
     private var gameFilterMenu: some View {
@@ -6405,15 +6287,6 @@ struct ContentView: View {
                 .padding(.horizontal, 15).padding(.vertical, 12)
             }
         )
-    }
-
-    private func creditRow(_ title: String, _ detail: String) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(title).font(.system(size: 15, weight: .semibold))
-            Text(detail).font(.system(size: 13)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 15).padding(.vertical, 11)
     }
 
     private func creditLicenseRow(_ title: String, _ detail: String, license: String) -> some View {
@@ -8399,7 +8272,6 @@ struct DeveloperMenuView: View {
     @State private var fakeEvery = 0
     @State private var fakeSpeed = 2.0
     @State private var report: String?
-    @State private var showingManifests = false
 
     var body: some View {
         NavigationStack {

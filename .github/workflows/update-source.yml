@@ -20,10 +20,21 @@ jobs:
           repository: shplash/shplash-repo
           token: ${{ secrets.SOURCE_REPO_TOKEN }}
 
+      - name: Read the IPA size
+        id: size
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          SIZE=$(gh api "repos/${{ github.repository }}/releases/tags/${{ github.event.release.tag_name }}" \
+            --jq '.assets[] | select(.name=="ModShelf.ipa") | .size' | head -n1)
+          echo "size=${SIZE:-0}" >> "$GITHUB_OUTPUT"
+
       - name: Update apps.json
         env:
           TAG: ${{ github.event.release.tag_name }}
           NOTES: ${{ github.event.release.body }}
+          SIZE: ${{ steps.size.outputs.size }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -34,6 +45,7 @@ jobs:
 
           tag = os.environ.get("TAG", "").strip()
           notes = os.environ.get("NOTES", "").strip()
+          size = int(os.environ.get("SIZE", "0") or "0")
           if not tag.startswith("v"):
               print("No release tag on this run; nothing to do.")
               sys.exit(0)
@@ -51,6 +63,7 @@ jobs:
               app["version"] = version
               app["versionDate"] = today
               app["downloadURL"] = download
+              app["size"] = size
               if notes:
                   app["versionDescription"] = notes
               versions = [v for v in app.get("versions", []) if v.get("version") != version]
@@ -59,7 +72,7 @@ jobs:
                   "date": today,
                   "localizedDescription": notes,
                   "downloadURL": download,
-                  "size": 0,
+                  "size": size,
               })
               app["versions"] = versions
 

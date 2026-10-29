@@ -1,0 +1,13 @@
+.DS_Store
+build/
+DerivedData/
+SourcePackages/
+xcuserdata/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+.swiftpm/
+.build/
+
+ModShelf.xcodeproj/
+Sources/Info.plist
+SteamEngine.xcframework/
