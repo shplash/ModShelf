@@ -7967,7 +7967,7 @@ struct BrowserHome: View {
                 .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.accentColor.opacity(0.14)))
             VStack(alignment: .leading, spacing: 3) {
                 Text("Start with a game").font(.system(size: 15, weight: .semibold))
-                Text("Type the name of a game in your Steam library — Project Zomboid, for example — then tap it to open its Workshop.")
+                Text("Type the name of any game in your Steam library that has Workshop support, then tap to browse.")
                     .font(.system(size: 13)).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
