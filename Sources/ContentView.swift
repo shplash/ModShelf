@@ -1669,6 +1669,8 @@ final class WorkshopStore: ObservableObject {
         // The denominator can grow when Steam reports a larger uncompressed total, so the figure on
         // screen only ever moves forward within one download.
         if isDownloading, nextProgress < progress { nextProgress = progress }
+        // A figure that came out of a division must never reach Int(), which traps on NaN.
+        if !nextProgress.isFinite { nextProgress = progress.isFinite ? progress : 0 }
         let nextFile = engine?.currentFile() ?? ""
         let waitingForCode = nextStatus == "Steam Guard code required"
         if waitingForCode != needsGuardCode { needsGuardCode = waitingForCode }
@@ -3697,6 +3699,12 @@ struct ReorderRequest: Identifiable {
     let title: String
 }
 
+/// How far the page has moved and how far it has run upwards, held off the view's state on purpose.
+final class ScrollTracker {
+    var lastY: CGFloat = 0
+    var upRun: CGFloat = 0
+}
+
 struct ContentView: View {
     @StateObject private var store = WorkshopStore()
     @Environment(\.scenePhase) private var scenePhase
@@ -3735,6 +3743,8 @@ struct ContentView: View {
     @State private var tabCollapsed = false
     @State private var scrollAnchor: CGFloat = 0
     @State private var selecting = false
+    /// The tabs that have been opened at least once; only those are built.
+    @State private var openedTabs: Set<Int> = [0]
     @State private var selection: Set<String> = []
     @State private var confirmBulkDelete = false
     @State private var exportPrompt: ExportPrompt?
@@ -3751,9 +3761,12 @@ struct ContentView: View {
     @State private var tabStyleOpen = false
     @State private var sortOpen = false
     @State private var confirmClearHistory = false
-    @State private var lastScrollY: CGFloat = 0
+    /// Scroll bookkeeping kept in a reference type, so a scroll frame never re-renders the whole app.
+    @State private var scrollTracker = ScrollTracker()
     @AppStorage("options.libraryFilter") private var libraryFilter = "All"
-    @State private var upwardRun: CGFloat = 0
+    /// Figures the download screen shows on every render, worked out when the library changes instead.
+    @State private var gameCount = 0
+    @State private var updateCount = 0
     @State private var browserHomeToken = 0
     @State private var lastWorkshopTap = Date.distantPast
     @State private var lastDownloadTap = Date.distantPast
@@ -3792,7 +3805,7 @@ struct ContentView: View {
     }
     private var selectedGameName: String? {
         guard let g = selectedGame else { return nil }
-        return installedGames.first(where: { $0.id == g })?.name
+        return installedGameOptions.first(where: { $0.id == g })?.name
     }
     private var filteredLibrary: [WorkshopItem] {
         let filtered = store.library.filter { item in
@@ -3895,9 +3908,26 @@ struct ContentView: View {
     // MARK: body
 
     var body: some View {
+        rootWithObservers
+            .onChange(of: store.library) { _ in rebuildLibraryOptions() }
+            .onChange(of: searchText) { _ in visibleItems = filteredLibrary }
+            .onChange(of: libraryFilter) { _ in visibleItems = filteredLibrary }
+            .onChange(of: selectedGame) { _ in
+                visibleItems = filteredLibrary
+                installedTagOptions = installedTags
+            }
+            .onChange(of: selectedTag) { _ in visibleItems = filteredLibrary }
+            .onChange(of: sortOrder) { _ in visibleItems = filteredLibrary }
+    }
+
+    /// The screens and the sheets they present. Kept apart from the observers below so that no one
+    /// expression has to carry every modifier the app owns: a long chain is itself a deep type.
+    private var rootScene: some View {
         ZStack {
             mainStack
-            overlays
+            overlayDetails
+            overlayDialogs
+            overlayMedia
         }
         .sheet(isPresented: $store.showLogin) { loginSheet.presentationDetents([.medium, .large]) }
         .sheet(isPresented: $showDeveloperMenu) { DeveloperMenuView(store: store) }
@@ -3917,63 +3947,58 @@ struct ContentView: View {
                 FolderContentsSheet(url: folder) { store.revealFolderURL = nil }
             }
         }
-        .onChange(of: store.shareURL) { showShare = $0 != nil }
-        .onChange(of: confirmDelete) { UserDefaults.standard.set($0, forKey: "options.confirmDelete") }
-        .onChange(of: scenePhase) { phase in
-            // Coming back from another app restarts the scrolling names, like arriving on the tab does.
-            if phase == .active, selectedTab == 2 { marqueeToken += 1 }
-            if phase == .active { refreshFreeSpace() }
-        }
-        .onChange(of: store.errorMessage) { message in
-            guard !message.isEmpty, !store.showLogin else { return }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
-                if store.errorMessage == message && !store.showLogin { withAnimation { store.errorMessage = "" } }
+    }
+
+    private var rootWithObservers: some View {
+        rootScene
+            .onChange(of: store.shareURL) { showShare = $0 != nil }
+            .onChange(of: confirmDelete) { UserDefaults.standard.set($0, forKey: "options.confirmDelete") }
+            .onChange(of: scenePhase) { phase in
+                // Coming back from another app restarts the scrolling names, like arriving on the tab does.
+                if phase == .active, selectedTab == 2 { marqueeToken += 1 }
+                if phase == .active { refreshFreeSpace() }
             }
-        }
-        .onChange(of: store.operationMessage) { message in
-            guard !message.isEmpty else { return }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
-                // A ZIP of a big library takes a while; its message stays until it is done.
-                if store.operationMessage == message, !store.isExporting { withAnimation { store.operationMessage = "" } }
+            .onChange(of: store.errorMessage) { message in
+                guard !message.isEmpty, !store.showLogin else { return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
+                    if store.errorMessage == message && !store.showLogin { withAnimation { store.errorMessage = "" } }
+                }
             }
-        }
-        .onChange(of: store.library.count) { count in
-            if let g = selectedGame, !installedGameOptions.contains(where: { $0.id == g }) { selectedGame = nil }
-            if let t = selectedTag, !installedTagOptions.contains(t) { selectedTag = nil }
-            // A selection can never keep mods that are no longer in the library.
-            let liveIDs = Set(store.library.map(\.id))
-            selection = selection.intersection(liveIDs)
-            if selection.isEmpty { selecting = false }
-        }
-        .onChange(of: autoDownload) { on in
-            // Auto download starts with its confirmation armed, and off with it off.
-            confirmAutoDownload = on
-        }
-        .alert("Clear recently viewed mods?", isPresented: $confirmClearViewed) {
-            Button("Clear", role: .destructive) {
-                UserDefaults.standard.set("[]", forKey: "browser.recentMods")
+            .onChange(of: store.operationMessage) { message in
+                guard !message.isEmpty else { return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+                    // A ZIP of a big library takes a while; its message stays until it is done.
+                    if store.operationMessage == message, !store.isExporting { withAnimation { store.operationMessage = "" } }
+                }
             }
-            Button("Cancel", role: .cancel) { }
-        } message: {
-            Text("They will appear again as you browse the Workshop.")
-        }
-        .onChange(of: store.preview) { _ in
-            mediaIndex = 0
-            mediaViewer = nil
-        }
-        .task {
-            store.runLaunchChecks()
-            rebuildLibraryOptions()
-        }
-        .onChange(of: store.library) { _ in rebuildLibraryOptions() }
-        .onChange(of: searchText) { _ in visibleItems = filteredLibrary }
-        .onChange(of: libraryFilter) { _ in visibleItems = filteredLibrary }
-        .onChange(of: selectedGame) { _ in
-            visibleItems = filteredLibrary
-            installedTagOptions = installedTags
-        }
-        .onChange(of: selectedTag) { _ in visibleItems = filteredLibrary }
-        .onChange(of: sortOrder) { _ in visibleItems = filteredLibrary }
+            .onChange(of: store.library.count) { count in
+                if let g = selectedGame, !installedGameOptions.contains(where: { $0.id == g }) { selectedGame = nil }
+                if let t = selectedTag, !installedTagOptions.contains(t) { selectedTag = nil }
+                // A selection can never keep mods that are no longer in the library.
+                let liveIDs = Set(store.library.map(\.id))
+                selection = selection.intersection(liveIDs)
+                if selection.isEmpty { selecting = false }
+            }
+            .onChange(of: autoDownload) { on in
+                // Auto download starts with its confirmation armed, and off with it off.
+                confirmAutoDownload = on
+            }
+            .alert("Clear recently viewed mods?", isPresented: $confirmClearViewed) {
+                Button("Clear", role: .destructive) {
+                    UserDefaults.standard.set("[]", forKey: "browser.recentMods")
+                }
+                Button("Cancel", role: .cancel) { }
+            } message: {
+                Text("They will appear again as you browse the Workshop.")
+            }
+            .onChange(of: store.preview) { _ in
+                mediaIndex = 0
+                mediaViewer = nil
+            }
+            .task {
+                store.runLaunchChecks()
+                rebuildLibraryOptions()
+            }
     }
 
     /// Rebuilds everything the library screen derives from the collection, in one pass.
@@ -3981,6 +4006,8 @@ struct ContentView: View {
         visibleItems = filteredLibrary
         installedGameOptions = installedGames
         installedTagOptions = installedTags
+        gameCount = Set(store.library.compactMap { $0.appID }).count
+        updateCount = store.library.filter { $0.updateAvailable }.count
     }
 
     private var mainStack: some View {
@@ -3994,7 +4021,7 @@ struct ContentView: View {
         .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
         .safeAreaInset(edge: .bottom, spacing: 0) {
             AppTabBar(selected: $selectedTab, style: tabStyle, collapsed: tabCollapsed,
-                      libraryBadge: store.library.contains(where: { $0.updateAvailable }),
+                      libraryBadge: updateCount > 0,
                       firstTitle: store.queueRows.count > 1 ? "Queue" : "Download",
                       onTap: { tabTapped($0) })
                 .frame(height: tabBarReserve, alignment: .bottom)
@@ -4015,13 +4042,17 @@ struct ContentView: View {
     }
 
     private var tabContent: some View {
+        // A tab is built the first time it is opened and kept afterwards, so launch builds one screen
+        // instead of four. Four full screen hierarchies at once is what ran the main thread out of
+        // stack while SwiftUI was working out their types.
         ZStack(alignment: .top) {
-            downloadView.tabLayer(0, selected: selectedTab)
-            browserTab.tabLayer(1, selected: selectedTab)
-            libraryView.tabLayer(2, selected: selectedTab)
-            optionsView.tabLayer(3, selected: selectedTab)
+            if openedTabs.contains(0) { AnyView(downloadView.tabLayer(0, selected: selectedTab)) }
+            if openedTabs.contains(1) { AnyView(browserTab.tabLayer(1, selected: selectedTab)) }
+            if openedTabs.contains(2) { AnyView(libraryView.tabLayer(2, selected: selectedTab)) }
+            if openedTabs.contains(3) { AnyView(optionsView.tabLayer(3, selected: selectedTab)) }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .onChange(of: selectedTab) { tab in openedTabs.insert(tab) }
     }
 
     private var browserTab: some View {
@@ -4048,128 +4079,142 @@ struct ContentView: View {
             .ignoresSafeArea(edges: .bottom)
     }
 
-    @ViewBuilder private var overlays: some View {
-        if let item = popupItem {
-            Rectangle().fill(.ultraThinMaterial)
-                .overlay(Color.black.opacity(0.45))
-                .ignoresSafeArea().contentShape(Rectangle())
-                .onTapGesture { withAnimation(.easeOut(duration: 0.16)) { popupItem = nil } }
-            ItemDetailPopup(item: currentItem(item), store: store, showIDs: showIDs,
-                            onClose: { withAnimation(.easeOut(duration: 0.16)) { popupItem = nil } },
-                            onOpenWorkshop: { openWorkshop(item.id); popupItem = nil },
-                            onUpdate: {
-                                store.update(item)
-                                selectedTab = 0
-                                withAnimation(.easeOut(duration: 0.16)) { popupItem = nil }
-                            },
-                            onDelete: { store.requestDelete(item); popupItem = nil })
-                .padding(20).transition(.scale(scale: 0.97).combined(with: .opacity)).zIndex(5)
-        }
-        if let item = contextItem {
-            Color.black.opacity(0.28).ignoresSafeArea().contentShape(Rectangle())
-                .onTapGesture { withAnimation(.easeOut(duration: 0.14)) { contextItem = nil } }.zIndex(6)
-            ItemActionPopup(item: currentItem(item),
-                            openWorkshop: { openWorkshop(item.id); contextItem = nil },
-                            copyID: { UIPasteboard.general.string = item.id; store.operationMessage = "Workshop ID copied."; contextItem = nil },
-                            share: { store.shareURL = URL(string: "https://steamcommunity.com/sharedfiles/filedetails/?id=\(item.id)"); contextItem = nil },
-                            reveal: { store.revealInFiles(item); contextItem = nil },
-                            favourite: { store.toggleFavourite(item); contextItem = nil },
-                            updateNow: { store.update(item); selectedTab = 0; contextItem = nil },
-                            checkUpdates: { store.checkUpdates(item); contextItem = nil },
-                            verify: { store.verify(item); contextItem = nil },
-                            export: { store.export(item); contextItem = nil },
-                            delete: { store.requestDelete(item); contextItem = nil })
-                .padding(28).transition(.scale(scale: 0.96).combined(with: .opacity)).zIndex(7)
-        }
-        if let record = contextHistory {
-            Color.black.opacity(0.28).ignoresSafeArea().contentShape(Rectangle())
-                .onTapGesture { withAnimation(.easeOut(duration: 0.14)) { contextHistory = nil } }.zIndex(8)
-            HistoryActionPopup(record: record,
-                               openWorkshop: { openWorkshop(record.workshopID); contextHistory = nil },
-                               copyID: { UIPasteboard.general.string = record.workshopID; store.operationMessage = "Workshop ID copied."; contextHistory = nil },
-                               retry: { store.retry(record); selectedTab = 0; contextHistory = nil },
-                               close: { contextHistory = nil })
-                .padding(28).transition(.scale(scale: 0.96).combined(with: .opacity)).zIndex(9)
-        }
-        if confirmClearHistory {
-            Color.black.opacity(0.38).ignoresSafeArea().contentShape(Rectangle())
-                .onTapGesture { confirmClearHistory = false }.zIndex(12)
-            ConfirmPopup(heading: "Clear download history?",
-                         message: "This removes the list of attempts. Your downloaded mods are not affected.",
-                         actionTitle: "Clear",
-                         confirm: { store.clearHistory(); confirmClearHistory = false },
-                         cancel: { confirmClearHistory = false })
-                .padding(30).zIndex(13)
-        }
-        if store.showDeleteConfirmation, let item = store.pendingDelete {
-            Color.black.opacity(0.38).ignoresSafeArea().contentShape(Rectangle())
-                .onTapGesture { store.showDeleteConfirmation = false }.zIndex(10)
-            DeleteConfirmationPopup(title: item.displayTitle,
-                                    confirm: { store.remove(item); store.showDeleteConfirmation = false },
-                                    cancel: { store.showDeleteConfirmation = false })
-                .padding(30).zIndex(11)
-        }
-        if confirmBulkDelete {
-            Color.black.opacity(0.38).ignoresSafeArea().contentShape(Rectangle())
-                .onTapGesture { confirmBulkDelete = false }.zIndex(14)
-            ConfirmPopup(heading: "Delete \(selection.count) mod\(selection.count == 1 ? "" : "s")?",
-                         message: "Their downloaded files will be removed from this device. You can download them again later.",
-                         actionTitle: "Delete",
-                         confirm: {
-                             deleteSelected()
-                         },
-                         cancel: { confirmBulkDelete = false })
-                .padding(30).zIndex(15)
-        }
-        if let request = confirmReorder {
-            Color.black.opacity(0.38).ignoresSafeArea().contentShape(Rectangle())
-                .onTapGesture { confirmReorder = nil }.zIndex(30)
-            ConfirmPopup(heading: "Start this mod now?",
-                         message: "\(request.title) will jump the queue and the download running now will stop. It stays in the queue for later.",
-                         actionTitle: "Download now",
-                         tint: .accentColor,
-                         confirm: {
-                             confirmReorder = nil
-                             store.startMovedMod(request.id)
-                         },
-                         cancel: { confirmReorder = nil })
-                .padding(30).zIndex(31)
-        }
-        if let prompt = exportPrompt {
-            Color.black.opacity(0.38).ignoresSafeArea().contentShape(Rectangle())
-                .onTapGesture { exportPrompt = nil }.zIndex(14)
-            ConfirmPopup(heading: "Some mods can't be exported",
-                         message: "\(prompt.missing) of \(prompt.total) mod\(prompt.total == 1 ? "" : "s") have files outside ModShelf, so they'd be left out. Export the \(prompt.ids.count) still here?",
-                         actionTitle: prompt.ids.count == 1 ? "Export 1 mod" : "Export \(prompt.ids.count) mods",
-                         tint: .accentColor,
-                         confirm: {
-                             store.export(prompt.ids)
-                             exportPrompt = nil
-                         },
-                         cancel: { exportPrompt = nil })
-                .padding(30).zIndex(15)
-        }
-        if let viewer = mediaViewer {
-            ExpandedMediaView(media: viewer.media, startIndex: viewer.index,
-                              onIndexChange: { mediaIndex = $0 }) {
-                withAnimation(.easeOut(duration: 0.18)) { mediaViewer = nil }
+    /// Detail popups and menus. Each group is its own ZStack, so no single expression has to carry
+    /// every overlay the app can show at once.
+    @ViewBuilder private var overlayDetails: some View {
+        ZStack {
+            if let item = popupItem {
+                Rectangle().fill(.ultraThinMaterial)
+                    .overlay(Color.black.opacity(0.45))
+                    .ignoresSafeArea().contentShape(Rectangle())
+                    .onTapGesture { withAnimation(.easeOut(duration: 0.16)) { popupItem = nil } }
+                ItemDetailPopup(item: currentItem(item), store: store, showIDs: showIDs,
+                                onClose: { withAnimation(.easeOut(duration: 0.16)) { popupItem = nil } },
+                                onOpenWorkshop: { openWorkshop(item.id); popupItem = nil },
+                                onUpdate: {
+                                    store.update(item)
+                                    selectedTab = 0
+                                    withAnimation(.easeOut(duration: 0.16)) { popupItem = nil }
+                                },
+                                onDelete: { store.requestDelete(item); popupItem = nil })
+                    .padding(20).transition(.scale(scale: 0.97).combined(with: .opacity)).zIndex(5)
             }
-            .transition(.opacity)
-            .zIndex(20)
+            if let item = contextItem {
+                Color.black.opacity(0.28).ignoresSafeArea().contentShape(Rectangle())
+                    .onTapGesture { withAnimation(.easeOut(duration: 0.14)) { contextItem = nil } }.zIndex(6)
+                ItemActionPopup(item: currentItem(item),
+                                openWorkshop: { openWorkshop(item.id); contextItem = nil },
+                                copyID: { UIPasteboard.general.string = item.id; store.operationMessage = "Workshop ID copied."; contextItem = nil },
+                                share: { store.shareURL = URL(string: "https://steamcommunity.com/sharedfiles/filedetails/?id=\(item.id)"); contextItem = nil },
+                                reveal: { store.revealInFiles(item); contextItem = nil },
+                                favourite: { store.toggleFavourite(item); contextItem = nil },
+                                updateNow: { store.update(item); selectedTab = 0; contextItem = nil },
+                                checkUpdates: { store.checkUpdates(item); contextItem = nil },
+                                verify: { store.verify(item); contextItem = nil },
+                                export: { store.export(item); contextItem = nil },
+                                delete: { store.requestDelete(item); contextItem = nil })
+                    .padding(28).transition(.scale(scale: 0.96).combined(with: .opacity)).zIndex(7)
+            }
+            if let record = contextHistory {
+                Color.black.opacity(0.28).ignoresSafeArea().contentShape(Rectangle())
+                    .onTapGesture { withAnimation(.easeOut(duration: 0.14)) { contextHistory = nil } }.zIndex(8)
+                HistoryActionPopup(record: record,
+                                   openWorkshop: { openWorkshop(record.workshopID); contextHistory = nil },
+                                   copyID: { UIPasteboard.general.string = record.workshopID; store.operationMessage = "Workshop ID copied."; contextHistory = nil },
+                                   retry: { store.retry(record); selectedTab = 0; contextHistory = nil },
+                                   close: { contextHistory = nil })
+                    .padding(28).transition(.scale(scale: 0.96).combined(with: .opacity)).zIndex(9)
+            }
         }
-        if let id = pendingAutoDownload {
-            Color.black.opacity(0.34).ignoresSafeArea().contentShape(Rectangle())
-                .onTapGesture { pendingAutoDownload = nil }.zIndex(23)
-            ConfirmPopup(heading: "Download this mod?",
-                         message: "Start downloading \(downloadName(for: id)) now?",
-                         actionTitle: "Download",
-                         tint: .accentColor,
-                         confirm: {
-                             pendingAutoDownload = nil
-                             store.download(id)
-                         },
-                         cancel: { pendingAutoDownload = nil })
-                .padding(30).zIndex(24)
+    }
+
+    @ViewBuilder private var overlayDialogs: some View {
+        ZStack {
+            if confirmClearHistory {
+                Color.black.opacity(0.38).ignoresSafeArea().contentShape(Rectangle())
+                    .onTapGesture { confirmClearHistory = false }.zIndex(12)
+                ConfirmPopup(heading: "Clear download history?",
+                             message: "This removes the list of attempts. Your downloaded mods are not affected.",
+                             actionTitle: "Clear",
+                             confirm: { store.clearHistory(); confirmClearHistory = false },
+                             cancel: { confirmClearHistory = false })
+                    .padding(30).zIndex(13)
+            }
+            if store.showDeleteConfirmation, let item = store.pendingDelete {
+                Color.black.opacity(0.38).ignoresSafeArea().contentShape(Rectangle())
+                    .onTapGesture { store.showDeleteConfirmation = false }.zIndex(10)
+                DeleteConfirmationPopup(title: item.displayTitle,
+                                        confirm: { store.remove(item); store.showDeleteConfirmation = false },
+                                        cancel: { store.showDeleteConfirmation = false })
+                    .padding(30).zIndex(11)
+            }
+            if confirmBulkDelete {
+                Color.black.opacity(0.38).ignoresSafeArea().contentShape(Rectangle())
+                    .onTapGesture { confirmBulkDelete = false }.zIndex(14)
+                ConfirmPopup(heading: "Delete \(selection.count) mod\(selection.count == 1 ? "" : "s")?",
+                             message: "Their downloaded files will be removed from this device. You can download them again later.",
+                             actionTitle: "Delete",
+                             confirm: {
+                                 deleteSelected()
+                             },
+                             cancel: { confirmBulkDelete = false })
+                    .padding(30).zIndex(15)
+            }
+            if let request = confirmReorder {
+                Color.black.opacity(0.38).ignoresSafeArea().contentShape(Rectangle())
+                    .onTapGesture { confirmReorder = nil }.zIndex(30)
+                ConfirmPopup(heading: "Start this mod now?",
+                             message: "\(request.title) will jump the queue and the download running now will stop. It stays in the queue for later.",
+                             actionTitle: "Download now",
+                             tint: .accentColor,
+                             confirm: {
+                                 confirmReorder = nil
+                                 store.startMovedMod(request.id)
+                             },
+                             cancel: { confirmReorder = nil })
+                    .padding(30).zIndex(31)
+            }
+            if let prompt = exportPrompt {
+                Color.black.opacity(0.38).ignoresSafeArea().contentShape(Rectangle())
+                    .onTapGesture { exportPrompt = nil }.zIndex(14)
+                ConfirmPopup(heading: "Some mods can't be exported",
+                             message: "\(prompt.missing) of \(prompt.total) mod\(prompt.total == 1 ? "" : "s") have files outside ModShelf, so they'd be left out. Export the \(prompt.ids.count) still here?",
+                             actionTitle: prompt.ids.count == 1 ? "Export 1 mod" : "Export \(prompt.ids.count) mods",
+                             tint: .accentColor,
+                             confirm: {
+                                 store.export(prompt.ids)
+                                 exportPrompt = nil
+                             },
+                             cancel: { exportPrompt = nil })
+                    .padding(30).zIndex(15)
+            }
+            if let id = pendingAutoDownload {
+                Color.black.opacity(0.34).ignoresSafeArea().contentShape(Rectangle())
+                    .onTapGesture { pendingAutoDownload = nil }.zIndex(23)
+                ConfirmPopup(heading: "Download this mod?",
+                             message: "Start downloading \(downloadName(for: id)) now?",
+                             actionTitle: "Download",
+                             tint: .accentColor,
+                             confirm: {
+                                 pendingAutoDownload = nil
+                                 store.download(id)
+                             },
+                             cancel: { pendingAutoDownload = nil })
+                    .padding(30).zIndex(24)
+            }
+        }
+    }
+
+    @ViewBuilder private var overlayMedia: some View {
+        ZStack {
+            if let viewer = mediaViewer {
+                ExpandedMediaView(media: viewer.media, startIndex: viewer.index,
+                                  onIndexChange: { mediaIndex = $0 }) {
+                    withAnimation(.easeOut(duration: 0.18)) { mediaViewer = nil }
+                }
+                .transition(.opacity)
+                .zIndex(20)
+            }
         }
     }
 
@@ -4231,7 +4276,7 @@ struct ContentView: View {
         }
         .frame(width: 26, height: 26)
         .animation(.easeOut(duration: 0.3), value: store.ringProgress)
-        .accessibilityLabel(store.ringDone ? "Download finished" : "Downloading \(Int(store.ringProgress * 100)) percent")
+        .accessibilityLabel(store.ringDone ? "Download finished" : "Downloading \(percentText(store.ringProgress))")
     }
 
     /// The artwork lives in the asset catalogue: a white one for the dark appearance, a black one
@@ -4354,6 +4399,12 @@ struct ContentView: View {
         return "Status"
     }
 
+    /// A percent that can never trap: a missing or infinite figure reads as 0%.
+    private func percentText(_ fraction: Double) -> String {
+        guard fraction.isFinite else { return "0%" }
+        return "\(Int(max(0, min(1, fraction)) * 100))%"
+    }
+
     private func progressBar(_ fraction: Double) -> some View {
         let clamped = min(1, max(0, fraction))
         return GeometryReader { geo in
@@ -4381,7 +4432,7 @@ struct ContentView: View {
                     Spacer(minLength: 6)
                     Text(store.isPreparingDownload
                          ? "Initialising…"
-                         : (store.isInstalling ? "Installing…" : "\(Int(store.progress * 100))%"))
+                         : (store.isInstalling ? "Installing…" : percentText(store.progress)))
                         .font(.footnote.monospacedDigit().weight(.semibold))
                         .foregroundStyle(Color.accentColor)
                     Button { store.cancel() } label: {
@@ -4401,22 +4452,22 @@ struct ContentView: View {
 
     private func handleScroll(_ y: CGFloat) {
         guard tabStyle == "pill" else { return }
-        let delta = y - lastScrollY
-        lastScrollY = y
+        let delta = y - scrollTracker.lastY
+        scrollTracker.lastY = y
         if y > -8 {
             // At the top the bar always opens.
             if tabCollapsed { tabCollapsed = false }
-            upwardRun = 0
+            scrollTracker.upRun = 0
             return
         }
         if delta < 0 {
             // Scrolling down: fold once past the first part of the page, and stay folded.
-            upwardRun = 0
+            scrollTracker.upRun = 0
             if y < -40 && !tabCollapsed { tabCollapsed = true }
         } else if delta > 0 {
             // Scrolling up: only open after a real upward run, so small bounces don't reopen it.
-            upwardRun += delta
-            if upwardRun > 40 && tabCollapsed { tabCollapsed = false; upwardRun = 0 }
+            scrollTracker.upRun += delta
+            if scrollTracker.upRun > 40 && tabCollapsed { tabCollapsed = false; scrollTracker.upRun = 0 }
         }
     }
 
@@ -4608,7 +4659,7 @@ struct ContentView: View {
                 .font(.system(size: 14, weight: .semibold))
                 .lineLimit(1)
             Spacer(minLength: 8)
-            Text("\(Int(queueOverallProgress * 100))%")
+            Text(percentText(queueOverallProgress))
                 .font(.system(size: 12, weight: .semibold).monospacedDigit())
                 .foregroundStyle(Color.accentColor)
                 .frame(width: 46)
@@ -4862,7 +4913,7 @@ struct ContentView: View {
     @ViewBuilder private func queuePercent(_ row: DownloadQueueRow) -> some View {
         if row.state == .done
             || (row.state == .downloading && !store.isPreparingDownload) {
-            Text("\(Int(row.progress * 100))%")
+            Text(percentText(row.progress))
                 .font(.system(size: 11, weight: .semibold).monospacedDigit())
                 .foregroundStyle(queueTint(row))
         } else {
@@ -4965,7 +5016,7 @@ struct ContentView: View {
             HStack(spacing: 10) {
                 glanceStat("\(store.library.count)", "mods")
                 glanceStat("\(gameCount)", gameCount == 1 ? "game" : "games")
-                glanceStat("\(store.library.filter { $0.updateAvailable }.count)", "updates")
+                glanceStat("\(updateCount)", "updates")
             }
             VStack(alignment: .leading, spacing: 6) {
                 GeometryReader { geo in
@@ -4990,10 +5041,6 @@ struct ContentView: View {
             Text(label).font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var gameCount: Int {
-        Set(store.library.compactMap { $0.appID }).count
     }
 
     private var freeSpaceBytes: Int64 {
