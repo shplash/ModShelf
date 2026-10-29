@@ -4451,8 +4451,6 @@ struct ContentView: View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
                 brandLogo
-                    .contentShape(Rectangle())
-                    .onTapGesture { logoTapped() }
                 if devUnlocked {
                     Button { showDeveloperMenu = true } label: {
                         Image(systemName: "wrench.and.screwdriver")
@@ -4857,8 +4855,8 @@ struct ContentView: View {
         if store.queueRows.contains(where: { $0.state == .failed }) { failedCard }
     }
 
-    /// Taps on the logo are counted silently; nothing in the app suggests they lead anywhere.
-    private func logoTapped() {
+    /// Taps on the credits row are counted silently; nothing in the app suggests they lead anywhere.
+    private func creditTapped() {
         let now = Date()
         if now.timeIntervalSince(lastLogoTap) > 1.5 { logoTapCount = 0 }
         lastLogoTap = now
@@ -6381,6 +6379,8 @@ struct ContentView: View {
         AnyView(
             settingsGroup("Credits", isOpen: $creditsOpen) {
                 creditLicenseRow("ModShelf", "Created by Splash (@shplash)", license: "GPL-3.0 License")
+                    .contentShape(Rectangle())
+                    .onTapGesture { creditTapped() }
                 divider
                 creditLicenseRow("go-steam", "Engine by Alexander Birkner (@BirknerAlex)", license: "MIT License")
                 divider
@@ -8478,7 +8478,7 @@ struct DeveloperMenuView: View {
                         }
                     ))
                 } footer: {
-                    Text("Turning this off hides the wrench and stops the runtime log. Tap the logo twenty times to bring it back.")
+                    Text("Turning this off hides the wrench and stops the runtime log. Tap the ModShelf credit twenty times to bring it back.")
                 }
 
                 if let report {
