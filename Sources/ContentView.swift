@@ -1499,10 +1499,14 @@ final class WorkshopStore: ObservableObject {
                 log("started queued \(id) as item \(queueStep) of \(max(queueTotal, queueRows.count))")
                 return
             }
-            // Nothing could start (signed out, no space, Wi-Fi only), so the rest cannot run either.
-            queue.removeAll()
-            finishQueue()
-            return
+            if !isAuthenticated || engine == nil || blockedByWifiOnly {
+                // Nothing can run at all, so the rest of the queue waits with it.
+                queue.removeAll()
+                finishQueue()
+                return
+            }
+            // This one couldn't start (no space, or the engine refused it), so try the next.
+            continue
         }
         finishQueue()
     }
@@ -1860,6 +1864,11 @@ final class WorkshopStore: ObservableObject {
             try? FileManager.default.removeItem(at: staging)
         }
         if success {
+            // A completion that arrived while a pause was pending still finishes, not pauses.
+            isPaused = false
+            resumePending = false
+            pausedAt = nil
+            pausedStaging = nil
             updateHistory(id: activeID, result: "Downloaded", error: nil)
             refreshLibraryBytes()
             resolveGameNames()
@@ -1880,6 +1889,10 @@ final class WorkshopStore: ObservableObject {
             lastOutcome = "Download completed"
             Haptics.success()
         } else {
+            isPaused = false
+            resumePending = false
+            pausedAt = nil
+            pausedStaging = nil
             let reason = cancelled
                 ? "The download was cancelled."
                 : ErrorText.friendly(!error.isEmpty ? error : (!failureText.isEmpty ? failureText : "The download didn't finish."),
