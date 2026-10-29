@@ -3217,10 +3217,24 @@ final class WorkshopStore: ObservableObject {
             try? await Task.sleep(nanoseconds: 250_000_000)
             self.repairFolders()
             self.refreshMovedFlags()
+            self.settleInterruptedHistory()
             if UserDefaults.standard.object(forKey: "options.autoCheck") as? Bool ?? true {
                 self.checkAllUpdates(silent: true)
             }
         }
+    }
+
+    /// A transfer cannot outlive the app, so anything still marked as running was stopped when the
+    /// app closed. Its half-written files stay in the staging folder, so a retry carries on from
+    /// them; the history says what really happened.
+    private func settleInterruptedHistory() {
+        var changed = false
+        for i in history.indices where history[i].result == "Downloading" {
+            history[i].result = "Stopped"
+            history[i].error = "The app closed before this finished. Retrying carries on from the files already here."
+            changed = true
+        }
+        if changed { saveHistory() }
     }
 
     /// Files that were moved into a game are simply not here any more, which is normal use: that
