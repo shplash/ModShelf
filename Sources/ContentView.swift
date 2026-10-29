@@ -311,6 +311,12 @@ enum ErrorText {
             return "There isn't quite enough free space for this one."
         }
         if r.contains("cancel") { return "That download was cancelled." }
+        // Anything left is engine detail nobody can act on; say the plain version instead.
+        if text.count > 100 || text.contains("\n") || r.contains("modshelf ")
+            || r.contains("steamengine") || r.contains("goroutine") || r.contains("panic")
+            || r.contains("context") || r.contains("0x") {
+            return "That download didn't finish. Try it again."
+        }
         return text
     }
 }
@@ -1277,7 +1283,6 @@ final class WorkshopStore: ObservableObject {
 
 
     func download(_ raw: String? = nil, meta override: WorkshopMetadata? = nil) {
-        errorMessage = ""
         guard devTask == nil else { errorMessage = "A simulated run is on screen. Let it finish first."; return }
         guard isAuthenticated else { operationMessage = "Sign in to Steam and this download can start."; showLogin = true; return }
         guard engine != nil else {
@@ -2126,6 +2131,8 @@ final class WorkshopStore: ObservableObject {
 
     /// Stops the batch, or just the transfer that is running when the rest of the queue should stay.
     func cancel(keepingQueue: Bool = false) {
+        let wasPaused = isPaused
+        let wasRunning = isDownloading
         isPaused = false
         resumePending = false
         pausedAt = nil
@@ -2156,6 +2163,27 @@ final class WorkshopStore: ObservableObject {
         }
         engine?.cancelDownload()
         isInstalling = false
+        if wasPaused || !wasRunning {
+            // A paused transfer already stopped in the engine, so no cancellation call is coming.
+            isBusy = false
+            isDownloading = false
+            isDownloadStalled = false
+            stopPolling()
+            activeStaging = nil
+            activeID = ""
+            if keepingQueue {
+                queueRows.removeAll { $0.id == activeID }
+                queueTotal = queueRows.count
+                queueStep = min(queueStep, max(queueTotal, 1))
+                if !queue.isEmpty {
+                    startNextInQueue()
+                    return
+                }
+            }
+            status = "Ready"
+            if !keepingQueue { operationMessage = "Download cancelled." }
+            return
+        }
         status = "Cancelling download…"
     }
 
