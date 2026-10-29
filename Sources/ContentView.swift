@@ -760,6 +760,9 @@ final class WorkshopStore: ObservableObject {
     @Published var lastOutcome = ""
     @Published var browserURL: URL?
     @Published var operationMessage = ""
+    /// The two long library jobs keep their own line, so both can run and be read at once.
+    @Published var updateCheckStatus = ""
+    @Published var verifyStatus = ""
     @Published var isCheckingUpdates = false
     @Published var isVerifyingAll = false
     @Published var libraryStorageBytes: Int64 = 0
@@ -3019,7 +3022,7 @@ final class WorkshopStore: ObservableObject {
             var changed: [String] = []
             for (index, entry) in entries.enumerated() {
                 guard entry.inside else { moved += 1; continue }
-                operationMessage = "Validating \(index + 1) of \(entries.count)…"
+                verifyStatus = "Validating \(index + 1) of \(entries.count)…"
                 switch await checkFiles(id: entry.id, folder: entry.folder) {
                 case .ok: ok += 1
                 case .moved: moved += 1
@@ -3036,8 +3039,8 @@ final class WorkshopStore: ObservableObject {
             }
             if unknown > 0 { parts.append(unknown == 1 ? "1 couldn't be compared" : "\(unknown) couldn't be compared") }
             if moved > 0 { parts.append(moved == 1 ? "1 moved out of ModShelf" : "\(moved) moved out of ModShelf") }
-            operationMessage = parts.isEmpty ? "Nothing to validate." : parts.joined(separator: ", ") + "."
-            log("verify all: \(operationMessage.replacingOccurrences(of: "\n", with: " "))")
+            verifyStatus = parts.isEmpty ? "Nothing to validate." : parts.joined(separator: ", ") + "."
+            log("verify all: \(verifyStatus.replacingOccurrences(of: "\n", with: " "))")
         }
     }
 
@@ -3116,7 +3119,7 @@ final class WorkshopStore: ObservableObject {
         Task { @MainActor in
             var checked = 0, updated = 0, failed = 0, unverified = 0
             for item in entries {
-                if !silent { operationMessage = "Checking \(checked + failed + 1) of \(entries.count)…" }
+                if !silent { updateCheckStatus = "Checking \(checked + failed + 1) of \(entries.count)…" }
                 if await refreshMetadata(for: item, full: false) {
                     checked += 1
                     if let current = library.first(where: { $0.id == item.id }) {
@@ -3128,15 +3131,15 @@ final class WorkshopStore: ObservableObject {
             }
             isCheckingUpdates = false
             if silent {
-                operationMessage = updated > 0 ? "\(updated) mod update\(updated == 1 ? "" : "s") available." : ""
+                updateCheckStatus = updated > 0 ? "\(updated) mod update\(updated == 1 ? "" : "s") available." : ""
             } else if checked == 0 {
-                operationMessage = "Steam didn't answer just now."
+                updateCheckStatus = "Steam didn't answer just now."
             } else {
                 var parts: [String] = [updated > 0 ? "\(updated) update\(updated == 1 ? "" : "s") available" : "Everything is up to date"]
                 if failed > 0 { parts.append("\(failed) couldn't be checked") }
-                operationMessage = parts.joined(separator: ", ") + "."
-                if unverified > 0 { operationMessage += "\nUnverified mods checked: \(unverified)" }
-                log("update check: \(operationMessage.replacingOccurrences(of: "\n", with: " "))")
+                updateCheckStatus = parts.joined(separator: ", ") + "."
+                if unverified > 0 { updateCheckStatus += "\nUnverified mods checked: \(unverified)" }
+                log("update check: \(updateCheckStatus.replacingOccurrences(of: "\n", with: " "))")
             }
         }
     }
@@ -4150,6 +4153,20 @@ struct ContentView: View {
                     if store.operationMessage == message, !store.isExporting { withAnimation { store.operationMessage = "" } }
                 }
             }
+            .onChange(of: store.updateCheckStatus) { message in
+                guard !message.isEmpty else { return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 6) {
+                    if store.updateCheckStatus == message, !store.isCheckingUpdates {
+                        withAnimation { store.updateCheckStatus = "" }
+                    }
+                }
+            }
+            .onChange(of: store.verifyStatus) { message in
+                guard !message.isEmpty else { return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 6) {
+                    if store.verifyStatus == message, !store.isVerifyingAll { withAnimation { store.verifyStatus = "" } }
+                }
+            }
             .onChange(of: store.library.count) { count in
                 if let g = selectedGame, !installedGameOptions.contains(where: { $0.id == g }) { selectedGame = nil }
                 if let t = selectedTag, !installedTagOptions.contains(t) { selectedTag = nil }
@@ -4536,27 +4553,41 @@ struct ContentView: View {
     }
 
     @ViewBuilder private var errorBanner: some View {
-        if (!store.errorMessage.isEmpty && !store.showLogin) || !store.operationMessage.isEmpty {
-            let isError = !store.errorMessage.isEmpty && !store.showLogin
-            let text = isError ? friendlyError(store.errorMessage) : store.operationMessage
-            let tint: Color = isError ? .orange : Color.accentColor
-            HStack(alignment: .center, spacing: 10) {
+        let isError = !store.errorMessage.isEmpty && !store.showLogin
+        let verifyLine = store.verifyStatus
+        let updateLine = store.updateCheckStatus
+        let note = store.operationMessage
+        if isError || !verifyLine.isEmpty || !updateLine.isEmpty || !note.isEmpty {
+            HStack(alignment: .top, spacing: 10) {
                 if store.isExporting || store.isCheckingUpdates || store.isVerifyingAll {
                     ProgressView().scaleEffect(0.7).frame(width: 16, height: 18)
+                        .padding(.top, 1)
                 } else {
                     Image(systemName: isError ? "exclamationmark.circle" : "info.circle")
                         .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(tint)
+                        .foregroundStyle(isError ? Color.orange : Color.accentColor)
+                        .padding(.top, 1)
                 }
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(isError ? "That didn't finish" : bannerTitle)
-                        .font(.system(size: 14, weight: .semibold)).foregroundStyle(.primary)
-                    Text(text).font(.system(size: 13)).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: .leading, spacing: 8) {
+                    if isError {
+                        bannerLine("That didn't finish", friendlyError(store.errorMessage), tint: .orange)
+                    }
+                    if !verifyLine.isEmpty {
+                        bannerLine("Validating files", verifyLine, tint: .accentColor)
+                    }
+                    if !updateLine.isEmpty {
+                        bannerLine("Checking for updates", updateLine, tint: .accentColor)
+                    }
+                    if !note.isEmpty {
+                        bannerLine(bannerTitle, note, tint: .accentColor)
+                    }
                 }
                 Spacer(minLength: 0)
                 Button {
-                    if isError { store.errorMessage = "" } else { store.operationMessage = "" }
+                    store.errorMessage = ""
+                    store.operationMessage = ""
+                    store.verifyStatus = ""
+                    store.updateCheckStatus = ""
                 } label: {
                     Image(systemName: "xmark").font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(.tertiary)
@@ -4573,6 +4604,15 @@ struct ContentView: View {
                 .padding(.top, 8)
                 .padding(.bottom, 4)
         }
+    }
+
+    private func bannerLine(_ title: String, _ text: String, tint: Color) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title).font(.system(size: 13, weight: .semibold)).foregroundStyle(tint)
+            Text(text).font(.system(size: 13)).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     /// Turns raw engine text into one short line a person can act on.
