@@ -1,12 +1,11 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //
 // Copyright (C) 2026 shplash
 //
 // ModShelf is free software: you can redistribute it and/or modify it under the terms of the GNU
-// General Public License as published by the Free Software Foundation, either version 3 of the
-// License, or (at your option) any later version. It is distributed in the hope that it will be
-// useful, but without any warranty; without even the implied warranty of merchantability or fitness
-// for a particular purpose. See the GNU General Public License in LICENSE for more details.
+// General Public License, version 3. It is distributed in the hope that it will be useful, but
+// without any warranty; without even the implied warranty of merchantability or fitness for a
+// particular purpose. See the GNU General Public License in LICENSE for more details.
 
 
 import SwiftUI
@@ -6340,7 +6339,7 @@ struct ContentView: View {
     private var creditsSettings: AnyView {
         AnyView(
             settingsGroup("Credits") {
-                creditLicenseRow("ModShelf", "Created by Splash (@shplash)", license: "GPL-3.0-or-later")
+                creditLicenseRow("ModShelf", "Created by Splash (@shplash)", license: "GPL-3.0")
                 divider
                 creditLicenseRow("go-steam", "Engine by Alexander Birkner (@BirknerAlex)", license: "MIT License")
                 divider

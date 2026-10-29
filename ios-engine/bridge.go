@@ -1,10 +1,9 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //
 // Copyright (C) 2026 shplash
 //
 // Part of ModShelf. It is free software: you can redistribute it and/or modify it under the terms of
-// the GNU General Public License as published by the Free Software Foundation, either version 3 of
-// the License, or (at your option) any later version. See the GNU General Public License in LICENSE.
+// the GNU General Public License, version 3. See the GNU General Public License in LICENSE.
 
 
 package steamengine
