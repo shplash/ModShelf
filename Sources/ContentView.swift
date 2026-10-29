@@ -748,6 +748,9 @@ final class WorkshopStore: ObservableObject {
     private var keepActiveOnCancel = false
     /// A cancellation that should leave the rest of the batch in the queue.
     private var keepQueueOnCancel = false
+    /// The mod that was running when the app left the screen, so a transfer iOS stopped can be picked
+    /// up again rather than reported as failed.
+    private var suspendedDownloadID: String?
     /// The small ring beside the sign-in pill: shown while a transfer runs and for ten seconds after
     /// it finishes, when its arrow turns blue.
     @Published var ringVisible = false
@@ -1865,6 +1868,10 @@ final class WorkshopStore: ObservableObject {
             if !cancelled { ringStopped() }
             log("failed \(activeID): \(reason)")
             if !error.isEmpty { log("engine said: \(error)") }
+            // A transfer the system stopped because the app was away is not a failure: it is picked
+            // up again straight away, from the files it already wrote.
+            let interrupted = suspendedDownloadID == activeID
+            if interrupted { suspendedDownloadID = nil }
             if cancelled {
                 if keepQueueOnCancel {
                     keepQueueOnCancel = false
@@ -1876,6 +1883,16 @@ final class WorkshopStore: ObservableObject {
                 } else {
                     queue.removeAll()
                 }
+            } else if interrupted {
+                updateRow(activeID, state: .waiting)
+                history.removeAll { $0.workshopID == activeID && $0.result == "Downloading" }
+                saveHistory()
+                log("the app was away; carrying on with \(activeID)")
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 600_000_000)
+                    self.download(activeID, meta: meta)
+                }
+                return
             } else {
                 queueFailed += 1
                 updateRow(activeID, state: .failed)
@@ -2072,6 +2089,26 @@ final class WorkshopStore: ObservableObject {
     }
 
     /// Stops the batch, or just the transfer that is running when the rest of the queue should stay.
+    /// The app is leaving the screen: remember what was running, because iOS will stop it.
+    func appMovedToBackground() {
+        suspendedDownloadID = isDownloading ? activeID : nil
+    }
+
+    /// The app is back. If the transfer died while it was away, carry on with it instead of leaving
+    /// it as a failure: its half-written files are still in the staging folder.
+    func appReturnedToForeground() {
+        guard let id = suspendedDownloadID else { return }
+        // Still running: there is nothing to put right, and the note stays in place in case the
+        // system kills the transfer a moment later.
+        if isDownloading || isPaused || isBusy { return }
+        suspendedDownloadID = nil
+        guard lastOutcome == "Download failed" else { return }
+        guard let meta = pendingMeta[id] ?? metaFor(id) ?? (activeMeta?.id == id ? activeMeta : nil) else { return }
+        operationMessage = "Carrying on with \(meta.title)."
+        log("resuming \(id) after the app came back")
+        download(id, meta: meta)
+    }
+
     func cancel(keepingQueue: Bool = false) {
         isPaused = false
         resumePending = false
@@ -2092,6 +2129,13 @@ final class WorkshopStore: ObservableObject {
             return
         }
         if !keepingQueue { queue.removeAll() }
+        if !keepingQueue {
+            // The tab goes back to its default view: no Workshop page is left open behind a queue
+            // that no longer exists.
+            preview = nil
+            input = ""
+            suspendedDownloadID = nil
+        }
         engine?.cancelDownload()
         isInstalling = false
         status = "Cancelling download…"
@@ -3872,6 +3916,7 @@ struct ContentView: View {
     @State private var logoTapCount = 0
     @State private var lastLogoTap = Date.distantPast
     @State private var dragRowID: String?
+    @State private var dragRowStart = 0
     @State private var dragOffsetY: CGFloat = 0
     @State private var dragTarget: Int?
     @State private var confirmReorder: ReorderRequest?
@@ -4051,9 +4096,14 @@ struct ContentView: View {
             .onChange(of: store.shareURL) { showShare = $0 != nil }
             .onChange(of: confirmDelete) { UserDefaults.standard.set($0, forKey: "options.confirmDelete") }
             .onChange(of: scenePhase) { phase in
-                // Coming back from another app restarts the scrolling names, like arriving on the tab does.
-                if phase == .active, selectedTab == 2 { marqueeToken += 1 }
-                if phase == .active { refreshFreeSpace() }
+                if phase == .active {
+                    // Coming back from another app restarts the scrolling names, like arriving on the tab does.
+                    if selectedTab == 2 { marqueeToken += 1 }
+                    refreshFreeSpace()
+                    store.appReturnedToForeground()
+                } else {
+                    store.appMovedToBackground()
+                }
             }
             .onChange(of: store.errorMessage) { message in
                 guard !message.isEmpty, !store.showLogin else { return }
@@ -4695,7 +4745,10 @@ struct ContentView: View {
                                 title: store.isPaused ? "Resume" : "Pause",
                                 action: { store.togglePause() })
             downloadControlTile(symbol: "xmark", title: "Cancel",
-                                action: { store.cancel() })
+                                action: {
+                                    if store.queueRows.count > 1 { confirmCancelQueue = true }
+                                    else { store.cancel() }
+                                })
         }
     }
 
@@ -4777,14 +4830,6 @@ struct ContentView: View {
                 .frame(width: 46)
                 .padding(.vertical, 3)
                 .background(Capsule().fill(Color.primary.opacity(0.06)))
-            Button { Haptics.tap(); confirmCancelQueue = true } label: {
-                Image(systemName: "xmark").font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 26, height: 26)
-                    .background(Circle().fill(Color.primary.opacity(0.07)))
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Cancel all downloads")
         }
         .padding(.horizontal, 14).padding(.top, 12).padding(.bottom, 8)
     }
@@ -4793,11 +4838,16 @@ struct ContentView: View {
         let failed = store.queueRows.filter { $0.state == .failed }
         return VStack(spacing: 0) {
             ForEach(Array(active.enumerated()), id: \.element.id) { index, row in
-                if index > 0, !(dragRowID != nil && dragTarget == index) {
-                    Divider().padding(.horizontal, 14)
-                }
-                if dragRowID != nil, dragTarget == index { dropLine }
+                if index > 0 { Divider().padding(.horizontal, 14) }
+                // The line sits where the row will land: above the row it is moving towards, and
+                // below the one it is moving past.
+                if dragRowID != nil, let target = dragTarget,
+                   target < dragRowStart, index == target { dropLine }
                 queueRow(row, index: index, count: active.count)
+                    .offset(y: queueRowShift(index))
+                    .animation(.easeOut(duration: 0.18), value: dragTarget)
+                if dragRowID != nil, let target = dragTarget,
+                   target > dragRowStart, index == target { dropLine }
             }
             if !failed.isEmpty {
                 if !active.isEmpty { Divider().padding(.horizontal, 14) }
@@ -4825,6 +4875,16 @@ struct ContentView: View {
         dragRowID = nil
         dragOffsetY = 0
         dragTarget = nil
+        dragRowStart = 0
+    }
+
+    /// How far a row slides while another is being dragged, so it moves out of the way rather than
+    /// being covered by the row picked up.
+    private func queueRowShift(_ index: Int) -> CGFloat {
+        guard dragRowID != nil, let target = dragTarget, index != dragRowStart else { return 0 }
+        if target > dragRowStart, index > dragRowStart, index <= target { return -queueRowSpan }
+        if target < dragRowStart, index >= target, index < dragRowStart { return queueRowSpan }
+        return 0
     }
 
     private var queueHeadline: String {
@@ -4974,6 +5034,7 @@ struct ContentView: View {
                 if dragRowID != row.id {
                     dragRowID = row.id
                     dragOffsetY = 0
+                    dragRowStart = index
                     dragTarget = index
                     Haptics.medium()
                 }
@@ -6111,9 +6172,10 @@ struct ContentView: View {
                 toggleRow("Haptic feedback", symbol: "hand.tap", isOn: $haptics)
                 divider
                 toggleRow("One speed for all scrolling text", symbol: "textformat", isOn: $marqueeGlobal)
-                divider
-                marqueeSpeedRow("Scrolling text speed", value: $marqueeSpeed)
-                if !marqueeGlobal {
+                if marqueeGlobal {
+                    divider
+                    marqueeSpeedRow("Scrolling text speed", value: $marqueeSpeed)
+                } else {
                     divider
                     marqueeSpeedRow("Library scrolling speed", value: $marqueeSpeedLibrary)
                     divider
