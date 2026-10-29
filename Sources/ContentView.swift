@@ -23,8 +23,7 @@ struct ModShelfApp: App {
 }
 
 let modShelfInfoFileName = "ModShelf Information.txt"
-/// A second record, written into every install whether the visible info file is switched on or not,
-/// so a folder on disk can say what it is when the library has lost track of it.
+// Written into every install, so a folder can still be identified without the library.
 let modShelfManifestName = ".modshelf.json"
 /// The version comes from the bundle, so bumping MARKETING_VERSION in project.yml is the only edit.
 let modShelfVersion = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "1.0"
@@ -33,17 +32,11 @@ let modShelfBuild = (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion")
 
 // MARK: - Models
 
-/// What ModShelf can say about a mod: its Workshop state, and whether its files are still here to
-/// be checked. Moving a mod into a game is normal use, so that alone is not a problem.
 enum ModStatus { case upToDate, needsUpdate, moved, notChecked, broken }
 
 extension ModStatus {
-    /// Whether a mod deserves a look in the library: its files are missing or changed, or ModShelf
-    /// has never managed to check it.
     var needsAttention: Bool { self == .broken || self == .notChecked }
 
-    /// The colour of a status text, the same as its icon: only a pending update or files that don't
-    /// match Steam are worth colour; everything else is calm grey.
     var textColor: Color {
         switch self {
         case .upToDate, .moved, .notChecked: return .secondary
@@ -73,12 +66,10 @@ struct WorkshopItem: Identifiable, Codable, Equatable {
     var ratingCount: Int? = nil
     var checkFailed: Bool = false
     var filesBroken: Bool = false
-    /// The files are no longer where they were installed, which normally means the user moved the
-    /// mod into the game. That is ordinary use, so it counts as moved out rather than as damage.
+    // Files moved into the game: normal use, not damage.
     var filesMoved: Bool = false
     var fileCount: Int? = nil
     var byteCount: Int64? = nil
-    /// The last time ModShelf could actually read this mod's files on disk.
     var lastVerifiedAt: Date? = nil
     var lastVerifiedBytes: Int64? = nil
     var lastVerifiedFiles: Int? = nil
@@ -91,7 +82,7 @@ struct WorkshopItem: Identifiable, Codable, Equatable {
         self.publishedUpdatedAt = publishedUpdatedAt; self.lastCheckedAt = lastCheckedAt; self.updateAvailable = updateAvailable
     }
 
-    // Tolerant decoding so libraries saved by older builds still load.
+    // Libraries saved by older builds are missing fields.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(String.self, forKey: .id)
@@ -123,8 +114,7 @@ struct WorkshopItem: Identifiable, Codable, Equatable {
 
     var displayTitle: String { title ?? "Workshop item \(id)" }
 
-    /// Where ModShelf keeps its downloads. A mod outside this folder was moved by the user, so
-    /// its files can no longer be read here — but its Workshop details still can.
+    // Mods outside this folder were moved by the user, so their files can't be read here.
     static let managedRoot: String = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].path
 
     var isInsideModShelf: Bool {
@@ -158,9 +148,7 @@ struct WorkshopMetadata: Equatable {
     var pageURL: URL { URL(string: "https://steamcommunity.com/sharedfiles/filedetails/?id=\(id)")! }
 }
 
-/// The hidden record ModShelf keeps inside each installed mod. It is always written, so the folder
-/// can be identified and put back in the library even when the library file or the visible info file
-/// is gone, and the version that is installed can be compared with Steam again.
+/// The hidden record ModShelf keeps inside each installed mod, so the folder can always be found.
 struct InstalledModManifest: Codable {
     var workshopID: String
     var title: String? = nil
@@ -284,8 +272,7 @@ enum Fmt {
     }
 }
 
-/// One place that turns Steam's raw wording into a short line someone can act on. The wording stays
-/// calm on purpose: a failed download is a small thing, not an alarm.
+/// Turns Steam's raw wording into a short line someone can act on; the wording stays calm on purpose.
 enum ErrorText {
     static func friendly(_ raw: String) -> String {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -411,8 +398,7 @@ final class ImageStore {
     }
 }
 
-/// Plays an animated image. "loops" is the repeat count; 0 loops forever.
-/// The animation starts again each time this view is created, which happens every time a mod's view opens.
+/// Plays an animated image, 0 loops forever. It restarts each time a mod's view opens.
 struct AnimatedUIImageView: UIViewRepresentable {
     let image: UIImage
     var fill = true
@@ -445,8 +431,7 @@ struct CachedImage: View {
     let urlString: String?
     var fill = true
     var maxPixel: CGFloat = 600
-    /// Tried in order when the main address has no picture, so an older or smaller artwork is used
-    /// instead of leaving the space empty.
+    // Used when the main image is missing.
     var fallbackURLStrings: [String] = []
     @AppStorage("options.gifDownloads") private var gifDownloads = true
     @AppStorage("options.gifLibrary") private var gifLibrary = true
@@ -459,8 +444,7 @@ struct CachedImage: View {
     }
 
     var body: some View {
-        // A clear base takes whatever size the parent offers, and the picture is drawn on top of it:
-        // a wide landscape image can then never decide the layout and blow a cell or row apart.
+        // Clear base, so a landscape image can't decide the cell's size.
         Color.clear
             .overlay { picture }
             .clipped()
@@ -484,8 +468,7 @@ struct CachedImage: View {
             if image.images != nil {
                 AnimatedUIImageView(image: image, fill: fill, loops: 5)
             } else if fill {
-                // Filled to cover and centred, so a landscape preview is cropped to the same square
-                // as a square one.
+                // Filled to cover and centred, so a landscape preview crops to the same square.
                 Image(uiImage: image).resizable().scaledToFill()
             } else {
                 Image(uiImage: image).resizable().scaledToFit()
@@ -740,8 +723,7 @@ final class WorkshopStore: ObservableObject {
     @Published var currentFile = ""
     @Published var isBusy = false
     @Published var isDownloading = false
-    /// A finished transfer is moved into the library after Steam is done with it, which for a big
-    /// item means tens of thousands of files and takes a few seconds.
+    /// Moves a finished transfer into the library, a few seconds of work for a big item.
     @Published var isInstalling = false
     /// A ZIP is being written from the library's own folders.
     @Published var isExporting = false
@@ -749,8 +731,7 @@ final class WorkshopStore: ObservableObject {
     @Published var isPaused = false
     /// A resume asked for while the paused transfer was still winding down.
     private var resumePending = false
-    /// When the transfer was paused and where its half-written files live, so a long pause can start
-    /// again from scratch rather than trusting a staging folder the engine may have lost.
+    /// When the transfer was paused and where its files live, so a long pause can start again cleanly.
     private var pausedAt: Date?
     private var pausedStaging: URL?
     /// Set while a moved mod is waiting for the current transfer to let go of the engine.
@@ -758,11 +739,9 @@ final class WorkshopStore: ObservableObject {
     private var keepActiveOnCancel = false
     /// A cancellation that should leave the rest of the batch in the queue.
     private var keepQueueOnCancel = false
-    /// The mod that was running when the app left the screen, so a transfer iOS stopped can be picked
-    /// up again rather than reported as failed.
+    /// The mod running when the app left the screen, so a transfer iOS stopped is picked up again.
     private var suspendedDownloadID: String?
-    /// The small ring beside the sign-in pill: shown while a transfer runs and for ten seconds after
-    /// it finishes, when its arrow turns blue.
+    /// The ring beside the sign-in pill: fills while a transfer runs, then its arrow turns blue.
     @Published var ringVisible = false
     @Published var ringDone = false
     @Published var ringProgress = 0.0
@@ -788,9 +767,8 @@ final class WorkshopStore: ObservableObject {
     @Published var appUpdateMessage = ""
     @Published var isCheckingAppUpdate = false
 
-    /// The Go engine. Signing in and downloading need it, so a failure to create it is reported
-    /// instead of crashing the app on launch. Its type comes from the generated binding, so it is
-    /// left to inference rather than named here.
+    /// The Go engine, left to inference because its type comes from the generated binding. A failure
+    /// to create it is reported rather than crashing the app on launch.
     private let engine = SteamengineNewEngine()
     private var poller: Timer?
     private(set) var activeID = ""
@@ -808,8 +786,8 @@ final class WorkshopStore: ObservableObject {
     private var autoRetryItem = ""
     private var queueFailed = 0
     private var devTask: Task<Void, Never>?
-    // Progress follows the size of the folder the mod is written into, which rises with the bytes as
-    // they land. Steam's own counter only appears in a burst at the end, so it cannot drive the bar.
+    // Progress follows the folder the mod is written into; Steam's own counter only arrives in a
+    // burst at the end.
     @Published var isDownloadStalled = false
     private var downloadActiveSeconds: Double = 0
     private var lastTickAt: Date?
@@ -820,8 +798,7 @@ final class WorkshopStore: ObservableObject {
     private var downloadBytesPerSecond: Double = 0
     /// Mods waiting their turn, with the details they were started from.
     private var pendingMeta: [String: WorkshopMetadata] = [:]
-    // The folder being written is measured now and then, which is the only honest sign of progress
-    // for big items where Steam's own counter stays at zero.
+    // The folder is measured now and then, the only honest sign of progress for big items.
     private var activeStaging: URL?
     private var stagingProbeInFlight = false
     private var lastStagingProbe = Date.distantPast
@@ -845,15 +822,14 @@ final class WorkshopStore: ObservableObject {
     }
     var downloadsFolderURL: URL { downloadsRoot }
 
-    /// The folder as the Files app shows it, past the top level: the app's own folder for a normal
-    /// install, or LiveContainer's chain when the app is running inside it.
+    /// The folder as the Files app shows it: the app's own, or LiveContainer's chain when running there.
     nonisolated static func readablePath(_ url: URL) -> String {
         let path = url.path
         let name = (Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
             ?? (Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String)
             ?? "ModShelf"
-        // Everything from the first Documents folder down is how Files shows it. Inside LiveContainer
-        // that folder belongs to LiveContainer itself, so its name goes in front, not ModShelf's.
+        // Everything from the first Documents folder down, as Files shows it. Inside LiveContainer
+        // that folder belongs to LiveContainer, so its name goes first.
         if let docs = path.range(of: "/Documents") {
             let tail = String(path[docs.upperBound...])
             let inLiveContainer = Bundle.main.bundlePath.range(of: "/Documents/Applications/") != nil
@@ -956,8 +932,8 @@ final class WorkshopStore: ObservableObject {
         guard let data = try? JSONEncoder().encode(library) else { return }
         try? data.write(to: Self.libraryFileURL, options: .atomic)
     }
-    /// The library lives in its own JSON file: a big collection has no place in the small
-    /// UserDefaults budget. Older builds kept it under the "library" key, so that is carried over.
+    /// Its own JSON file, as a big collection has no place in the UserDefaults budget. Older builds
+    /// kept it under the "library" key, which is carried over.
     private static var libraryFileURL: URL {
         let fm = FileManager.default
         let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -1001,8 +977,8 @@ final class WorkshopStore: ObservableObject {
         return cache?[appID]
     }
 
-    /// A game's folder, named after the game once that is known. Two games whose names come out the
-    /// same never share a folder: the second one gets the app ID after its name instead.
+    /// A game's folder, named after the game once known. Two games with the same name never share
+    /// one: the second gets its app ID after the name.
     private func gameFolderURL(appID: String, name: String?) -> URL {
         let base = Self.sanitizedName(name ?? "", fallback: "App \(appID)")
         let plain = downloadsRoot.appendingPathComponent(base, isDirectory: true)
@@ -1021,8 +997,7 @@ final class WorkshopStore: ObservableObject {
         return !id.isEmpty && id.allSatisfy { $0.isNumber } ? id : nil
     }
 
-    /// Fills in missing game names from Steam, then renames the "App <id>" folders that stand for
-    /// them. Folders left behind without a library entry are named too, so no game stays "App <id>".
+    /// Fills in missing game names from Steam and renames the "App <id>" folders that stand for them.
     func resolveGameNames() {
         var apps = Set(library.compactMap { $0.appID })
         for folder in (try? FileManager.default.contentsOfDirectory(atPath: downloadsRoot.path)) ?? [] {
@@ -1045,8 +1020,7 @@ final class WorkshopStore: ObservableObject {
         }
     }
 
-    /// Gives a game's folder its real name, merging into a folder of that name when one is already
-    /// there so mods left behind by an older build end up together.
+    /// Gives a game's folder its real name, merging into one of that name when it already exists.
     private func renameGameFolder(appID: String, to name: String) {
         let fm = FileManager.default
         let old = downloadsRoot.appendingPathComponent("App \(appID)", isDirectory: true)
@@ -1086,8 +1060,7 @@ final class WorkshopStore: ObservableObject {
         let path = item.folder
         log("reveal in Files: \(item.id)")
         guard FileManager.default.fileExists(atPath: path) else {
-            // Files that were moved into a game aren't here to open, and ModShelf can't know where
-            // the game keeps them, so it says what happened instead of opening nothing.
+            // Files moved into a game aren't here to open, and ModShelf can't know where they went.
             operationMessage = item.filesMoved || !item.isInsideModShelf
                 ? "\(item.displayTitle)'s files were moved out of ModShelf, so there's no folder to open here."
                 : "That mod's folder is missing. Download the mod again."
@@ -1103,8 +1076,7 @@ final class WorkshopStore: ObservableObject {
         }
     }
 
-    /// Opens any folder in Files: ModShelf's own folders directly, another app's folder in an
-    /// in-app listing (iOS has no way to hand the Files app a folder inside someone else's container).
+    /// Opens a folder in Files, or in an in-app listing when it lives in another app's container.
     func revealFolder(_ url: URL) {
         let path = url.path
         guard FileManager.default.fileExists(atPath: path) else {
@@ -1122,8 +1094,8 @@ final class WorkshopStore: ObservableObject {
         }
     }
 
-    /// A mod keeps the folder it already lives in, so an update replaces it in place. A mod whose
-    /// files were moved into a game is installed fresh in ModShelf's own storage instead.
+    /// A mod keeps the folder it lives in, so an update replaces it in place. One whose files were
+    /// moved into a game is installed fresh in ModShelf's own storage.
     private func installRoot(for item: WorkshopItem?, appID: String?) -> URL {
         if let item, FileManager.default.fileExists(atPath: item.folder) {
             let folder = URL(fileURLWithPath: item.folder, isDirectory: true)
@@ -1296,8 +1268,7 @@ final class WorkshopStore: ObservableObject {
         }
         let fallback = WorkshopMetadata(id: id, title: "Workshop item \(id)", author: "", description: "", imageURL: "", updatedAt: 0)
         let meta: WorkshopMetadata = override ?? ((preview?.id == id ? preview : nil) ?? fallback)
-        // One transfer at a time, so anything else joins the queue and starts when its turn comes.
-        // A paused transfer still owns the engine's slot, so new mods wait rather than taking over.
+        // One transfer at a time. A paused one still owns the engine's slot, so new mods wait.
         if isBusy || isPaused {
             enqueue(id, meta: meta)
             return
@@ -1365,16 +1336,14 @@ final class WorkshopStore: ObservableObject {
             return
         }
         log("start \(id) \"\(meta.title)\" expected \(Fmt.bytes(downloadExpectedBytes)), game \(meta.gameName ?? "-")")
-        // However a download starts (library update, history retry, auto download), the download
-        // screen shows that item rather than whatever was looked up last. A batch leaves the screen
-        // alone, so the Workshop page does not jump from mod to mod while it runs.
+        // However a download starts, the screen shows that item rather than whatever was looked up
+        // last. A batch leaves the screen alone, so it does not jump from mod to mod.
         if preview?.id != id, queueRows.count <= 1 {
             input = "https://steamcommunity.com/sharedfiles/filedetails/?id=\(id)"
             preview = meta
             if meta.title == "Workshop item \(id)" { fetchPreview() }
         }
-        // A fixed staging folder per mod, so a download that stops can be retried and pick up the
-        // chunks it already wrote instead of starting the whole thing again.
+        // A fixed staging folder per mod, so a stopped download picks up the chunks it wrote.
         let targetRoot = installRoot(for: library.first(where: { $0.id == id }), appID: meta.appID)
         let staging = targetRoot.appendingPathComponent(".partial-\(id)", isDirectory: true)
         do {
@@ -1388,8 +1357,7 @@ final class WorkshopStore: ObservableObject {
         guard let engine else { return }
         let result = engine.downloadWorkshopItem(id, targetDir: staging.path)
         if !result.isEmpty {
-            // Whatever is already in the staging folder is kept: the engine may have written chunks
-            // before refusing, and a retry can carry on from them.
+            // Keep what is already staged: the engine may have written chunks before refusing.
             let message = ErrorText.friendly(result)
             errorMessage = message; status = "Download failed"
             log("engine refused \(id): \(result)")
@@ -1518,8 +1486,7 @@ final class WorkshopStore: ObservableObject {
         if let state { queueRows[index].state = state }
     }
 
-    /// The end of a batch. The rows stay on screen, so what downloaded and what did not can still be
-    /// read afterwards; they are cleared when the next download starts or a row is removed.
+    /// The end of a batch. Rows stay on screen, cleared when the next download starts.
     private func finishQueue(cancelled: Bool = false) {
         let total = queueTotal
         let done = max(0, queueStep - (cancelled ? 1 : 0))
@@ -1543,11 +1510,8 @@ final class WorkshopStore: ObservableObject {
         log("queue end: \(operationMessage)")
     }
 
-    /// Where the bar sits. The folder the mod is written into is measured as it grows, so when the
-    /// file system hands out space with the data the bar only moves once bytes have really landed
-    /// and holds still while a transfer stalls. Some file systems give a file its whole length up
-    /// front, and then the folder size says nothing mid-download; only in that case does an estimate
-    /// from the clock keep the bar moving instead.
+    /// Where the bar sits. The folder is measured as it grows, so the bar moves only when bytes
+    /// land. Some file systems give a file its whole length up front; only then is the clock used.
     private func displayProgress(engineValue: Double, diskFraction: Double, diskIsReal: Bool) -> Double {
         guard isDownloading else { return min(1, max(0, engineValue)) }
         let known = max(engineValue, diskFraction)
@@ -1556,8 +1520,8 @@ final class WorkshopStore: ObservableObject {
                                   bytesPerSecond: downloadBytesPerSecond, engineValue: known)
     }
 
-    /// The estimate used only when the folder cannot be trusted, kept separate so the curve is easy
-    /// to reason about. It slows down near the end and never shows 100% before the download is done.
+    /// The estimate used when the folder cannot be trusted. It slows near the end and never shows
+    /// 100% before the download is done.
     nonisolated static func pacedProgress(elapsed: TimeInterval, expectedBytes: Int64,
                                           bytesPerSecond: Double, engineValue: Double) -> Double {
         var value = max(0, engineValue)
@@ -1578,8 +1542,7 @@ final class WorkshopStore: ObservableObject {
         return min(0.99, min(1, max(0, value)))
     }
 
-    /// Small mods finish in a second or two, so their folder is re-measured often; a big item has
-    /// thousands of files, so it is measured less often to keep the cost down.
+    /// Small mods are re-measured often; a big one has thousands of files, so less often.
     private var stagingProbeInterval: TimeInterval {
         if downloadExpectedBytes <= 0 { return 1 }
         if downloadExpectedBytes < 100_000_000 { return 0.4 }
@@ -1587,8 +1550,7 @@ final class WorkshopStore: ObservableObject {
         return 2
     }
 
-    /// Whether Steam is still resolving, fetching manifests or checking files already on disk: a
-    /// stage that can sit quietly for a while without meaning the download has hung.
+    /// Steam resolving, fetching manifests or checking files on disk, which can sit quietly a while.
     var isPreparingDownload: Bool {
         let s = status.lowercased()
         return s.contains("preparing") || s.contains("manifest") || s.contains("checking")
@@ -1599,8 +1561,8 @@ final class WorkshopStore: ObservableObject {
         // Each new step Steam reports becomes its own segment of the progress bar.
         if isDownloading, !nextStatus.isEmpty, phases.last != nextStatus { phases.append(nextStatus) }
         let engineValue = min(1, max(0, engine?.progress() ?? 0))
-        // Steam knows the uncompressed size it will write, which can differ from the compressed
-        // figure the Workshop page shows; prefer the larger of the two as the denominator.
+        // Steam's uncompressed size can differ from the compressed figure the Workshop page shows;
+        // prefer the larger as the denominator.
         if let engineBytes = engine?.downloadBytes(), engineBytes > 0,
            Int64(engineBytes) > downloadExpectedBytes {
             downloadExpectedBytes = Int64(engineBytes)
@@ -1613,9 +1575,8 @@ final class WorkshopStore: ObservableObject {
         if statusChanged || valueChanged { lastMovementAt = now }
         let dt = lastTickAt.map { max(0, min(1.5, now.timeIntervalSince($0))) } ?? 0
         lastTickAt = now
-        // The folder on disk is the only honest sign of life for large items, where Steam's own
-        // counter can sit at zero for the whole download. Files are pre-allocated to their full
-        // length before any data arrives, so the allocated size (not the logical size) is what grows.
+        // The folder on disk is the only sign of life for large items, where Steam's counter can sit
+        // at zero. Files are pre-allocated, so the allocated size (not the logical one) is what grows.
         if isDownloading, !isPreparingDownload, let staging = activeStaging, !stagingProbeInFlight,
            now.timeIntervalSince(lastStagingProbe) > stagingProbeInterval {
             stagingProbeInFlight = true
@@ -1628,10 +1589,8 @@ final class WorkshopStore: ObservableObject {
                 if lastReceivedSeen < 0 {
                     lastReceivedSeen = size
                     receivedBytes = size
-                    // Space handed out up front shows the folder already at its full size, and that
-                    // reading is a baseline rather than progress. Anything under the full size is
-                    // bytes that really are here (a retry picking up where it stopped), so those
-                    // count towards the bar straight away.
+                    // Space handed out up front shows the folder already full size, a baseline rather
+                    // than progress. Anything under that is bytes that really are here.
                     let preAllocated = downloadExpectedBytes > 0
                         && size >= downloadExpectedBytes - downloadExpectedBytes / 50
                     stagingBaselineBytes = preAllocated ? size : 0
@@ -1644,8 +1603,7 @@ final class WorkshopStore: ObservableObject {
                         lastMovementAt = Date()
                     }
                     receivedBytes = size
-                    // Steam's counter arrives in one burst near the end, so the speed is taken from
-                    // the folder instead: what landed, over the time it took to land.
+                    // Speed comes from the folder, not Steam's counter: what landed over the time taken.
                     if let sample = lastDiskSample {
                         let elapsed = now.timeIntervalSince(sample.0)
                         if elapsed > 0.2, size > sample.1 {
@@ -1659,8 +1617,7 @@ final class WorkshopStore: ObservableObject {
                 lastDiskSample = (now, size)
             }
         }
-        // A folder that was handed its whole size up front got a baseline, and then its size says
-        // nothing about progress; otherwise what it holds is exactly what has landed.
+        // A folder handed its whole size up front has a baseline and says nothing about progress.
         let diskIsReal = lastReceivedSeen >= 0 && stagingBaselineBytes == 0
         if isDownloading, !isPreparingDownload, !diskIsReal { downloadActiveSeconds += dt }
         let preparing = isPreparingDownload
@@ -1674,8 +1631,7 @@ final class WorkshopStore: ObservableObject {
             ? min(0.99, Double(grownBytes) / Double(downloadExpectedBytes))
             : 0
         var nextProgress = displayProgress(engineValue: engineValue, diskFraction: diskFraction, diskIsReal: diskIsReal)
-        // The denominator can grow when Steam reports a larger uncompressed total, so the figure on
-        // screen only ever moves forward within one download.
+        // The denominator can grow, so the figure on screen only ever moves forward.
         if isDownloading, nextProgress < progress { nextProgress = progress }
         // A figure that came out of a division must never reach Int(), which traps on NaN.
         if !nextProgress.isFinite { nextProgress = progress.isFinite ? progress : 0 }
@@ -1687,9 +1643,7 @@ final class WorkshopStore: ObservableObject {
             status = nextStatus
             log("phase: \(nextStatus)")
         }
-        // Everything above measured the transfer; the figure on screen is a whole percent, so the
-        // views are only told when that changes. A download still tracks every byte, it just draws
-        // when the number a person reads moves.
+        // The figure on screen is a whole percent, so views are only told when it changes.
         let shownNow = Int((max(0, min(1, progress)) * 100).rounded())
         let shownNext = Int((max(0, min(1, nextProgress)) * 100).rounded())
         if shownNext != shownNow {
@@ -1700,8 +1654,7 @@ final class WorkshopStore: ObservableObject {
                 log("progress \(Int(nextProgress * 100))% · engine \(String(format: "%.0f", engineValue * 100))% · disk \(Fmt.bytes(grownBytes)) of \(Fmt.bytes(downloadExpectedBytes))")
             }
         }
-        // A steady line every few seconds, so a run that never changes percent still shows what the
-        // engine and the disk are doing.
+        // A steady line every few seconds, so a run that never changes percent still shows life.
         if isDownloading, now.timeIntervalSince(lastProgressLogAt) > 5 {
             lastProgressLogAt = now
             log("tick \(Int(nextProgress * 100))% · engine \(String(format: "%.0f", engineValue * 100))% · disk \(Fmt.bytes(grownBytes)) of \(Fmt.bytes(downloadExpectedBytes)) · \(nextStatus)")
@@ -1733,8 +1686,7 @@ final class WorkshopStore: ObservableObject {
         let error = engine?.lastError() ?? ""
         let successStatus = s.contains("download complete")
         let cancelled = s.contains("download cancelled")
-        // A row moved onto the running one: let the engine go, keep the running mod in the queue,
-        // then start the moved one.
+        // A row moved onto the running one: stop it, keep it queued, then start the moved one.
         if cancelled, keepActiveOnCancel {
             keepActiveOnCancel = false
             isPaused = false
@@ -1745,8 +1697,7 @@ final class WorkshopStore: ObservableObject {
             status = "Paused"
             history.removeAll { $0.workshopID == activeID && $0.result == "Downloading" }
             saveHistory()
-            // The stopped mod keeps its place in the queue, and the one dropped on top of it goes
-            // first, so the order the rows show is the order they will run in.
+            // The stopped mod keeps its place and the one dropped on it goes first, matching the rows.
             syncQueueOrder()
             log("stopped \(activeID), kept in the queue")
             let next = startAfterCancel
@@ -1765,8 +1716,7 @@ final class WorkshopStore: ObservableObject {
             }
             return
         }
-        // A paused transfer stops the engine but keeps its staging folder, so resuming carries on
-        // from the chunks already written instead of starting again.
+        // A paused transfer keeps its staging folder, so resuming carries on from the chunks written.
         if cancelled, isPaused {
             if let index = queueRows.firstIndex(where: { $0.id == activeID }) {
                 queueRows[index].state = .waiting
@@ -1782,8 +1732,7 @@ final class WorkshopStore: ObservableObject {
             }
             return
         }
-        // A move that asked the engine to stop is over: if Steam reported something other than a
-        // cancellation, the flags must not change how the next download ends.
+        // The move is over: if Steam reported anything but a cancellation, the flags are cleared.
         keepActiveOnCancel = false
         startAfterCancel = nil
         let meta = activeMeta ?? WorkshopMetadata(id: activeID, title: activeTitle, author: "", description: "", imageURL: "", updatedAt: 0)
@@ -1797,8 +1746,7 @@ final class WorkshopStore: ObservableObject {
                 let done = try finalizeDownload(staging: staging, id: activeID, meta: meta, existing: existing)
                 var item = existing ?? WorkshopItem(id: activeID, folder: done.url.path, addedAt: Date(), updatedAt: Date())
                 item.folder = done.url.path
-                // The "Updated" date only moves when the Workshop version really changed, so
-                // re-installing the same version is not reported as an update.
+                // "Updated" only moves when the Workshop version changed, so a reinstall is not an update.
                 let sameVersion = previousVersion > 0 && meta.updatedAt == previousVersion
                 item.updatedAt = sameVersion ? (existing?.updatedAt ?? Date()) : Date()
                 item.title = meta.title
@@ -1824,8 +1772,7 @@ final class WorkshopStore: ObservableObject {
                 log("finalised \(activeID): \(done.files) files, \(Fmt.bytes(done.bytes))")
                 success = true
             } catch {
-                // The reason a finished download could not be put in place is the only way to see
-                // whether it is a bad file name, a refused move or an empty folder.
+                // Say why a finished download could not be put in place: bad name, refused move, empty.
                 let failure = error as NSError
                 let staged = visibleChildren(staging).count
                 log("install failed \(activeID): \(failure.domain) \(failure.code) - \(failure.localizedDescription) · \(staged) items, \(Fmt.bytes(Self.directoryBytes(staging)))")
@@ -1837,22 +1784,21 @@ final class WorkshopStore: ObservableObject {
                 } else {
                     log("kept the downloaded files for \(activeID)")
                 }
-                // Steam said it finished but handed over nothing. That is sometimes a manifest that
-                // was still being published, so the one retry in the failure path is worth having.
+                // Steam said it finished but handed over nothing, sometimes a manifest still being
+                // published, so the one retry in the failure path is worth having.
                 if failure.code == 1 { log("finished with nothing to install for \(activeID)") }
             }
             isInstalling = false
         } else if cancelled, !stagingPath.isEmpty {
-            // A cancelled download throws its half-written files away; a failed one keeps them so a
-            // retry can resume from the chunks it already has.
+            // A cancelled download throws its files away; a failed one keeps them for a retry.
             try? FileManager.default.removeItem(at: staging)
         }
         if success {
             updateHistory(id: activeID, result: "Downloaded", error: nil)
             refreshLibraryBytes()
             resolveGameNames()
-            // An update carries the metadata the mod already had, so Workshop is asked once more for
-            // the version that really landed, and the info file is rewritten with it.
+            // An update starts from the stored metadata, so ask Workshop once more for the version
+            // that really landed and rewrite the info file with it.
             refreshInstalledMetadata(id: activeID)
             updateRow(activeID, progress: 1, state: .done)
             // A finished mod drops to the bottom of the card, so the top shows what is running next.
@@ -1877,8 +1823,7 @@ final class WorkshopStore: ObservableObject {
             if !cancelled { ringStopped() }
             log("failed \(activeID): \(reason)")
             if !error.isEmpty { log("engine said: \(error)") }
-            // A transfer the system stopped because the app was away is not a failure: it is picked
-            // up again straight away, from the files it already wrote.
+            // A transfer the system stopped while the app was away is not a failure: pick it up again.
             let interrupted = suspendedDownloadID == activeID
             if interrupted { suspendedDownloadID = nil }
             if cancelled {
@@ -1903,8 +1848,7 @@ final class WorkshopStore: ObservableObject {
                 }
                 return
             } else if autoRetries < 1 {
-                // One more go in the same slot before it is set aside as failed. The staging folder
-                // is kept, so the second attempt carries on from the chunks already written.
+                // One more go in the same slot before it is set aside as failed, from the staged files.
                 autoRetries += 1
                 updateRow(activeID, progress: 0, state: .downloading)
                 history.removeAll { $0.workshopID == activeID && $0.result == "Downloading" }
@@ -1923,8 +1867,7 @@ final class WorkshopStore: ObservableObject {
         }
         saveHistory()
         if !queue.isEmpty {
-            // A short pause lets the finished row show its last percent, and gives the engine time to
-            // release its download slot before the next one asks for it.
+            // A short pause lets the finished row show its last percent and the engine free its slot.
             Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 700_000_000)
                 self.startNextInQueue()
@@ -1942,8 +1885,7 @@ final class WorkshopStore: ObservableObject {
             if let m = activeMeta, m.id == id, !m.imageURL.isEmpty { history[index].imageURL = m.imageURL }
         } else { record(id, title: activeTitle, result: result, error: error) }
     }
-    /// Stops or carries on with the transfer in progress. Pausing keeps the files that already
-    /// landed, so resuming picks up from them rather than downloading everything again.
+    /// Stops or carries on with the transfer in progress. Pausing keeps the files that already landed.
     func togglePause() {
         if isPaused {
             isPaused = false
@@ -1980,8 +1922,6 @@ final class WorkshopStore: ObservableObject {
         beginDownload(id: activeID, meta: meta, keepQueue: true)
     }
 
-    /// The ring shows the whole batch when several mods are queued, weighted by each mod's size so a
-    /// big mod does not count the same as a tiny one.
     private var ringBatchProgress: Double {
         guard !queueRows.isEmpty else { return 0 }
         let weights = queueRows.map { max(1, Double($0.fileSize)) }
@@ -1995,7 +1935,6 @@ final class WorkshopStore: ObservableObject {
         return min(1, done / total)
     }
 
-    /// Marks the ring finished and keeps it on screen for ten seconds before it goes.
     private func ringFinished() {
         guard ringVisible else { return }
         ringProgress = 1
@@ -2017,7 +1956,6 @@ final class WorkshopStore: ObservableObject {
         ringProgress = 0
     }
 
-    /// Moves a row within the queue and rebuilds the order the batch will follow.
     func moveRow(_ id: String, to target: Int) {
         guard let from = queueRows.firstIndex(where: { $0.id == id }) else { return }
         let row = queueRows.remove(at: from)
@@ -2034,14 +1972,13 @@ final class WorkshopStore: ObservableObject {
         queueStep = min(queueStep, max(queueTotal, 1))
     }
 
-    /// Drops a moved mod on the place held by the running one, asking the engine to let go first.
-    /// The running mod is kept at the top of the queue so nothing is lost.
+    /// Drops a moved mod where the running one was, asking the engine to let go first. The running
+    /// mod stays at the top of the queue so nothing is lost.
     func startMovedMod(_ id: String) {
         guard let meta = pendingMeta[id] ?? metaFor(id) else { return }
         moveRow(id, to: 0)
-        // A paused transfer is not running in the engine, so there is nothing to stop: the moved mod
-        // goes first and starts now. Waiting for a cancellation that never arrives is what left the
-        // whole queue sitting still.
+        // A paused transfer is not running in the engine, so the moved mod starts now. Waiting for a
+        // cancellation that never arrives is what left the queue sitting still.
         guard isDownloading, isBusy else {
             isPaused = false
             resumePending = false
@@ -2098,18 +2035,15 @@ final class WorkshopStore: ObservableObject {
         if queueRows.isEmpty, !isBusy { finishQueue() }
     }
 
-    /// Stops the batch, or just the transfer that is running when the rest of the queue should stay.
     /// The app is leaving the screen: remember what was running, because iOS will stop it.
     func appMovedToBackground() {
         suspendedDownloadID = isDownloading ? activeID : nil
     }
 
-    /// The app is back. If the transfer died while it was away, carry on with it instead of leaving
-    /// it as a failure: its half-written files are still in the staging folder.
+    /// The app is back. If the transfer died while it was away, carry on with it rather than failing.
     func appReturnedToForeground() {
         guard let id = suspendedDownloadID else { return }
-        // Still running: there is nothing to put right, and the note stays in place in case the
-        // system kills the transfer a moment later.
+        // Still running: the note stays in place in case the system kills it a moment later.
         if isDownloading || isPaused || isBusy { return }
         suspendedDownloadID = nil
         guard lastOutcome == "Download failed" else { return }
@@ -2119,6 +2053,7 @@ final class WorkshopStore: ObservableObject {
         download(id, meta: meta)
     }
 
+    /// Stops the batch, or just the transfer that is running when the rest of the queue should stay.
     func cancel(keepingQueue: Bool = false) {
         isPaused = false
         resumePending = false
@@ -2140,8 +2075,7 @@ final class WorkshopStore: ObservableObject {
         }
         if !keepingQueue { queue.removeAll() }
         if !keepingQueue {
-            // The tab goes back to its default view: no Workshop page is left open behind a queue
-            // that no longer exists.
+            // Back to the default view: no Workshop page left open behind a queue that is gone.
             preview = nil
             input = ""
             suspendedDownloadID = nil
@@ -2354,8 +2288,7 @@ final class WorkshopStore: ObservableObject {
         return root.appendingPathComponent("\(name) (\(id)-\(UUID().uuidString.prefix(4)))", isDirectory: true)
     }
 
-    /// Moves a finished download into place, falling back to a copy when the move is refused (a
-    /// folder can refuse a rename across containers while still accepting the bytes).
+    /// Moves a finished download into place, falling back to a copy when a rename is refused.
     nonisolated static func place(from source: URL, to destination: URL) throws {
         let fm = FileManager.default
         do {
@@ -2372,9 +2305,8 @@ final class WorkshopStore: ObservableObject {
         return url.path == documents || url.path.hasPrefix(documents + "/")
     }
 
-    /// The path a saved folder points at now. A reinstalled app gets a fresh data container, so an
-    /// absolute path saved by the previous install would read as "the files were moved"; only what
-    /// follows Documents is kept, and put in front of the container that is running.
+    /// The path a saved folder points at now. A reinstall gets a fresh container, so only what
+    /// follows Documents is kept, in front of the container that is running.
     nonisolated static func currentPath(for saved: String) -> String {
         guard !saved.isEmpty else { return saved }
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].path
@@ -2386,8 +2318,8 @@ final class WorkshopStore: ObservableObject {
         return documents + "/" + saved
     }
 
-    /// Finds a folder the library has lost track of: sitting where an installer left it, next to
-    /// "Downloaded Mods" instead of inside it, or one level down from where the record points.
+    /// Finds a folder the library lost track of: beside "Downloaded Mods" instead of inside it, or
+    /// one level down from where the record points.
     nonisolated static func locateFolder(named name: String, near documents: URL) -> URL? {
         let fm = FileManager.default
         guard !name.isEmpty, !name.hasPrefix(".") else { return nil }
@@ -2421,8 +2353,7 @@ final class WorkshopStore: ObservableObject {
         return try? JSONDecoder().decode(InstalledModManifest.self, from: data)
     }
 
-    /// Reads the visible info file, for downloads made before the hidden manifest existed. It is a
-    /// plain "Key: value" list, so a few lines are enough to identify the mod again.
+    /// Reads the visible info file, for downloads made before the hidden manifest existed.
     nonisolated static func readInfoFile(in folder: URL) -> InstalledModManifest? {
         let url = folder.appendingPathComponent(modShelfInfoFileName)
         guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
@@ -2475,9 +2406,9 @@ final class WorkshopStore: ObservableObject {
         return found
     }
 
-    /// Points every saved mod path at this install's storage, and at wherever its folder is now, so
-    /// an app update no longer leaves the whole library reading as moved and unable to be updated.
-    /// A folder that cannot be matched by name is matched by the Workshop ID in its hidden manifest.
+    /// Points every saved mod path at this install's storage and where its folder is now, so an
+    /// update does not leave the library reading as moved. A folder not matched by name is matched
+    /// by the Workshop ID in its hidden manifest.
     func repairFolders() {
         let fm = FileManager.default
         let root = downloadsRoot
@@ -2511,8 +2442,7 @@ final class WorkshopStore: ObservableObject {
             guard fm.fileExists(atPath: folder.path) else { continue }
             if library[i].filesMoved { library[i].filesMoved = false; changed = true }
 
-            // A mod installed by an older build has no manifest yet; the library fills one in, so this
-            // is the last launch that has to work anything out from the folder name.
+            // An older build's mod has no manifest yet, and the library fills one in afterwards.
             if Self.readManifest(in: folder) == nil {
                 Self.writeManifest(InstalledModManifest(workshopID: library[i].id,
                                                         title: library[i].displayTitle,
@@ -2526,8 +2456,7 @@ final class WorkshopStore: ObservableObject {
                                    in: folder)
             }
 
-            // Whatever the folder itself remembers fills in what the library lost, so an update is
-            // compared against the version that is really installed.
+            // The folder's own record fills in what the library lost, so updates compare correctly.
             if let manifest = Self.readManifest(in: folder) {
                 if library[i].publishedUpdatedAt == nil, let stamp = manifest.publishedUpdatedAt, stamp > 0 {
                     library[i].publishedUpdatedAt = stamp; changed = true
@@ -2542,8 +2471,7 @@ final class WorkshopStore: ObservableObject {
             }
         }
 
-        // A folder with a manifest but no library entry (a library file that went missing, or a game
-        // folder put back by hand) is taken back into the library as it was installed.
+        // A folder with a manifest but no library entry is taken back in as it was installed.
         if missing || library.isEmpty {
             let known = Set(library.map(\.id))
             for (id, folder) in foldersOnDisk() where !known.contains(id) {
@@ -2568,9 +2496,8 @@ final class WorkshopStore: ObservableObject {
         if changed { saveLibrary(); refreshLibraryBytes(); log("repaired folder paths for \(library.count) mods") }
     }
 
-    /// A mod folder whose saved path is gone: matched by name first, then by the Workshop ID in its
-    /// manifest, which also survives the folder being renamed. A game folder that ended up loose in
-    /// the app's storage is moved back under "Downloaded Mods" so Files shows one tidy tree.
+    /// A mod folder whose saved path is gone: matched by name, then by the Workshop ID in its
+    /// manifest. A game folder left loose in the app's storage is moved back under "Downloaded Mods".
     private func foundFolder(named name: String, id: String,
                              root: URL, index: () -> [String: URL]) -> URL? {
         let fm = FileManager.default
@@ -2595,8 +2522,8 @@ final class WorkshopStore: ObservableObject {
         return index()[id]
     }
 
-    /// Installs a finished download. The old installation is moved aside first and only removed once
-    /// the replacement is verified, so a failed update puts the previous version back.
+    /// Installs a finished download. The old one is moved aside and removed only once the replacement
+    /// is verified, so a failed update puts the previous version back.
     private func finalizeDownload(staging: URL, id: String, meta: WorkshopMetadata, existing: WorkshopItem?) throws -> (url: URL, files: Int, bytes: Int64) {
         let fm = FileManager.default
         guard !visibleChildren(staging).isEmpty else {
@@ -2616,8 +2543,7 @@ final class WorkshopStore: ObservableObject {
             else if !mods.isEmpty { payload = modsDir }
         }
         let name: String
-        // Some items unpack a level deeper than expected, which would move nothing into place; in
-        // that case whatever really came down is used instead of an empty folder.
+        // Some items unpack a level deeper than expected, so use whatever really came down instead.
         if Self.scan(folder: payload.path).count == 0,
            let filled = [base, staging].first(where: { isDir($0) && Self.scan(folder: $0.path).count > 0 }) {
             log("unpacked \(id) deeper than expected, using \(filled.lastPathComponent)")
@@ -2626,8 +2552,8 @@ final class WorkshopStore: ObservableObject {
         }
         name = singleMod ? sanitize(payload.lastPathComponent, fallback: id) : sanitize(meta.title, fallback: id)
 
-        // An update replaces the installation in the folder it already lives in; a new download, or one
-        // whose files were moved into a game, goes into the game's folder inside ModShelf.
+        // An update replaces the installation where it lives; a new download goes into the game's
+        // folder inside ModShelf.
         let destination: URL
         if let existing, fm.fileExists(atPath: existing.folder),
            Self.isInsideAppStorage(URL(fileURLWithPath: existing.folder, isDirectory: true)) {
@@ -2708,9 +2634,8 @@ final class WorkshopStore: ObservableObject {
         return lines.joined(separator: "\n")
     }
 
-    /// Rewrites the info file inside a mod's folder with the freshest Workshop numbers, so an update
-    /// never leaves the previous version's dates in it. The hidden manifest is always refreshed; the
-    /// visible file only when the option asks for it.
+    /// Rewrites the info file with the freshest Workshop numbers, so an update never leaves the
+    /// previous version's dates. The visible file only when the option asks for it.
     private func rewriteInfoFile(_ item: WorkshopItem, meta: WorkshopMetadata) {
         let folder = URL(fileURLWithPath: item.folder, isDirectory: true)
         guard FileManager.default.fileExists(atPath: folder.path) else { return }
@@ -2730,8 +2655,8 @@ final class WorkshopStore: ObservableObject {
         try? text.write(to: folder.appendingPathComponent(modShelfInfoFileName), atomically: true, encoding: .utf8)
     }
 
-    /// An update starts from the metadata already stored for the mod, so the new version's date is
-    /// only known once Workshop is asked. This fills it in and refreshes the info file.
+    /// An update starts from the stored metadata, so the new version's date is only known once
+    /// Workshop is asked. This fills it in and refreshes the info file.
     private func refreshInstalledMetadata(id: String) {
         Task { @MainActor in
             guard let fresh = await SteamMeta.fetch(id: id, includePage: false) else { return }
@@ -2747,9 +2672,8 @@ final class WorkshopStore: ObservableObject {
         }
     }
 
-    /// Bytes allocated under a folder, used to follow a download Steam is not reporting on. This is
-    /// the allocated size rather than the logical size: files are pre-allocated to their full length
-    /// before any data arrives, so only the allocated size grows as chunks are written.
+    /// Bytes allocated under a folder, used to follow a download Steam is not reporting on. Files are
+    /// pre-allocated, so only the allocated size grows as chunks are written.
     nonisolated static func directoryBytes(_ url: URL) -> Int64 {
         let fm = FileManager.default
         guard let en = fm.enumerator(at: url, includingPropertiesForKeys: [.isRegularFileKey, .totalFileAllocatedSizeKey, .fileSizeKey]) else { return 0 }
@@ -2780,8 +2704,7 @@ final class WorkshopStore: ObservableObject {
 
     // MARK: library actions
 
-    /// Partial downloads and replaced copies left behind inside any game folder by a session that
-    /// was interrupted, found however deep they sit.
+    /// Partial downloads and replaced copies left behind by an interrupted session, however deep.
     nonisolated static func partialLeftovers(in root: URL) -> [URL] {
         let fm = FileManager.default
         guard let en = fm.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey], options: []) else { return [] }
@@ -2856,9 +2779,8 @@ final class WorkshopStore: ObservableObject {
     }
     func export(_ item: WorkshopItem) { export([item.id]) }
 
-    /// Zips the chosen mods into one archive, written straight out of the folders the mods already
-    /// live in. Copying them somewhere first doubled the space needed, which is what made a ZIP of
-    /// the big mods fail on a device with little room left.
+    /// Zips the chosen mods straight out of the folders they live in. Copying them first doubled the
+    /// space needed, which made a ZIP of the big mods fail on a device with little room left.
     func export(_ ids: [String]) {
         guard !isExporting else { operationMessage = "A ZIP is already being built."; return }
         let wanted = Set(ids)
@@ -2919,8 +2841,7 @@ final class WorkshopStore: ObservableObject {
         }
     }
 
-    /// Adds one mod's folder under its own name, a file at a time, so a big mod is read where it
-    /// already is instead of being copied somewhere first.
+    /// Adds one mod's folder, a file at a time, so a big mod is read where it already is.
     nonisolated private static func add(folder: URL, as name: String, to archive: Archive) throws {
         let fm = FileManager.default
         let keys: [URLResourceKey] = [.isDirectoryKey, .isRegularFileKey]
@@ -2966,8 +2887,7 @@ final class WorkshopStore: ObservableObject {
         if let i = library.firstIndex(where: { $0.id == id }) { library[i].filesBroken = broken; saveLibrary() }
     }
 
-    /// Remembers that a mod's files were readable and complete, so a mod the user later moves out
-    /// of ModShelf can still say when it was last known to be fine.
+    /// Remembers the files were readable and complete, so a mod later moved out can still say when.
     private func recordVerified(_ id: String, files: Int, bytes: Int64) {
         guard let i = library.firstIndex(where: { $0.id == id }) else { return }
         library[i].lastVerifiedAt = Date()
@@ -2978,8 +2898,8 @@ final class WorkshopStore: ObservableObject {
         saveLibrary()
     }
 
-    /// Files aren't where they were installed any more. That is what happens when a mod is moved
-    /// into a game, so the mod counts as moved out rather than as damaged.
+    /// Files aren't where they were installed, which is what moving a mod into a game does, so it
+    /// counts as moved out rather than damaged.
     private func markMoved(_ id: String) {
         guard let i = library.firstIndex(where: { $0.id == id }) else { return }
         guard library[i].filesMoved != true || library[i].filesBroken else { return }
@@ -3012,7 +2932,7 @@ final class WorkshopStore: ObservableObject {
     private enum FileCheck { case ok, mismatch, moved, unknown }
 
     /// Reads a mod's files and compares them with the size Steam has. `.unknown` means Steam no
-    /// longer reports a size, so the files were readable but nothing could be compared.
+    /// longer reports a size, so nothing could be compared.
     private func checkFiles(id: String, folder: String) async -> FileCheck {
         let scan = await Task.detached(priority: .utility) { Self.scan(folder: folder) }.value
         guard scan.exists, scan.count > 0 else {
@@ -3124,8 +3044,8 @@ final class WorkshopStore: ObservableObject {
         guard let index = library.firstIndex(where: { $0.id == item.id }) else { return false }
         var installedStamp = library[index].publishedUpdatedAt ?? 0
         if installedStamp == 0 {
-            // The hidden manifest knows which version was installed, so a real update is not mistaken
-            // for the current one when the library entry lost its stamp.
+            // The manifest knows which version was installed, so a real update is not mistaken for
+            // the current one when the library entry lost its stamp.
             let folder = URL(fileURLWithPath: library[index].folder, isDirectory: true)
             if let stamp = Self.readManifest(in: folder)?.publishedUpdatedAt, stamp > 0 {
                 installedStamp = stamp
@@ -3136,8 +3056,8 @@ final class WorkshopStore: ObservableObject {
             library[index].publishedUpdatedAt = meta.updatedAt   // legacy entry: treat the current version as installed
             library[index].updateAvailable = false
         } else if installedStamp > meta.updatedAt, meta.updatedAt > 0 {
-            // A stored version newer than Steam's own can't be real (an old simulated run, or a clock
-            // change), so Steam's date is taken as the installed one and future updates show again.
+            // A stored version newer than Steam's can't be real, so Steam's date is taken as the
+            // installed one and future updates show again.
             installedStamp = meta.updatedAt
             library[index].publishedUpdatedAt = installedStamp
             library[index].updateAvailable = false
@@ -3197,8 +3117,8 @@ final class WorkshopStore: ObservableObject {
     func runLaunchChecks() {
         guard !didLaunchChecks else { return }
         didLaunchChecks = true
-        // The cleanup only deletes files and reads sizes; it touches nothing the screens show, so it
-        // runs off the main thread and is not waited for. Only the two folders are captured.
+        // The cleanup only deletes files and reads sizes, so it runs off the main thread and is not
+        // waited for. Only the two folders are captured.
         let documents = documents
         let downloadsRoot = downloadsRoot
         let cleanup = Task.detached(priority: .utility) {
@@ -3209,7 +3129,7 @@ final class WorkshopStore: ObservableObject {
             if freed > 0 { self.log("launch cleanup freed \(Fmt.bytes(freed))") }
         }
         // The folder repair edits the library, so it stays on this actor. A short pause lets the
-        // first frame draw before it starts, so launch is never waiting behind a disk walk.
+        // first frame draw, so launch never waits behind a disk walk.
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 250_000_000)
             self.repairFolders()
@@ -3221,9 +3141,8 @@ final class WorkshopStore: ObservableObject {
         }
     }
 
-    /// A transfer cannot outlive the app, so anything still marked as running was stopped when the
-    /// app closed. Its half-written files stay in the staging folder, so a retry carries on from
-    /// them; the history says what really happened.
+    /// A transfer cannot outlive the app, so anything still marked as running was stopped when it
+    /// closed. Its files stay in the staging folder, so a retry carries on.
     private func settleInterruptedHistory() {
         var changed = false
         for i in history.indices where history[i].result == "Downloading" {
@@ -3234,8 +3153,6 @@ final class WorkshopStore: ObservableObject {
         if changed { saveHistory() }
     }
 
-    /// Files that were moved into a game are simply not here any more, which is normal use: that
-    /// counts as moved out, never as a problem.
     private func refreshMovedFlags() {
         var changed = false
         let fm = FileManager.default
@@ -3265,8 +3182,8 @@ final class WorkshopStore: ObservableObject {
         log("temporary files cleared: \(Fmt.bytes(freed))")
     }
 
-    /// Removes what the library does not need: shared ZIPs, stale partial downloads and replaced
-    /// copies. Nothing here reads or writes the library, so it is safe to run off the main thread.
+    /// Removes shared ZIPs, stale partial downloads and replaced copies. Nothing here reads or writes
+    /// the library, so it is safe off the main thread.
     @discardableResult
     nonisolated static func purgeTemporaryFiles(documents: URL, downloadsRoot: URL) -> Int64 {
         let fm = FileManager.default
@@ -3282,8 +3199,7 @@ final class WorkshopStore: ObservableObject {
             freed += sizeOnDisk(url)
             try? fm.removeItem(at: url)
         }
-        // Leftover partial downloads and replaced copies from interrupted sessions, in any game
-        // folder they were left in.
+        // Leftover partial downloads and replaced copies, in whatever game folder they were left.
         for url in partialLeftovers(in: downloadsRoot) {
             freed += sizeOnDisk(url)
             try? fm.removeItem(at: url)
@@ -3291,7 +3207,6 @@ final class WorkshopStore: ObservableObject {
         return freed
     }
 
-    /// The same cleanup for the places that call it from this screen.
     @discardableResult
     private func purgeTemporaryFiles() -> Int64 {
         Self.purgeTemporaryFiles(documents: documents, downloadsRoot: downloadsRoot)
@@ -3348,8 +3263,7 @@ final class WorkshopStore: ObservableObject {
         return false
     }
 
-    /// A line for the runtime log: time, then what happened. Kept short so a long session stays useful.
-    /// Nothing is recorded until the developer menu has been unlocked, so a normal user never pays for it.
+    /// A line for the runtime log. Nothing is recorded until the developer menu is unlocked.
     func log(_ message: String) {
         guard UserDefaults.standard.bool(forKey: "dev.unlocked") else { return }
         let stamp = Date().formatted(.dateTime.hour().minute().second())
@@ -3371,7 +3285,7 @@ final class WorkshopStore: ObservableObject {
         return base.appendingPathComponent("runtime.log")
     }
 
-    /// The log is kept on disk too, so it survives a crash or a relaunch and can still be copied.
+        // Logged to disk, so it survives a relaunch.
     nonisolated private static func appendRuntimeLog(_ line: String) {
         guard let data = (line + "\n").data(using: .utf8) else { return }
         let url = runtimeLogFile
@@ -3610,9 +3524,8 @@ struct StatusGlyph: View {
         switch status {
         case .upToDate:
             Image(systemName: "checkmark.circle.fill").font(.system(size: size)).foregroundStyle(Color.green)
-        // Fine, but the files live in a game folder now: a green folder with an arrow in it, so it
-        // reads at a glance without a warning colour or another line of text. The ready-made symbol
-        // only exists on newer iOS, so older versions get the same shape drawn from two symbols.
+        // Fine, but the files live in a game folder now: a green folder with an arrow, no warning
+        // colour. The ready-made symbol is newer iOS only, so older versions draw it from two.
         case .moved:
             if UIImage(systemName: "arrow.forward.folder") != nil {
                 Image(systemName: "arrow.forward.folder")
@@ -3662,9 +3575,8 @@ struct RatingLine: View {
     }
 }
 
-/// One line of text that scrolls sideways when it doesn't fit, so a long mod name never makes a
-/// grid cell taller than its neighbours. The timing lives in UIKit, so leaving a tab puts the name
-/// back on its first letter immediately and coming back always waits a second before it moves.
+/// One line of text that scrolls sideways when it doesn't fit, so a long name never makes a grid
+/// cell taller. The timing lives in UIKit, so leaving a tab puts the name back at once.
 struct MarqueeText: UIViewRepresentable {
     let text: String
     var fontSize: CGFloat = 14
@@ -3693,8 +3605,7 @@ struct MarqueeText: UIViewRepresentable {
     }
 }
 
-/// The label that does the scrolling. All of the state is here, so a tab switch can never leave a
-/// half-finished scroll behind.
+/// The label that does the scrolling, state and all, so a tab switch can't leave a scroll half done.
 final class MarqueeUIView: UIView {
     private let label = UILabel()
     private var speed: CGFloat = 26
@@ -3744,9 +3655,7 @@ final class MarqueeUIView: UIView {
         if window != nil { restart() }
     }
 
-    /// Puts the first letter at the left edge and, when there is something to scroll, starts the
-    /// one-second pause that begins every pass. With scrolling off the name stays one line and is
-    /// cut with an ellipsis where it no longer fits.
+    /// Puts the first letter at the left edge and starts the one-second pause before each pass.
     private func restart() {
         generation += 1
         let generation = self.generation
@@ -3837,8 +3746,7 @@ struct ReorderRequest: Identifiable {
     let title: String
 }
 
-/// One place to work out how fast a marquee should run, from the scrolling text options. Anything
-/// outside this screen reads the same stored values, so every scrolling name obeys them.
+/// Works out how fast a marquee runs, from the scrolling text options stored in UserDefaults.
 enum MarqueeSpeed {
     private static func stored(_ key: String, fallback: Double) -> Double {
         UserDefaults.standard.object(forKey: key) as? Double ?? fallback
@@ -3893,8 +3801,8 @@ struct ContentView: View {
     @State private var contextItem: WorkshopItem?
     @State private var contextHistory: DownloadRecord?
     @State private var searchText = ""
-    /// The filtered and sorted library, rebuilt only when its inputs change. Computing it inside
-    /// the view body meant re-sorting everything on every scroll tick.
+    /// The filtered and sorted library, rebuilt only when its inputs change. In the body it meant
+    /// re-sorting everything on every scroll tick.
     @State private var visibleItems: [WorkshopItem] = []
     /// The game and tag options for the filter pills, cached for the same reason.
     @State private var installedGameOptions: [(id: String, name: String)] = []
@@ -3924,7 +3832,7 @@ struct ContentView: View {
     @State private var tabStyleOpen = false
     @State private var sortOpen = false
     @State private var confirmClearHistory = false
-    /// The cross in the queue card stops everything, so it asks first.
+    /// Cancelling the whole queue asks first.
     @State private var confirmCancelQueue = false
     /// Scroll bookkeeping kept in a reference type, so a scroll frame never re-renders the whole app.
     @State private var scrollTracker = ScrollTracker()
@@ -4086,8 +3994,8 @@ struct ContentView: View {
             .onChange(of: sortOrder) { _ in visibleItems = filteredLibrary }
     }
 
-    /// The screens and the sheets they present. Kept apart from the observers below so that no one
-    /// expression has to carry every modifier the app owns: a long chain is itself a deep type.
+    /// The screens and the sheets they present, kept apart from the observers below so no single
+    /// expression carries every modifier the app owns.
     private var rootScene: some View {
         ZStack {
             mainStack
@@ -4098,8 +4006,7 @@ struct ContentView: View {
         .sheet(isPresented: $store.showLogin) { loginSheet.presentationDetents([.medium, .large]) }
         .sheet(isPresented: $showDeveloperMenu) { DeveloperMenuView(store: store) }
         .sheet(isPresented: $showShare, onDismiss: {
-            // A ZIP exists only to be handed over: once the sheet is gone it is deleted, so nothing
-            // large is left behind in the app's storage.
+            // A ZIP exists only to be handed over, so it is deleted once the sheet is gone.
             if let url = store.shareURL,
                url.isFileURL,
                url.path.hasPrefix(FileManager.default.temporaryDirectory.path + "/") {
@@ -4214,8 +4121,7 @@ struct ContentView: View {
 
     private var tabContent: some View {
         // A tab is built the first time it is opened and kept afterwards, so launch builds one screen
-        // instead of four. Four full screen hierarchies at once is what ran the main thread out of
-        // stack while SwiftUI was working out their types.
+        // instead of four. Four at once is what ran the main thread out of stack.
         ZStack(alignment: .top) {
             if openedTabs.contains(0) { AnyView(downloadView.tabLayer(0, selected: selectedTab)) }
             if openedTabs.contains(1) { AnyView(browserTab.tabLayer(1, selected: selectedTab)) }
@@ -4250,8 +4156,7 @@ struct ContentView: View {
             .ignoresSafeArea(edges: .bottom)
     }
 
-    /// Detail popups and menus. Each group is its own ZStack, so no single expression has to carry
-    /// every overlay the app can show at once.
+    /// Detail popups and menus. Each group is its own ZStack, so no expression carries every overlay.
     @ViewBuilder private var overlayDetails: some View {
         ZStack {
             if let item = popupItem {
@@ -4410,7 +4315,7 @@ struct ContentView: View {
         return "Workshop item \(id)"
     }
 
-    /// Popups hold a snapshot; this returns the freshest copy so favourite/status changes show immediately.
+    /// The freshest copy of an item, so an open popup shows favourite and status changes at once.
     private func currentItem(_ item: WorkshopItem) -> WorkshopItem {
         store.library.first(where: { $0.id == item.id }) ?? item
     }
@@ -4465,16 +4370,14 @@ struct ContentView: View {
         .accessibilityLabel(store.ringDone ? "Download finished" : "Downloading \(percentText(store.ringProgress))")
     }
 
-    /// The artwork lives in the asset catalogue: a white one for the dark appearance, a black one
-    /// for the light one. Until those images are added, the old mark stands in.
+    /// The artwork lives in the asset catalogue: white for dark, black for light.
     @ViewBuilder private var brandLogo: some View {
         let name = colorScheme == .dark ? "LogoOnDark" : "LogoOnLight"
         if UIImage(named: name) != nil {
             Image(name)
                 .resizable().scaledToFit()
                 .frame(height: logoHeight)
-                // The version sits under the wordmark: clear of the mark on the left, on the same
-                // baseline as the bottom of that mark, starting at the "M" of ModShelf.
+                // The version sits under the wordmark, starting at the "M" of ModShelf.
                 .overlay(alignment: .bottomLeading) {
                     versionBadge.padding(.leading, logoWidth * 0.29)
                 }
@@ -4705,8 +4608,7 @@ struct ContentView: View {
         }
     }
 
-    /// The ScrollView is kept apart from its modifiers, so no single expression has to carry the
-    /// whole tab: a type that big overflows the main thread's stack while it is being built.
+    // Kept apart from its modifiers: one big expression overflowed the main thread's stack.
     private var downloadScroll: some View {
         downloadColumn
             .coordinateSpace(name: "scroll")
@@ -4726,7 +4628,6 @@ struct ContentView: View {
         }
     }
 
-    /// One group of cards per property, so the tab is built from a handful of small view types.
     private var downloadCards: some View {
         VStack(alignment: .leading, spacing: 14) {
             downloadLookupCards
@@ -4815,7 +4716,6 @@ struct ContentView: View {
         }
     }
 
-    /// The running batch: what it is on, a line of progress for the whole set, then a row per mod.
     private var queueCard: some View {
         queueCardBody
             .padding(.bottom, 6)
@@ -4863,8 +4763,8 @@ struct ContentView: View {
         return VStack(spacing: 0) {
             ForEach(Array(active.enumerated()), id: \.element.id) { index, row in
                 if index > 0 { Divider().padding(.horizontal, 14) }
-                // The line sits where the row will land: above the row it is moving towards, and
-                // below the one it is moving past.
+                // The line sits where the row will land: above the one it moves towards, below the
+                // one it moves past.
                 if dragRowID != nil, let target = dragTarget,
                    target < dragRowStart, index == target { dropLine }
                 queueRow(row, index: index, count: active.count)
@@ -4876,8 +4776,6 @@ struct ContentView: View {
         }
     }
 
-    /// Mods that did not finish, in a card of their own under the queue, drawn exactly like a queue
-    /// row so they read the same way.
     private var failedCard: some View {
         let failed = store.queueRows.filter { $0.state == .failed }
         return VStack(alignment: .leading, spacing: 0) {
@@ -4911,8 +4809,7 @@ struct ContentView: View {
         dragRowStart = 0
     }
 
-    /// How far a row slides while another is being dragged, so it moves out of the way rather than
-    /// being covered by the row picked up.
+    // Rows between where a row was picked up and where it is heading step aside.
     private func queueRowShift(_ index: Int) -> CGFloat {
         guard dragRowID != nil, let target = dragTarget, index != dragRowStart else { return 0 }
         if target > dragRowStart, index > dragRowStart, index <= target { return -queueRowSpan }
@@ -4938,7 +4835,6 @@ struct ContentView: View {
         return "\(done) of \(store.queueRows.count) done"
     }
 
-    /// How far the whole batch has come, weighted by each mod's size.
     private var queueOverallProgress: Double {
         guard !store.queueRows.isEmpty else { return 0 }
         let weights = store.queueRows.map { max(1, Double($0.fileSize)) }
@@ -4963,7 +4859,6 @@ struct ContentView: View {
         }
     }
 
-    /// How much room one row takes, so a drag can tell which slot the finger is over.
     private let queueRowSpan: CGFloat = 104
 
     private func queueRow(_ row: DownloadQueueRow, index: Int? = nil, count: Int = 0) -> some View {
@@ -5045,7 +4940,6 @@ struct ContentView: View {
         .frame(height: 84, alignment: .center)
     }
 
-    /// Two grey lines on a grey pill: enough of a grip to be found, quiet enough to stay out of the way.
     private func dragHandle(_ row: DownloadQueueRow, index: Int, count: Int) -> some View {
         VStack(spacing: 3) {
             Capsule().fill(Color.primary.opacity(0.24)).frame(width: 11, height: 2)
@@ -5058,7 +4952,6 @@ struct ContentView: View {
         .accessibilityLabel("Move \(row.title) in the queue")
     }
 
-    /// A hold on the grip picks the row up, and the drag that follows slides it within the card.
     private func reorderGesture(_ row: DownloadQueueRow, index: Int, count: Int) -> some Gesture {
         LongPressGesture(minimumDuration: 0.4, maximumDistance: 14)
             .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .global))
@@ -5087,7 +4980,6 @@ struct ContentView: View {
             }
     }
 
-    /// Puts the row where the blue line was, and asks first when that means stopping a running one.
     private func finishReorder(_ row: DownloadQueueRow, to target: Int) {
         dragRowID = nil
         dragOffsetY = 0
@@ -5106,7 +4998,6 @@ struct ContentView: View {
         store.moveRow(row.id, to: to)
     }
 
-    /// The line that shows where a row picked up by its grip will land.
     private var dropLine: some View {
         Capsule()
             .fill(Color.accentColor)
@@ -5116,7 +5007,6 @@ struct ContentView: View {
             .transition(.opacity)
     }
 
-    /// The percent for one row, on the line under its state.
     @ViewBuilder private func queuePercent(_ row: DownloadQueueRow) -> some View {
         if row.state == .done
             || (row.state == .downloading && !store.isPreparingDownload) {
@@ -5190,12 +5080,10 @@ struct ContentView: View {
         .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
     }
 
-    /// True while the Download tab has nothing on it, so the intro shows only then.
     private var downloadIntro: Bool {
         store.preview == nil && !store.isDownloading && store.queueRows.isEmpty
     }
 
-    /// The heading of the empty tab. Its icon stays neutral so the accent colour is kept for actions.
     private var downloadHeader: some View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: "arrow.down.circle.dotted")
@@ -5213,8 +5101,6 @@ struct ContentView: View {
         }
     }
 
-    /// Three numbers at a glance: what is installed, how many games it covers and how many have an
-    /// update, plus the storage the library takes and what is left on the device.
     private var glanceCard: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("AT A GLANCE")
@@ -5254,8 +5140,7 @@ struct ContentView: View {
         freeSpaceCache
     }
 
-    /// Reading free space touches the file system, so it is done when the app opens or returns rather
-    /// than on every redraw of the card that shows it.
+    /// Read when the app opens or returns, not on every redraw of the card that shows it.
     private func refreshFreeSpace() {
         let values = try? URL(fileURLWithPath: NSHomeDirectory())
             .resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
@@ -5303,8 +5188,7 @@ struct ContentView: View {
         .padding(11).background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
     }
 
-    /// The mod that a button is about to add to the queue, with its name visible while another
-    /// download runs. Without it the Download tab only showed the lookup field.
+    /// The mod a button just queued, so its name is visible while another download runs.
     private func queuedDownloadCard(_ item: WorkshopMetadata) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .center, spacing: 12) {
@@ -5481,8 +5365,6 @@ struct ContentView: View {
         .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(Color.accentColor.opacity(0.14)))
     }
 
-    /// The library's top area: search and the select toggle, then sort, filter and the counts, with
-    /// the actions as a row of labelled tiles below.
     private var libraryBar: some View {
         VStack(spacing: 8) {
             if showingHistory {
@@ -5534,7 +5416,6 @@ struct ContentView: View {
         .padding(.horizontal, 15).padding(.top, 6).padding(.bottom, 8)
     }
 
-    /// A single icon in the same grey tile as the other library controls.
     private func libraryIconTile(_ symbol: String, action: @escaping () -> Void) -> some View {
         Button { Haptics.tap(); action() } label: {
             Image(systemName: symbol)
@@ -5590,7 +5471,6 @@ struct ContentView: View {
         .secondary
     }
 
-    /// The library filter as a chip whose icon has no backing of its own, with the chosen filter named.
     private var filterMenu: some View {
         Menu {
             ForEach(["All", "Updates", "Favourites", "Problems"], id: \.self) { name in
@@ -5767,7 +5647,6 @@ struct ContentView: View {
         EmptyView()
     }
 
-    /// The game and tag filters, icon-only beside the search box like the select toggle.
     private var gameFilterMenu: some View {
         Menu {
             Button { Haptics.select(); selectedGame = nil; selectedTag = nil } label: {
@@ -5805,7 +5684,6 @@ struct ContentView: View {
             .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
-    /// Selection lives beside the tags, so bulk actions are one tap away without a second menu.
     private var selectPill: some View {
         Button {
             Haptics.select()
@@ -6149,8 +6027,7 @@ struct ContentView: View {
     }
 
     // Each options section is its own type-erased view, so this screen never becomes one enormous
-    // nested view type. Deep generic metadata from a single big expression is what the launch
-    // crash log pointed at.
+    // nested view type, which is what the launch crash log pointed at.
     private var appearanceSettings: AnyView {
         AnyView(
             settingsGroup("Appearance") {
@@ -6529,8 +6406,7 @@ struct ItemDetailPopup: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 13) {
             HStack(alignment: .top, spacing: 14) {
-                // Bigger artwork, with the text block matching its height: the name sits on the top
-                // edge and the state on the bottom edge.
+                // Artwork with the text block matched to its height.
                 CachedImage(urlString: item.imageURL, fill: true, maxPixel: 400)
                     .frame(width: 108, height: 108).clipShape(Rectangle())
                 VStack(alignment: .leading, spacing: 3) {
@@ -6713,7 +6589,6 @@ struct ConfirmPopup: View {
     let message: String
     let actionTitle: String
     var tint: Color = .red
-    /// The wording of the button that closes the popup without doing anything.
     var cancelTitle: String = "Cancel"
     let confirm: () -> Void
     let cancel: () -> Void
@@ -6853,8 +6728,6 @@ struct MediaCarousel: View {
     }
 }
 
-/// A tapped image or video opens here, over a dark blurred backdrop. It is the same pager as the
-/// carousel, so swiping moves through the item's media, and the page dots sit just under the media.
 struct ExpandedMediaView: View {
     let media: [MediaItem]
     let startIndex: Int
@@ -6904,7 +6777,6 @@ struct ExpandedMediaView: View {
     }
 }
 
-/// One page of the focused viewer: the media sized to its own shape, with the dots right under it.
 struct ExpandedMediaPage: View {
     let item: MediaItem
     let index: Int
@@ -7013,9 +6885,6 @@ struct ExpandedMediaPage: View {
     }
 }
 
-/// An image that pinches to zoom around your fingers and pans while zoomed in. At normal size the
-/// pan gesture is off, so a sideways swipe still moves the pager to the next page. Only images and
-/// GIFs use this; videos are always plain players.
 struct ZoomableImage: UIViewRepresentable {
     let image: UIImage
     var animate = false
@@ -7065,8 +6934,7 @@ struct ZoomableImage: UIViewRepresentable {
     }
 }
 
-/// An image or GIF in the downloads carousel, with the same pinch-to-zoom as the full-screen
-/// viewer. A tap while it is not zoomed opens the full-screen viewer.
+/// An image or GIF in the carousel, with the same pinch-to-zoom as the full-screen viewer.
 struct ZoomableCarouselImage: View {
     let urlString: String?
     var onTap: () -> Void
@@ -7157,8 +7025,8 @@ final class ZoomImageView: UIScrollView, UIScrollViewDelegate {
     }
 }
 
-/// One live YouTube player, kept between the carousel and the expanded preview, so enlarging a video
-/// that is already playing moves the player instead of loading it again.
+/// One live player, kept between the carousel and the expanded preview, so enlarging a playing video
+/// moves it instead of loading it again.
 final class YouTubePlayers {
     static let shared = YouTubePlayers()
     private static let origin = "https://modshelf.app"
@@ -7264,8 +7132,8 @@ final class YouTubeHostView: UIView {
     }
 }
 
-/// Opens "Watch on YouTube", the video's logo and similar links in the YouTube app instead of
-/// inside the player. The logo opens a new window, so the UI delegate answers that too.
+/// Opens "Watch on YouTube" and the logo's links in the YouTube app, including those that open a
+/// new window.
 final class YouTubeLinkHandler: NSObject, WKNavigationDelegate, WKUIDelegate {
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
@@ -7330,8 +7198,7 @@ struct YouTubePlayerView: UIViewRepresentable {
 
 // MARK: - Folder picker and share sheet
 
-/// Lists a folder's contents. This is how a folder inside another app's container is shown, since
-/// iOS cannot hand the Files app someone else's folder.
+/// Lists a folder's contents, which is how a folder inside another app's container is shown.
 struct FolderContentsSheet: View {
     let url: URL
     let onClose: () -> Void
@@ -7405,8 +7272,8 @@ struct GameHit: Codable, Identifiable, Equatable, Sendable {
 
 struct GameSearchResponse: Codable { let items: [GameHit] }
 
-/// Steam's own list of games that have a Workshop ("Browse All Workshops"). It is downloaded once,
-/// cached, and then searched by name, so only games with a real Workshop are offered.
+/// Steam's own list of games that have a Workshop, downloaded once and searched by name, so only
+/// games with a real Workshop are offered.
 final class WorkshopCatalogue {
     static let shared = WorkshopCatalogue()
 
@@ -7535,9 +7402,8 @@ final class WorkshopCatalogue {
 }
 
 enum GameSearch {
-    /// Steam's store search finds the name (aliases included), then each game that is not already
-    /// in the cached Workshop list is checked once for a real Workshop, so a title missing from the
-    /// cached list still appears and a game without a Workshop still does not.
+    /// Store search finds the name, then each game not already in the cached list is checked once for
+    /// a real Workshop, so a title the cache misses still appears.
     static func search(_ term: String) async -> [GameHit] {
         let query = term.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return [] }
@@ -7832,8 +7698,7 @@ struct BrowserHome: View {
         return recent.filter { !favs.contains($0.id) }
     }
 
-    /// Rows share one rounded card with hairlines between them, so the page reads as a list rather
-    /// than a stack of loose boxes.
+    /// Rows share one card with hairlines between them.
     private func gameList(_ hits: [GameHit]) -> some View {
         VStack(spacing: 0) {
             ForEach(Array(hits.enumerated()), id: \.element.id) { index, hit in
@@ -7977,8 +7842,7 @@ struct BrowserHome: View {
 
 // MARK: - Workshop browser
 
-/// Holds the browser's one WKWebView, so the toolbar can drive it without the
-/// representable having to push a view back into SwiftUI state.
+/// Owns the browser's WKWebView so the toolbar can drive it directly.
 final class BrowserWebViewHandle {
     weak var webView: WKWebView?
 }
@@ -8045,8 +7909,6 @@ struct WorkshopBrowserView: View {
         requestedURL = url
     }
 
-    /// Back, Forward, the address (tap to copy) and Home, all across the top. On the launcher only
-    /// Home is shown, since there is no page to go back to or copy.
     private var topBar: some View {
         HStack(spacing: 8) {
             navButton("chevron.left", "Back", enabled: canGoBack) { handle.webView?.goBack() }
@@ -8168,8 +8030,8 @@ struct WorkshopWebContainer: UIViewRepresentable {
         UserDefaults.standard.string(forKey: WorkshopBrowserView.lastPageKey).flatMap { URL(string: $0) }
     }
 
-    /// Hides Steam's header, store link, the game tab row, news, RSS and the About box.
-    /// Most of this works by matching visible text, so it doesn't depend on Steam's class names.
+    /// Hides Steam's header, store link, the game tab row, news, RSS and the About box. Most of this
+    /// works by matching visible text, so it doesn't depend on Steam's class names.
     static let hideScript = """
     (function(){
       var markers = ['LATEST WORKSHOP NEWS','Subscribe to RSS feed','ABOUT - THE WORKSHOP','Workshop Home About Workshop','Read the full post on our Steam Blog',"Here's a quick look",'About - The Workshop','About this Workshop','About the Workshop','About this Workshop item','About this game','About This Game'];
