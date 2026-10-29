@@ -4387,7 +4387,7 @@ struct ContentView: View {
             Circle().fill(Color.primary.opacity(0.06))
             Circle().stroke(Color.primary.opacity(0.1), lineWidth: 2.5)
             Circle()
-                .trim(from: 0, to: max(0.04, min(1, store.ringProgress)))
+                .trim(from: 0, to: max(0, min(1, store.ringProgress)))
                 .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
                 .rotationEffect(.degrees(-90))
             Image(systemName: store.isPaused ? "pause.fill" : "arrow.down")
@@ -4674,7 +4674,6 @@ struct ContentView: View {
     @ViewBuilder private var downloadPreviewCards: some View {
         if store.isFetching { downloadLoadingRow }
         if let item = store.preview,
-           !store.isBusy, !store.isPaused,
            !store.queueRows.contains(where: { $0.id == item.id }) {
             downloadButton(item)
         }
