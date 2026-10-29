@@ -1826,13 +1826,26 @@ final class WorkshopStore: ObservableObject {
                 let failure = error as NSError
                 let staged = visibleChildren(staging).count
                 log("install failed \(activeID): \(failure.domain) \(failure.code) - \(failure.localizedDescription) · \(staged) items, \(Fmt.bytes(Self.directoryBytes(staging)))")
-                failureText = failure.code == 1 ? "The download came back empty." : "Couldn't finish the download."
+                failureText = failure.code == 1 ? "Steam sent no files for this mod." : "Couldn't finish the download."
                 errorMessage = failureText
                 // What was downloaded is kept for a retry; only an empty folder has nothing to keep.
                 if staged == 0 {
                     try? FileManager.default.removeItem(at: staging)
                 } else {
                     log("kept the downloaded files for \(activeID)")
+                }
+                // Steam said it finished but handed over nothing. That is sometimes a manifest that
+                // was still being published, so one more attempt is worth making before giving up.
+                if failure.code == 1, autoRetries < 1 {
+                    autoRetries += 1
+                    isInstalling = false
+                    lastOutcome = "Carrying on"
+                    log("retrying \(activeID) after an empty download")
+                    Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: 1_500_000_000)
+                        self.download(activeID, meta: meta)
+                    }
+                    return
                 }
             }
             isInstalling = false
