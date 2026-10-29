@@ -30,7 +30,6 @@ let modShelfVersion = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVe
 /// The build number CI stamps in, taken from the bundle so it follows the commit count.
 let modShelfBuild = (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String) ?? "1"
 
-// MARK: - Models
 
 enum ModStatus { case upToDate, needsUpdate, moved, notChecked, broken }
 
@@ -204,7 +203,6 @@ struct MediaViewer: Identifiable {
     let index: Int
 }
 
-// MARK: - Keychain
 
 enum Keychain {
     static func write(_ value: String, key: String) {
@@ -236,7 +234,6 @@ enum Keychain {
     }
 }
 
-// MARK: - Small helpers
 
 enum Haptics {
     private static var enabled: Bool { UserDefaults.standard.object(forKey: "options.haptics") as? Bool ?? true }
@@ -325,7 +322,6 @@ final class NetworkWatcher {
     }
 }
 
-// MARK: - Image cache
 
 final class ImageStore {
     static let shared = ImageStore()
@@ -485,7 +481,6 @@ struct CachedImage: View {
     }
 }
 
-// MARK: - Browser cookie vault (keeps Steam logged in between launches)
 
 enum CookieVault {
     private static let key = "browser.cookies"
@@ -538,7 +533,6 @@ enum CookieVault {
     }
 }
 
-// MARK: - Steam metadata (public API + Workshop page)
 
 enum SteamMeta {
     static let ageCookie = "birthtime=631152001; lastagecheckage=1-0-1990; wants_mature_content=1; Steam_Language=english"
@@ -662,7 +656,6 @@ enum SteamMeta {
         return name
     }
 
-    // MARK: regex helpers
     private static func firstMatch(_ pattern: String, in text: String) -> String? {
         guard let re = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]) else { return nil }
         let ns = text as NSString
@@ -712,7 +705,6 @@ enum SteamMeta {
     }
 }
 
-// MARK: - Store
 
 @MainActor
 final class WorkshopStore: ObservableObject {
@@ -919,7 +911,6 @@ final class WorkshopStore: ObservableObject {
 
     deinit { poller?.invalidate() }
 
-    // MARK: polling / persistence
 
     private func startPolling() {
         guard poller == nil else { return }
@@ -966,7 +957,6 @@ final class WorkshopStore: ObservableObject {
         saveHistory()
     }
 
-    // MARK: download folders
 
     /// Where the files for a game belong: a folder named after it inside ModShelf's download folder.
     func root(forGame appID: String?) -> URL {
@@ -1113,7 +1103,6 @@ final class WorkshopStore: ObservableObject {
         return root(forGame: appID)
     }
 
-    // MARK: lookup
 
     static func workshopID(from input: String) -> String? {
         let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1163,7 +1152,6 @@ final class WorkshopStore: ObservableObject {
         }
     }
 
-    // MARK: sign in
 
     func signIn(automatic: Bool = false) async {
         loginError = ""
@@ -1257,7 +1245,6 @@ final class WorkshopStore: ObservableObject {
         status = "Signed out"
     }
 
-    // MARK: download
 
     func download(_ raw: String? = nil, meta override: WorkshopMetadata? = nil) {
         errorMessage = ""
@@ -2126,9 +2113,6 @@ final class WorkshopStore: ObservableObject {
         status = "Cancelling download…"
     }
 
-    // MARK: developer tools
-    //
-    // Reachable only from the hidden menu behind the logo taps. Nothing else in the app uses these.
 
     var devSnapshot: String {
         """
@@ -2306,7 +2290,6 @@ final class WorkshopStore: ObservableObject {
         return "\(removed) setting\(removed == 1 ? "" : "s") reset."
     }
 
-    // MARK: finalising a download (flatten Steam's <id>/mods/<mod> layout, write info file)
 
     private func isDir(_ url: URL) -> Bool {
         var d: ObjCBool = false
@@ -2743,7 +2726,6 @@ final class WorkshopStore: ObservableObject {
         return (true, count, bytes)
     }
 
-    // MARK: library actions
 
     /// Partial downloads and replaced copies left behind by an interrupted session, however deep.
     nonisolated static func partialLeftovers(in root: URL) -> [URL] {
@@ -3053,7 +3035,6 @@ final class WorkshopStore: ObservableObject {
         }
     }
 
-    // MARK: update checks
 
     func checkUpdates(_ item: WorkshopItem) {
         guard !isCheckingUpdates else { operationMessage = "An update check is already running."; return }
@@ -3280,7 +3261,6 @@ final class WorkshopStore: ObservableObject {
         if values?.isDirectory == true { return Self.directoryBytes(url) }
         return Int64(values?.totalFileAllocatedSize ?? values?.fileAllocatedSize ?? values?.fileSize ?? 0)
     }
-    // MARK: app updates
 
     /// The release the app checks against: the build publishes a tiny version file next to the IPA.
     nonisolated static let appRepo = "shplash/ModShelf"
@@ -3383,7 +3363,6 @@ final class WorkshopStore: ObservableObject {
     }
 }
 
-// MARK: - Scroll tracking
 
 struct ScrollOffsetKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
@@ -3491,7 +3470,6 @@ extension View {
     }
 }
 
-// MARK: - Tab bar
 
 struct AppTabBar: View {
     @Binding var selected: Int
@@ -3587,7 +3565,6 @@ struct AppTabBar: View {
     }
 }
 
-// MARK: - Small shared controls
 
 struct IconButton: View {
     let symbol: String
@@ -3841,7 +3818,6 @@ struct DottedLabel: View {
     }
 }
 
-// MARK: - Main view
 
 /// Which mods a ZIP export would really contain, and how many have to be left out.
 struct ExportPrompt: Identifiable {
@@ -3985,7 +3961,6 @@ struct ContentView: View {
     ]
     private var sortOrders: [String] { sortGroups.flatMap { $0 } }
 
-    // MARK: derived library data
 
     private var installedGames: [(id: String, name: String)] {
         var seen: [String: String] = [:]
@@ -4100,7 +4075,6 @@ struct ContentView: View {
         confirmBulkDelete = false
     }
 
-    // MARK: body
 
     var body: some View {
         rootWithObservers
@@ -4445,7 +4419,6 @@ struct ContentView: View {
         store.library.first(where: { $0.id == item.id }) ?? item
     }
 
-    // MARK: header
 
     private var accountHeader: some View {
         VStack(spacing: 0) {
@@ -4660,7 +4633,6 @@ struct ContentView: View {
         }
     }
 
-    // MARK: scrolling → tab bar shrink
 
     private func handleScroll(_ y: CGFloat) {
         guard tabStyle == "pill" else { return }
@@ -4753,7 +4725,6 @@ struct ContentView: View {
 
     private func dismissKeyboard() { UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil) }
 
-    // MARK: - Download tab
 
     private var downloadView: some View {
         NavigationStack {
@@ -5485,8 +5456,6 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - Library tab
-
     private var libraryView: some View {
         NavigationStack {
             VStack(spacing: 0) {
@@ -5860,7 +5829,6 @@ struct ContentView: View {
         .accessibilityLabel(selecting ? "Finish selecting" : "Select mods")
     }
 
-    // MARK: grid + list
 
     private func gridContent(_ items: [WorkshopItem]) -> some View {
         ScrollView {
@@ -6055,7 +6023,6 @@ struct ContentView: View {
         .padding(.horizontal, 15).padding(.vertical, 10)
     }
 
-    // MARK: - History
 
     private var historyContent: some View {
         Group {
@@ -6163,7 +6130,6 @@ struct ContentView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity).padding(28)
     }
 
-    // MARK: - Options tab
 
     private var optionsView: some View {
         NavigationStack {
@@ -6504,7 +6470,6 @@ struct ContentView: View {
         .padding(.horizontal, 15).padding(.vertical, 11).contentShape(Rectangle())
     }
 
-    // MARK: - Login sheet
 
     private var loginSheet: some View {
         NavigationStack {
@@ -6577,7 +6542,6 @@ struct ContentView: View {
     }
 }
 
-// MARK: - Popups
 
 struct ItemDetailPopup: View {
     let item: WorkshopItem
@@ -6828,7 +6792,6 @@ struct DeleteConfirmationPopup: View {
     }
 }
 
-// MARK: - Description, IDs, media
 
 struct ExpandableDescription: View {
     let text: String
@@ -7381,7 +7344,6 @@ struct YouTubePlayerView: UIViewRepresentable {
     }
 }
 
-// MARK: - Folder picker and share sheet
 
 /// Lists a folder's contents, which is how a folder inside another app's container is shown.
 struct FolderContentsSheet: View {
@@ -7447,7 +7409,6 @@ struct ShareSheet: UIViewControllerRepresentable {
     func updateUIViewController(_ controller: UIActivityViewController, context: Context) { }
 }
 
-// MARK: - Browser home (custom start page)
 
 struct GameHit: Codable, Identifiable, Equatable, Sendable {
     let id: Int
@@ -8025,7 +7986,6 @@ struct BrowserHome: View {
     }
 }
 
-// MARK: - Workshop browser
 
 /// Owns the browser's WKWebView so the toolbar can drive it directly.
 final class BrowserWebViewHandle {
@@ -8384,9 +8344,7 @@ struct WorkshopWebContainer: UIViewRepresentable {
 }
 
 
-// MARK: - Developer menu
-//
-// Nothing in the app points here: it opens after twenty quick taps on the logo in the header.
+// Nothing in the app points here: it opens after twenty quick taps on the credit row in Options.
 
 struct DeveloperMenuView: View {
     @ObservedObject var store: WorkshopStore
