@@ -64,15 +64,19 @@ Use:
 - iOS 16 or newer
 - A Steam account and the game in your Steam library: Steam only hands over a game's Workshop items when your account holds its license. Free-to-play games give you that license when you add them to your library once.
 
+
 ## Where mods go
 
+ModShelf organises downloads into a separate folder for each game.
+
+Use the **open directory** button in ModShelf to jump straight to your downloads folder, regardless of how the app was installed.
+
+Your downloads are organised like this:
+
 ```
-Files app → ModShelf → Downloaded Mods → <game name> → <mod>
+Downloaded Mods/<game name>/<mod>
 ```
 
-Moving a mod into its game is normal use, so ModShelf shows those as moved out and keeps the install record for update checks.
-
-If using [LiveContainer](https://github.com/LiveContainer/LiveContainer) , either check the directory shown in ModShelf’s own options or while in LiveContainer > Apps > Hold ModShelf’s app > “Open Data Folder” and keep its path in mind as you backtrack to “On My (Your Device Type)”.
 
 ## Notes & Licensing
 
