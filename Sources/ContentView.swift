@@ -751,6 +751,8 @@ final class WorkshopStore: ObservableObject {
     @Published var ringDone = false
     @Published var ringProgress = 0.0
     private var ringHideTask: Task<Void, Never>?
+    /// A lone finished row is taken off the page after a moment, so the default view comes back.
+    private var finishedRowCleanup: Task<Void, Never>?
     @Published var isFetching = false
     @Published var preview: WorkshopMetadata?
     @Published var library: [WorkshopItem] = []
@@ -1319,6 +1321,7 @@ final class WorkshopStore: ObservableObject {
         isPaused = false
         resumePending = false
         // A new transfer takes the ring back over from a finished one.
+        finishedRowCleanup?.cancel()
         ringHideTask?.cancel()
         ringVisible = true
         ringDone = false
@@ -1486,6 +1489,7 @@ final class WorkshopStore: ObservableObject {
         if total == 1 {
             operationMessage = cancelled ? "Download cancelled." : (failed > 0 ? "That one didn't finish." : "Downloaded.")
             log("queue end: \(operationMessage)")
+            clearSingleFinishedRowSoon()
             return
         }
         if cancelled {
@@ -1498,6 +1502,40 @@ final class WorkshopStore: ObservableObject {
             operationMessage = "Downloaded \(done) of \(total) mods."
         }
         log("queue end: \(operationMessage)")
+        clearSingleFinishedRowSoon()
+    }
+
+    /// A lone finished row clears itself after a moment, so the download screen returns to its default view.
+    private func clearSingleFinishedRowSoon() {
+        finishedRowCleanup?.cancel()
+        guard !isBusy, !isDownloading, queueRows.count == 1,
+              queueRows.first?.state == .done else { return }
+        finishedRowCleanup = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            guard !Task.isCancelled, !self.isBusy, !self.isDownloading,
+                  self.queueRows.count == 1, self.queueRows.first?.state == .done else { return }
+            let finishedID = self.queueRows.first?.id
+            self.queueRows.removeAll()
+            self.queueStep = 0; self.queueTotal = 0; self.queueFailed = 0
+            if let finishedID, self.preview?.id == finishedID {
+                self.preview = nil
+                self.input = ""
+            }
+        }
+    }
+
+    /// Leaving the downloads tab takes a finished run with it, but never a failure.
+    func clearFinishedRowsAwayFromDownloads() {
+        finishedRowCleanup?.cancel()
+        guard !isBusy, !isDownloading, !queueRows.isEmpty,
+              !queueRows.contains(where: { $0.state != .done }) else { return }
+        let finishedID = queueRows.count == 1 ? queueRows.first?.id : nil
+        queueRows.removeAll()
+        queueStep = 0; queueTotal = 0; queueFailed = 0
+        if let finishedID, preview?.id == finishedID {
+            preview = nil
+            input = ""
+        }
     }
 
     /// Where the bar sits. The folder is measured as it grows, so the bar moves only when bytes
@@ -4196,6 +4234,8 @@ struct ContentView: View {
             store.log("tab: \(["Download", "Workshop", "Library", "Options"][min(max(tab, 0), 3)])")
             // Every arrival on the library restarts the scrolling names from their resting place.
             if tab == 2 { marqueeToken += 1 }
+            // A finished run does not follow the user around; a failure stays put.
+            if tab != 0 { store.clearFinishedRowsAwayFromDownloads() }
         }
         .onAppear {
             // A sort saved by an older build may name an option that is no longer offered.
