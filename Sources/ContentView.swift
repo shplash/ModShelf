@@ -1,3 +1,14 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// Copyright (C) 2026 shplash
+//
+// ModShelf is free software: you can redistribute it and/or modify it under the terms of the GNU
+// General Public License as published by the Free Software Foundation, either version 3 of the
+// License, or (at your option) any later version. It is distributed in the hope that it will be
+// useful, but without any warranty; without even the implied warranty of merchantability or fitness
+// for a particular purpose. See the GNU General Public License in LICENSE for more details.
+
+
 import SwiftUI
 import UIKit
 import WebKit
@@ -6329,9 +6340,11 @@ struct ContentView: View {
     private var creditsSettings: AnyView {
         AnyView(
             settingsGroup("Credits") {
-                creditLicenseRow("ModShelf", "Created by Splash (@shplash)", license: "MPL-2.0 License")
+                creditLicenseRow("ModShelf", "Created by Splash (@shplash)", license: "GPL-3.0-or-later")
                 divider
                 creditLicenseRow("go-steam", "Engine by Alexander Birkner (@BirknerAlex)", license: "MIT License")
+                divider
+                creditLicenseRow("ZIPFoundation", "ZIP handling by Thomas Zoechling (@weichsel)", license: "MIT License")
                 divider
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Steam and the Steam Workshop are trademarks of Valve Corporation. ModShelf is not made by or endorsed by Valve.")
