@@ -274,13 +274,18 @@ enum Fmt {
 
 /// Turns Steam's raw wording into a short line someone can act on; the wording stays calm on purpose.
 enum ErrorText {
-    static func friendly(_ raw: String) -> String {
+    static func friendly(_ raw: String, game: String? = nil) -> String {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return "That didn't go through just now. Try it again." }
         let r = text.lowercased()
+        let owner = (game ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         if r.contains("own this game") || r.contains("not own") || r.contains("don't own")
-            || r.contains("no license") || r.contains("licen") || r.contains("not purchased") {
-            return "Steam only hands over a game's Workshop items when the game is in your library. Free-to-play games are covered once you add them."
+            || r.contains("no license") || r.contains("licen") || r.contains("not purchased")
+            || r.contains("depot key") || r.contains("no workshop depot") || r.contains("app ownership") {
+            let tail = "free-to-play games count once you add them"
+            return owner.isEmpty
+                ? "Steam only hands over Workshop items for a game your account owns. Add the game to your Steam library (\(tail)), then try again."
+                : "Steam only hands over Workshop items for a game your account owns. \(owner) isn't in your Steam library — add it there (\(tail)), then try again."
         }
         if r.contains("removed") || r.contains("banned") || r.contains("violat") {
             return "Steam has taken this item down, so it can't be downloaded any more."
@@ -1278,17 +1283,17 @@ final class WorkshopStore: ObservableObject {
 
     /// Adds a mod to the back of the queue, drawn as a waiting row straight away.
     private func enqueue(_ id: String, meta: WorkshopMetadata) {
-        guard !queue.contains(id), activeID != id, !queueRows.contains(where: { $0.id == id }) else {
-            operationMessage = "That one is already on its way."
-            return
-        }
+        guard !queue.contains(id), activeID != id,
+              !queueRows.contains(where: { $0.id == id && $0.state != .done && $0.state != .failed })
+        else { return }
+        // A finished or failed row for the same mod would hide the new one, so it goes first.
+        queueRows.removeAll { $0.id == id && $0.state != .downloading }
         queue.append(id)
         pendingMeta[id] = meta
         queueRows.append(DownloadQueueRow(id: id, title: meta.title,
                                          imageURL: meta.imageURL.isEmpty ? nil : meta.imageURL,
                                          gameName: meta.gameName, fileSize: meta.fileSize))
         queueTotal = queueRows.count
-        operationMessage = "\(meta.title) joins the queue."
         log("queued \(id) \"\(meta.title)\" at \(queueRows.count) in line")
         Haptics.tap()
     }
@@ -1332,6 +1337,7 @@ final class WorkshopStore: ObservableObject {
             errorMessage = "Not enough space: this needs \(Fmt.bytes(downloadExpectedBytes)) and \(Fmt.bytes(Int64(free))) is free."
             log("not enough space: need \(Fmt.bytes(downloadExpectedBytes)), free \(Fmt.bytes(Int64(free)))")
             record(id, title: meta.title, result: "Failed", error: errorMessage, game: meta.gameName)
+            updateRow(id, state: .failed)
             Haptics.error()
             return
         }
@@ -1352,16 +1358,18 @@ final class WorkshopStore: ObservableObject {
             errorMessage = "We couldn't make a place for that download."
             log("staging failed for \(id): \(error)")
             record(id, title: meta.title, result: "Failed", error: errorMessage, game: meta.gameName)
+            updateRow(id, state: .failed)
             return
         }
-        guard let engine else { return }
+        guard let engine else { updateRow(id, state: .failed); return }
         let result = engine.downloadWorkshopItem(id, targetDir: staging.path)
         if !result.isEmpty {
             // Keep what is already staged: the engine may have written chunks before refusing.
-            let message = ErrorText.friendly(result)
+            let message = ErrorText.friendly(result, game: meta.gameName)
             errorMessage = message; status = "Download failed"
             log("engine refused \(id): \(result)")
             record(id, title: meta.title, result: "Failed", error: message, imageURL: meta.imageURL.isEmpty ? nil : meta.imageURL, game: meta.gameName)
+            updateRow(id, state: .failed)
             Haptics.error()
             return
         }
@@ -1438,28 +1446,22 @@ final class WorkshopStore: ObservableObject {
         guard devTask == nil else { operationMessage = "A simulated run is on screen. Let it finish first."; return }
         let picks = library.filter { $0.updateAvailable }
         guard !picks.isEmpty else { operationMessage = "Everything is up to date."; log("update all: nothing to do"); return }
-        // If something is already running, these updates join its queue rather than replacing it.
-        if isBusy || !queue.isEmpty {
-            var added = 0
-            for item in picks where !queue.contains(item.id) && activeID != item.id {
-                if let meta = metaFor(item.id) {
-                    enqueue(item.id, meta: meta)
-                    added += 1
-                }
-            }
-            operationMessage = added == 0
-                ? "Those updates are already queued."
-                : "\(added) mod\(added == 1 ? "" : "s") of updates added to the queue."
+        // Finished rows from the last run are not part of this batch, and they must not hide it.
+        queueRows.removeAll { $0.state == .done }
+        var added = 0
+        for item in picks where item.id != activeID && !queue.contains(item.id) {
+            guard let meta = metaFor(item.id) else { continue }
+            enqueue(item.id, meta: meta)
+            added += 1
+        }
+        guard added > 0 else {
+            operationMessage = "Those updates are already queued."
             return
         }
-        queue = picks.map(\.id)
-        queueRows = picks.map { DownloadQueueRow(id: $0.id, title: $0.displayTitle,
-                                                 imageURL: $0.imageURL, gameName: $0.gameName,
-                                                 fileSize: $0.byteCount ?? 0) }
-        queueStep = 0
-        queueTotal = queue.count
-        queueFailed = 0
-        startNextInQueue()
+        // The batch speaks for itself, and the page should not also offer one of its mods.
+        preview = nil
+        input = ""
+        if !isBusy, !isPaused { startNextInQueue() }
     }
     private func startNextInQueue() {
         guard !isBusy else { return }
@@ -1488,9 +1490,10 @@ final class WorkshopStore: ObservableObject {
 
     /// The end of a batch. Rows stay on screen, cleared when the next download starts.
     private func finishQueue(cancelled: Bool = false) {
-        let total = queueTotal
-        let done = max(0, queueStep - (cancelled ? 1 : 0))
-        let failed = queueFailed
+        let rows = queueRows
+        let total = max(queueTotal, rows.count)
+        let failed = rows.filter { $0.state == .failed }.count
+        let done = rows.filter { $0.state == .done }.count
         queueStep = 0; queueTotal = 0; queueFailed = 0
         guard total > 0 else { return }
         if total == 1 {
@@ -1500,12 +1503,12 @@ final class WorkshopStore: ObservableObject {
         }
         if cancelled {
             operationMessage = "Stopped after \(min(done, total)) of \(total)."
-        } else if done == 0 {
-            operationMessage = "Nothing could be downloaded just now."
-        } else if failed == 0 {
-            operationMessage = done >= total ? "Downloaded all \(total) mods." : "Downloaded \(done) of \(total) mods."
+        } else if failed > 0 {
+            operationMessage = "Downloaded \(done) of \(total) mods; \(failed) didn't finish."
+        } else if done >= total {
+            operationMessage = "Downloaded all \(total) mods."
         } else {
-            operationMessage = "Downloaded \(max(0, done - min(failed, done))) of \(total) mods; \(failed) didn't finish."
+            operationMessage = "Downloaded \(done) of \(total) mods."
         }
         log("queue end: \(operationMessage)")
     }
@@ -1816,7 +1819,8 @@ final class WorkshopStore: ObservableObject {
         } else {
             let reason = cancelled
                 ? "The download was cancelled."
-                : ErrorText.friendly(!error.isEmpty ? error : (!failureText.isEmpty ? failureText : "The download didn't finish."))
+                : ErrorText.friendly(!error.isEmpty ? error : (!failureText.isEmpty ? failureText : "The download didn't finish."),
+                                      game: meta.gameName)
             updateHistory(id: activeID, result: cancelled ? "Cancelled" : "Failed", error: reason)
             if !cancelled { errorMessage = reason }
             lastOutcome = cancelled ? "Download cancelled" : "Download failed"
@@ -1836,6 +1840,10 @@ final class WorkshopStore: ObservableObject {
                     log("cancelled \(activeID); the rest of the queue continues")
                 } else {
                     queue.removeAll()
+                    queueRows.removeAll()
+                    queueStep = 0; queueTotal = 0; queueFailed = 0
+                    status = "Ready"
+                    operationMessage = "Download cancelled."
                 }
             } else if interrupted {
                 updateRow(activeID, state: .waiting)
@@ -2073,9 +2081,12 @@ final class WorkshopStore: ObservableObject {
             status = "Ready"
             return
         }
-        if !keepingQueue { queue.removeAll() }
         if !keepingQueue {
-            // Back to the default view: no Workshop page left open behind a queue that is gone.
+            // Nothing of the batch is left: no rows, no failures, no page behind it.
+            queue.removeAll()
+            pendingMeta.removeAll()
+            queueRows.removeAll()
+            queueStep = 0; queueTotal = 0; queueFailed = 0
             preview = nil
             input = ""
             suspendedDownloadID = nil
@@ -3168,6 +3179,24 @@ final class WorkshopStore: ObservableObject {
         input = record.workshopID
         if let item = library.first(where: { $0.id == record.workshopID }) { update(item) }
         else { download(record.workshopID) }
+    }
+
+    /// Puts a failed row back through the queue with the details it started with.
+    func retryQueued(_ id: String) {
+        let row = queueRows.first(where: { $0.id == id })
+        var meta = metaFor(id) ?? pendingMeta[id]
+            ?? WorkshopMetadata(id: id, title: row?.title ?? "Workshop item \(id)", author: "",
+                                description: "", imageURL: row?.imageURL ?? "", updatedAt: 0)
+        if meta.gameName == nil { meta.gameName = row?.gameName }
+        if meta.fileSize == 0, let size = row?.fileSize { meta.fileSize = size }
+        if isBusy || isPaused {
+            enqueue(id, meta: meta)
+            return
+        }
+        guard isAuthenticated else { operationMessage = "Sign in to Steam and this download can start."; showLogin = true; return }
+        // The rest of the rows stay: a retry adds to the list rather than replacing it.
+        updateRow(id, progress: 0, state: .downloading)
+        beginDownload(id: id, meta: meta, keepQueue: true)
     }
     func clearHistory() {
         log("history cleared (\(history.count) entries)")
@@ -4645,8 +4674,8 @@ struct ContentView: View {
     @ViewBuilder private var downloadPreviewCards: some View {
         if store.isFetching { downloadLoadingRow }
         if let item = store.preview,
+           !store.isBusy, !store.isPaused,
            !store.queueRows.contains(where: { $0.id == item.id }) {
-            if store.isBusy || store.isPaused { queuedDownloadCard(item) }
             downloadButton(item)
         }
     }
@@ -4727,12 +4756,14 @@ struct ContentView: View {
             }
     }
 
+    private var queueIsMulti: Bool { max(store.queueTotal, store.queueRows.count) > 1 }
+
     private var queueCardBody: some View {
         let active = store.queueRows.filter { $0.state != .failed }
         return VStack(alignment: .leading, spacing: 0) {
-            if store.queueTotal > 1 { queueCardHeader }
+            if queueIsMulti { queueCardHeader }
             queueRowsList(active: active)
-                .padding(.top, store.queueTotal > 1 ? 6 : 2)
+                .padding(.top, queueIsMulti ? 6 : 2)
         }
     }
 
@@ -4818,11 +4849,15 @@ struct ContentView: View {
     }
 
     private var queueHeadline: String {
-        if store.queueTotal == 0 { return "Finished" }
-        if store.queueTotal > 1 {
-            return "Downloading \(min(store.queueStep, store.queueTotal)) of \(store.queueTotal)"
+        let total = max(store.queueTotal, store.queueRows.count)
+        guard total > 1 else {
+            return store.isDownloading || store.isPaused ? "Downloading" : "Finished"
         }
-        return "Downloading"
+        let done = store.queueRows.filter { $0.state == .done }.count
+        if store.queueRows.contains(where: { $0.state == .downloading }) {
+            return "Downloading \(min(done + 1, total)) of \(total)"
+        }
+        return "Finished \(min(done, total)) of \(total)"
     }
 
     private var queueSubline: String {
@@ -4917,7 +4952,7 @@ struct ContentView: View {
     private func queueRowActions(_ row: DownloadQueueRow) -> some View {
         HStack(spacing: 8) {
             if row.state == .failed {
-                Button { Haptics.tap(); store.download(row.id) } label: {
+                Button { Haptics.tap(); store.retryQueued(row.id) } label: {
                     Image(systemName: "arrow.clockwise")
                         .font(.system(size: 11, weight: .bold))
                         .foregroundStyle(Color.accentColor)
@@ -5188,37 +5223,6 @@ struct ContentView: View {
         .padding(11).background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
     }
 
-    /// The mod a button just queued, so its name is visible while another download runs.
-    private func queuedDownloadCard(_ item: WorkshopMetadata) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .center, spacing: 12) {
-                Color.clear
-                    .frame(width: 84, height: 84)
-                    .overlay(CachedImage(urlString: item.imageURL, fill: false, maxPixel: 320).allowsHitTesting(false))
-                VStack(alignment: .leading, spacing: 5) {
-                    MarqueeText(text: item.title, fontSize: 15, weight: .semibold, height: 19,
-                                speed: MarqueeSpeed.otherSpeed, active: MarqueeSpeed.otherRunning)
-                    RatingLine(rating: item.rating, count: item.ratingCount, size: 13)
-                    if let game = item.gameName, !game.isEmpty {
-                        Text(game).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .frame(height: 84)
-            }
-            HStack(spacing: 6) {
-                Image(systemName: "text.line.first.and.arrowtriangle.forward")
-                    .font(.system(size: 11, weight: .semibold))
-                Text("Queued behind the download that is running")
-                    .font(.system(size: 11))
-            }
-            .foregroundStyle(.secondary)
-        }
-        .padding(12)
-        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.05), lineWidth: 1))
-    }
-
     private func downloadButton(_ item: WorkshopMetadata) -> some View {
         let existing = store.library.first(where: { $0.id == item.id })
         var label = "Download mod"
@@ -5485,16 +5489,15 @@ struct ContentView: View {
                 Image(systemName: "line.3.horizontal.decrease.circle")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(Color.accentColor)
-                // The separator and the filter's own icon keep their place for "All" too, so the
-                // chip is the same width whatever is chosen and nothing beside it moves.
-                Text("•").font(.system(size: 12, weight: .medium))
-                    .foregroundColor(Color(uiColor: .secondaryLabel))
-                    .opacity(libraryFilter == "All" ? 0 : 1)
-                Image(systemName: filterSymbol(libraryFilter))
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(filterTint(libraryFilter))
-                    .frame(width: 16)
-                    .opacity(libraryFilter == "All" ? 0 : 1)
+                // Only when a filter is on, so the chip is narrow for "All" and grows for a real filter.
+                if libraryFilter != "All" {
+                    Text("•").font(.system(size: 12, weight: .medium))
+                        .foregroundColor(Color(uiColor: .secondaryLabel))
+                    Image(systemName: filterSymbol(libraryFilter))
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(filterTint(libraryFilter))
+                        .frame(width: 16)
+                }
             }
             .foregroundStyle(.secondary)
             .padding(.horizontal, 9).padding(.vertical, 6)
