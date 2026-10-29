@@ -3386,6 +3386,52 @@ struct ScrollSpy: UIViewRepresentable {
     }
 }
 
+/// Scrolls the scroll view it sits in back to the top when asked.
+enum ScrollToTopRequest {
+    static let name = Notification.Name("modshelf.scrollToTop")
+    static func post() { NotificationCenter.default.post(name: name, object: nil) }
+}
+
+struct ScrollToTopSentinel: UIViewRepresentable {
+    func makeUIView(context: Context) -> SentinelView {
+        let view = SentinelView()
+        context.coordinator.token = NotificationCenter.default.addObserver(
+            forName: ScrollToTopRequest.name, object: nil, queue: .main) { [weak view] _ in
+            view?.scrollUp()
+        }
+        return view
+    }
+    func updateUIView(_ view: SentinelView, context: Context) {}
+
+    static func dismantleUIView(_ view: SentinelView, coordinator: Coordinator) {
+        if let token = coordinator.token { NotificationCenter.default.removeObserver(token) }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: SentinelView, context: Context) -> CGSize? {
+        CGSize(width: proposal.width ?? 0, height: 0)
+    }
+
+    final class Coordinator {
+        var token: NSObjectProtocol?
+    }
+
+    final class SentinelView: UIView {
+        func scrollUp() {
+            // Walk out to the scroll view that holds this row and put it back at the top.
+            var probe: UIView? = superview
+            while let view = probe {
+                if let scroll = view as? UIScrollView {
+                    let top = CGPoint(x: 0, y: -scroll.adjustedContentInset.top)
+                    scroll.setContentOffset(top, animated: true)
+                    return
+                }
+                probe = view.superview
+            }
+        }
+    }
+}
+
 struct ScrollOffsetReader: View {
     var body: some View {
         GeometryReader { g in
@@ -3536,18 +3582,22 @@ struct FilterPill: View {
 struct StatusGlyph: View {
     let status: ModStatus
     var size: CGFloat = 14
+    /// Overrides the status colour, for places that read a state differently (a cancelled history row).
+    var colour: Color? = nil
     var body: some View { glyph.accessibilityLabel(label) }
+
+    private func shade(_ base: Color) -> Color { colour ?? base }
 
     @ViewBuilder private var glyph: some View {
         switch status {
         case .upToDate:
-            Image(systemName: "checkmark.circle.fill").font(.system(size: size)).foregroundStyle(Color.green)
+            Image(systemName: "checkmark.circle.fill").font(.system(size: size)).foregroundStyle(shade(.green))
         // Fine, but the files live in a game folder now: a green folder with an arrow, no warning
         // colour. The ready-made symbol is newer iOS only, so older versions draw it from two.
         case .moved:
             if UIImage(systemName: "arrow.forward.folder") != nil {
                 Image(systemName: "arrow.forward.folder")
-                    .font(.system(size: size, weight: .medium)).foregroundStyle(Color.green)
+                    .font(.system(size: size, weight: .medium)).foregroundStyle(shade(.green))
             } else {
                 ZStack {
                     Image(systemName: "folder")
@@ -3556,14 +3606,14 @@ struct StatusGlyph: View {
                         .font(.system(size: size * 0.52, weight: .bold))
                         .offset(x: size * 0.08, y: size * 0.14)
                 }
-                .foregroundStyle(Color.green)
+                .foregroundStyle(shade(.green))
             }
         case .needsUpdate:
-            Image(systemName: "arrow.down.circle.fill").font(.system(size: size)).foregroundStyle(Color.accentColor)
+            Image(systemName: "arrow.down.circle.fill").font(.system(size: size)).foregroundStyle(shade(.accentColor))
         case .notChecked:
-            Image(systemName: "questionmark.circle.fill").font(.system(size: size)).foregroundStyle(Color.secondary)
+            Image(systemName: "questionmark.circle.fill").font(.system(size: size)).foregroundStyle(shade(.secondary))
         case .broken:
-            Image(systemName: "exclamationmark.triangle.fill").font(.system(size: size)).foregroundStyle(Color.yellow)
+            Image(systemName: "exclamationmark.triangle.fill").font(.system(size: size)).foregroundStyle(shade(.yellow))
         }
     }
 
@@ -3858,6 +3908,16 @@ struct ContentView: View {
     /// Figures the download screen shows on every render, worked out when the library changes instead.
     @State private var gameCount = 0
     @State private var updateCount = 0
+    @State private var favouriteCount = 0
+    @State private var problemCount = 0
+    @AppStorage("options.sectionAppearance") private var appearanceOpen = true
+    @AppStorage("options.sectionBrowser") private var browserOpen = true
+    @AppStorage("options.sectionDownloads") private var downloadsOpen = true
+    @AppStorage("options.sectionSteam") private var steamOpen = true
+    @AppStorage("options.sectionAbout") private var aboutOpen = true
+    @AppStorage("options.sectionCredits") private var creditsOpen = true
+    @State private var lastLibraryTap = Date.distantPast
+    @State private var lastOptionsTap = Date.distantPast
     @State private var browserHomeToken = 0
     @State private var lastWorkshopTap = Date.distantPast
     @State private var lastDownloadTap = Date.distantPast
@@ -4104,6 +4164,8 @@ struct ContentView: View {
         installedTagOptions = installedTags
         gameCount = Set(store.library.compactMap { $0.appID }).count
         updateCount = store.library.filter { $0.updateAvailable }.count
+        favouriteCount = store.library.filter { $0.isFavourite }.count
+        problemCount = store.library.filter { $0.status.needsAttention }.count
     }
 
     private var mainStack: some View {
@@ -4579,9 +4641,10 @@ struct ContentView: View {
     }
 
     private func tabTapped(_ index: Int) {
-        if index == 0 {
+        let now = Date()
+        switch index {
+        case 0:
             // Two taps on the Download tab take the mod on display away and return to the default view.
-            let now = Date()
             let gap = now.timeIntervalSince(lastDownloadTap)
             if selectedTab == 0, gap > 0.08, gap < 0.45, !store.isBusy, store.preview != nil {
                 store.clearDisplayedMod()
@@ -4590,24 +4653,53 @@ struct ContentView: View {
                 lastDownloadTap = .distantPast
                 return
             }
-            lastDownloadTap = now
-            lastWorkshopTap = .distantPast
-            return
+            rememberTap(0, now)
+        case 1:
+            // Two taps on the Workshop tab within about half a second go back to the start page.
+            let gap = now.timeIntervalSince(lastWorkshopTap)
+            if selectedTab == 1, gap > 0.08, gap < 0.45 {
+                browserHomeToken += 1
+                lastWorkshopTap = .distantPast
+                return
+            }
+            rememberTap(1, now)
+        case 2:
+            // Two taps leave history, then put the library back at the top.
+            let gap = now.timeIntervalSince(lastLibraryTap)
+            if selectedTab == 2, gap > 0.08, gap < 0.45 {
+                Haptics.tap()
+                withAnimation(.easeOut(duration: 0.18)) { showingHistory = false }
+                ScrollToTopRequest.post()
+                lastLibraryTap = .distantPast
+                return
+            }
+            rememberTap(2, now)
+        case 3:
+            // Two taps put the options back at the top.
+            let gap = now.timeIntervalSince(lastOptionsTap)
+            if selectedTab == 3, gap > 0.08, gap < 0.45 {
+                Haptics.tap()
+                ScrollToTopRequest.post()
+                lastOptionsTap = .distantPast
+                return
+            }
+            rememberTap(3, now)
+        default:
+            break
         }
-        guard index == 1 else {
-            lastWorkshopTap = .distantPast
-            lastDownloadTap = .distantPast
-            return
+    }
+
+    private func rememberTap(_ index: Int, _ now: Date) {
+        if index != 0 { lastDownloadTap = .distantPast }
+        if index != 1 { lastWorkshopTap = .distantPast }
+        if index != 2 { lastLibraryTap = .distantPast }
+        if index != 3 { lastOptionsTap = .distantPast }
+        switch index {
+        case 0: lastDownloadTap = now
+        case 1: lastWorkshopTap = now
+        case 2: lastLibraryTap = now
+        default: lastOptionsTap = now
         }
-        // Two taps on the Workshop tab within about half a second go back to the start page.
-        let now = Date()
-        let gap = now.timeIntervalSince(lastWorkshopTap)
-        if selectedTab == 1 && gap > 0.08 && gap < 0.45 {
-            browserHomeToken += 1
-            lastWorkshopTap = .distantPast
-            return
-        }
-        lastWorkshopTap = now
     }
 
     private func openWorkshop(_ id: String) {
@@ -5127,13 +5219,11 @@ struct ContentView: View {
 
     private var glanceCard: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("AT A GLANCE")
-                .font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
-                .kerning(0.4)
             HStack(spacing: 10) {
                 glanceStat("\(store.library.count)", "mods")
                 glanceStat("\(gameCount)", gameCount == 1 ? "game" : "games")
                 glanceStat("\(updateCount)", "updates")
+                glanceStat("\(favouriteCount)", "favourites")
             }
             VStack(alignment: .leading, spacing: 6) {
                 GeometryReader { geo in
@@ -5144,7 +5234,7 @@ struct ContentView: View {
                     }
                 }
                 .frame(height: 6)
-                Text("\(Fmt.bytes(store.libraryStorageBytes)) on this device · \(Fmt.bytes(freeSpaceBytes)) free")
+                Text("\(Fmt.bytes(store.libraryStorageBytes)) on this device · \(Fmt.bytes(freeSpaceBytes)) free\(problemCount > 0 ? " · \(problemCount) to check" : "")")
                     .font(.system(size: 12)).foregroundStyle(.secondary)
             }
         }
@@ -5733,6 +5823,7 @@ struct ContentView: View {
         ScrollView {
             VStack(spacing: 0) {
                 ScrollSpy(onChange: handleScroll)
+                ScrollToTopSentinel()
                 LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 16) {
                     ForEach(items) { item in gridCard(item) }
                 }
@@ -5748,6 +5839,8 @@ struct ContentView: View {
     private func listContent(_ items: [WorkshopItem]) -> some View {
         List {
             ScrollSpy(onChange: handleScroll)
+                .listRowInsets(EdgeInsets()).listRowBackground(Color.clear).listRowSeparator(.hidden)
+            ScrollToTopSentinel()
                 .listRowInsets(EdgeInsets()).listRowBackground(Color.clear).listRowSeparator(.hidden)
             ForEach(items) { item in
                 listRow(item)
@@ -5933,6 +6026,7 @@ struct ContentView: View {
                         ScrollView {
                             VStack(spacing: 0) {
                                 ScrollSpy(onChange: handleScroll)
+                                ScrollToTopSentinel()
                                 LazyVStack(spacing: 0) {
                                     ForEach(filteredHistory) { record in
                                         historyRow(record)
@@ -5964,7 +6058,7 @@ struct ContentView: View {
     private func historyColor(_ result: String) -> Color {
         switch result {
         case "Downloaded": return .green
-        case "Failed": return .red
+        case "Failed": return .secondary
         case "Cancelled": return .secondary
         default: return .accentColor
         }
@@ -5988,7 +6082,8 @@ struct ContentView: View {
                     }
                 }
                 HStack(spacing: 5) {
-                    StatusGlyph(status: historyStatus(record), size: 12)
+                    StatusGlyph(status: historyStatus(record), size: 12,
+                                colour: record.result == "Cancelled" ? .red : nil)
                     Text(record.result).font(.system(size: 12, weight: .medium)).foregroundStyle(historyColor(record.result))
                 }
                 if failed, let error = record.error, !error.isEmpty {
@@ -6032,6 +6127,7 @@ struct ContentView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     ScrollSpy(onChange: handleScroll)
+                    ScrollToTopSentinel()
                     Text("Options").font(.system(size: 27, weight: .bold, design: .rounded)).padding(.top, 10)
                     appearanceSettings
                     downloadsSettings
@@ -6053,7 +6149,7 @@ struct ContentView: View {
     // nested view type, which is what the launch crash log pointed at.
     private var appearanceSettings: AnyView {
         AnyView(
-            settingsGroup("Appearance") {
+            settingsGroup("Appearance", isOpen: $appearanceOpen) {
                 row("Theme", symbol: "circle.lefthalf.filled") {
                     Menu {
                         ForEach(["System", "Light", "Dark"], id: \.self) { mode in
@@ -6117,7 +6213,7 @@ struct ContentView: View {
 
     private var browserSettings: AnyView {
         AnyView(
-            settingsGroup("Browser") {
+            settingsGroup("Browser", isOpen: $browserOpen) {
                 toggleRow("Auto download from browser", symbol: "arrow.down.circle", isOn: $autoDownload)
                 divider
                 toggleRow("Confirm auto download", symbol: "checkmark.circle", isOn: $confirmAutoDownload)
@@ -6132,7 +6228,7 @@ struct ContentView: View {
 
     private var downloadsSettings: AnyView {
         AnyView(
-            settingsGroup("Downloads") {
+            settingsGroup("Downloads", isOpen: $downloadsOpen) {
                 toggleRow("Confirm before deleting", symbol: "trash", isOn: $confirmDelete)
                 divider
                 toggleRow("Check mod updates on launch", symbol: "arrow.clockwise", isOn: $autoCheck)
@@ -6163,7 +6259,7 @@ struct ContentView: View {
 
     private var steamAccountSettings: AnyView {
         AnyView(
-            settingsGroup("Steam account") {
+            settingsGroup("Steam account", isOpen: $steamOpen) {
                 HStack(spacing: 12) {
                     Image(systemName: store.isAuthenticated ? "checkmark.shield.fill" : "exclamationmark.shield")
                         .font(.system(size: 20)).foregroundStyle(store.isAuthenticated ? Color.green : Color.orange)
@@ -6186,7 +6282,7 @@ struct ContentView: View {
 
     private var aboutSettings: AnyView {
         AnyView(
-            settingsGroup("About") {
+            settingsGroup("About", isOpen: $aboutOpen) {
                 Button { Haptics.tap(); store.checkForAppUpdate() } label: {
                     HStack(spacing: 12) {
                         Image(systemName: "arrow.triangle.2.circlepath")
@@ -6238,8 +6334,8 @@ struct ContentView: View {
 
     private var creditsSettings: AnyView {
         AnyView(
-            settingsGroup("Credits") {
-                creditLicenseRow("ModShelf", "Created by Splash (@shplash)", license: "GPL-3.0")
+            settingsGroup("Credits", isOpen: $creditsOpen) {
+                creditLicenseRow("ModShelf", "Created by Splash (@shplash)", license: "GPL-3.0 License")
                 divider
                 creditLicenseRow("go-steam", "Engine by Alexander Birkner (@BirknerAlex)", license: "MIT License")
                 divider
@@ -6278,11 +6374,32 @@ struct ContentView: View {
 
     private var divider: some View { Rectangle().fill(Color.gray.opacity(0.2)).frame(height: 0.5).padding(.leading, 48) }
 
-    private func settingsGroup<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+    private func settingsGroup<Content: View>(_ title: String, isOpen: Binding<Bool>,
+                                              @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(title.uppercased()).font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary).padding(.leading, 6)
-            VStack(spacing: 0) { content() }
-                .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color(uiColor: .secondarySystemGroupedBackground)))
+            HStack(spacing: 8) {
+                Text(title.uppercased()).font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+                Button {
+                    Haptics.select()
+                    withAnimation(.easeInOut(duration: 0.2)) { isOpen.wrappedValue.toggle() }
+                } label: {
+                    Image(systemName: isOpen.wrappedValue ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 30, height: 22)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(isOpen.wrappedValue ? "Collapse \(title)" : "Expand \(title)")
+            }
+            .padding(.leading, 6)
+            .padding(.trailing, 2)
+            if isOpen.wrappedValue {
+                VStack(spacing: 0) { content() }
+                    .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color(uiColor: .secondarySystemGroupedBackground)))
+                    .transition(.opacity)
+            }
         }
     }
 
