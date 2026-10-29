@@ -31,11 +31,14 @@ let modShelfVersion = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVe
 let modShelfBuild = (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String) ?? "1"
 
 
+/// Moving a mod into a game is normal use, so that state is not damage.
 enum ModStatus { case upToDate, needsUpdate, moved, notChecked, broken }
 
 extension ModStatus {
+    /// Whether a mod deserves a look: its files are missing or changed, or it was never checked.
     var needsAttention: Bool { self == .broken || self == .notChecked }
 
+    /// Only a pending update or files that don't match Steam are worth colour; the rest stays calm.
     var textColor: Color {
         switch self {
         case .upToDate, .moved, .notChecked: return .secondary
@@ -432,7 +435,7 @@ struct CachedImage: View {
     let urlString: String?
     var fill = true
     var maxPixel: CGFloat = 600
-    // Used when the main image is missing.
+    /// Tried in order when the main address has no picture, so an older artwork fills the space.
     var fallbackURLStrings: [String] = []
     @AppStorage("options.gifDownloads") private var gifDownloads = true
     @AppStorage("options.gifLibrary") private var gifLibrary = true
@@ -445,7 +448,7 @@ struct CachedImage: View {
     }
 
     var body: some View {
-        // Clear base, so a landscape image can't decide the cell's size.
+        // A clear base keeps a wide landscape image from deciding the cell's size.
         Color.clear
             .overlay { picture }
             .clipped()
@@ -1945,6 +1948,7 @@ final class WorkshopStore: ObservableObject {
         beginDownload(id: activeID, meta: meta, keepQueue: true)
     }
 
+    /// Weighted by size, so a big mod does not count the same as a tiny one.
     private var ringBatchProgress: Double {
         guard !queueRows.isEmpty else { return 0 }
         let weights = queueRows.map { max(1, Double($0.fileSize)) }
@@ -1958,6 +1962,7 @@ final class WorkshopStore: ObservableObject {
         return min(1, done / total)
     }
 
+    /// Keeps the ring up for ten seconds after a batch finishes.
     private func ringFinished() {
         guard ringVisible else { return }
         ringProgress = 1
@@ -1979,6 +1984,7 @@ final class WorkshopStore: ObservableObject {
         ringProgress = 0
     }
 
+    /// Moves a row and rebuilds the order the batch will follow.
     func moveRow(_ id: String, to target: Int) {
         guard let from = queueRows.firstIndex(where: { $0.id == id }) else { return }
         let row = queueRows.remove(at: from)
