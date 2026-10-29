@@ -1285,7 +1285,10 @@ final class WorkshopStore: ObservableObject {
     private func enqueue(_ id: String, meta: WorkshopMetadata) {
         guard !queue.contains(id), activeID != id,
               !queueRows.contains(where: { $0.id == id && $0.state != .done && $0.state != .failed })
-        else { return }
+        else {
+            operationMessage = "That one is already on its way."
+            return
+        }
         // A finished or failed row for the same mod would hide the new one, so it goes first.
         queueRows.removeAll { $0.id == id && $0.state != .downloading }
         queue.append(id)
@@ -1294,6 +1297,7 @@ final class WorkshopStore: ObservableObject {
                                          imageURL: meta.imageURL.isEmpty ? nil : meta.imageURL,
                                          gameName: meta.gameName, fileSize: meta.fileSize))
         queueTotal = queueRows.count
+        operationMessage = "\(meta.title) joins the queue."
         log("queued \(id) \"\(meta.title)\" at \(queueRows.count) in line")
         Haptics.tap()
     }
@@ -4675,6 +4679,7 @@ struct ContentView: View {
         if store.isFetching { downloadLoadingRow }
         if let item = store.preview,
            !store.queueRows.contains(where: { $0.id == item.id }) {
+            if store.isBusy || store.isPaused { queuedDownloadCard(item) }
             downloadButton(item)
         }
     }
@@ -5220,6 +5225,37 @@ struct ContentView: View {
             Button { store.operationMessage = "" } label: { Image(systemName: "xmark").font(.caption.bold()).foregroundStyle(.secondary) }.accessibilityLabel("Dismiss status")
         }
         .padding(11).background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    /// The mod a button just queued, so its name is visible while another download runs.
+    private func queuedDownloadCard(_ item: WorkshopMetadata) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .center, spacing: 12) {
+                Color.clear
+                    .frame(width: 84, height: 84)
+                    .overlay(CachedImage(urlString: item.imageURL, fill: false, maxPixel: 320).allowsHitTesting(false))
+                VStack(alignment: .leading, spacing: 5) {
+                    MarqueeText(text: item.title, fontSize: 15, weight: .semibold, height: 19,
+                                speed: MarqueeSpeed.otherSpeed, active: MarqueeSpeed.otherRunning)
+                    RatingLine(rating: item.rating, count: item.ratingCount, size: 13)
+                    if let game = item.gameName, !game.isEmpty {
+                        Text(game).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(height: 84)
+            }
+            HStack(spacing: 6) {
+                Image(systemName: "text.line.first.and.arrowtriangle.forward")
+                    .font(.system(size: 11, weight: .semibold))
+                Text("Queued behind the download that is running")
+                    .font(.system(size: 11))
+            }
+            .foregroundStyle(.secondary)
+        }
+        .padding(12)
+        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.05), lineWidth: 1))
     }
 
     private func downloadButton(_ item: WorkshopMetadata) -> some View {
