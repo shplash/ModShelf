@@ -1564,7 +1564,10 @@ final class WorkshopStore: ObservableObject {
         lastEngineSeen = engineValue
         if statusChanged || valueChanged { lastMovementAt = now }
         let dt = lastTickAt.map { max(0, min(1.5, now.timeIntervalSince($0))) } ?? 0
+        let tickGap = lastTickAt.map { now.timeIntervalSince($0) } ?? 0
         lastTickAt = now
+        // A long gap between ticks is the app being away, or the main thread being busy, not a stall.
+        if tickGap > 3 { lastMovementAt = now }
         // The folder on disk is the only sign of life for large items, where Steam's counter can sit
         // at zero. Files are pre-allocated, so the allocated size (not the logical one) is what grows.
         if isDownloading, !isPreparingDownload, let staging = activeStaging, !stagingProbeInFlight,
@@ -1611,7 +1614,7 @@ final class WorkshopStore: ObservableObject {
         let diskIsReal = lastReceivedSeen >= 0 && stagingBaselineBytes == 0
         if isDownloading, !isPreparingDownload, !diskIsReal { downloadActiveSeconds += dt }
         let preparing = isPreparingDownload
-        let stalled = isDownloading && !preparing && (lastMovementAt.map { now.timeIntervalSince($0) > 8 } ?? false)
+        let stalled = isDownloading && !preparing && (lastMovementAt.map { now.timeIntervalSince($0) > 15 } ?? false)
         if isDownloadStalled != stalled {
             isDownloadStalled = stalled
             log(stalled ? "download looks stalled at \(Int(progress * 100))%" : "download moving again")
@@ -2033,10 +2036,12 @@ final class WorkshopStore: ObservableObject {
     /// The app is leaving the screen: remember what was running, because iOS will stop it.
     func appMovedToBackground() {
         suspendedDownloadID = isDownloading ? activeID : nil
+        lastMovementAt = Date()
     }
 
     /// The app is back. If the transfer died while it was away, carry on with it rather than failing.
     func appReturnedToForeground() {
+        lastMovementAt = Date()
         guard let id = suspendedDownloadID else { return }
         // Still running: the note stays in place in case the system kills it a moment later.
         if isDownloading || isPaused || isBusy { return }
