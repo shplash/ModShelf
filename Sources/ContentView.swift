@@ -1278,6 +1278,10 @@ final class WorkshopStore: ObservableObject {
             enqueue(id, meta: meta)
             return
         }
+        // A single download puts its mod on the page; one that joins a queue leaves the page alone.
+        input = "https://steamcommunity.com/sharedfiles/filedetails/?id=\(id)"
+        preview = meta
+        if meta.title == "Workshop item \(id)" { fetchPreview() }
         beginDownload(id: id, meta: meta, keepQueue: false)
     }
 
@@ -1297,7 +1301,6 @@ final class WorkshopStore: ObservableObject {
                                          imageURL: meta.imageURL.isEmpty ? nil : meta.imageURL,
                                          gameName: meta.gameName, fileSize: meta.fileSize))
         queueTotal = queueRows.count
-        operationMessage = "\(meta.title) joins the queue."
         log("queued \(id) \"\(meta.title)\" at \(queueRows.count) in line")
         Haptics.tap()
     }
@@ -1346,13 +1349,6 @@ final class WorkshopStore: ObservableObject {
             return
         }
         log("start \(id) \"\(meta.title)\" expected \(Fmt.bytes(downloadExpectedBytes)), game \(meta.gameName ?? "-")")
-        // However a download starts, the screen shows that item rather than whatever was looked up
-        // last. A batch leaves the screen alone, so it does not jump from mod to mod.
-        if preview?.id != id, queueRows.count <= 1 {
-            input = "https://steamcommunity.com/sharedfiles/filedetails/?id=\(id)"
-            preview = meta
-            if meta.title == "Workshop item \(id)" { fetchPreview() }
-        }
         // A fixed staging folder per mod, so a stopped download picks up the chunks it wrote.
         let targetRoot = installRoot(for: library.first(where: { $0.id == id }), appID: meta.appID)
         let staging = targetRoot.appendingPathComponent(".partial-\(id)", isDirectory: true)
@@ -1426,8 +1422,6 @@ final class WorkshopStore: ObservableObject {
         // An app update can leave the files somewhere else, so find them again before installing in place.
         repairFolders()
         let latest = library.first(where: { $0.id == item.id }) ?? item
-        // The download screen shows the mod being updated, not whatever was looked up last.
-        showOnDownloadPage(latest)
         var meta = WorkshopMetadata(id: latest.id, title: latest.displayTitle, author: "", description: latest.description ?? "",
                                     imageURL: latest.imageURL ?? "", updatedAt: latest.publishedUpdatedAt ?? 0)
         meta.appID = latest.appID; meta.gameName = latest.gameName; meta.tags = latest.tags
@@ -1435,17 +1429,6 @@ final class WorkshopStore: ObservableObject {
         download(latest.id, meta: meta)
     }
 
-    /// Puts a library mod on the download screen: its Workshop link in the field and its known details
-    /// on the card, so an update opens the Workshop page it is updating.
-    func showOnDownloadPage(_ item: WorkshopItem) {
-        input = "https://steamcommunity.com/sharedfiles/filedetails/?id=\(item.id)"
-        var meta = WorkshopMetadata(id: item.id, title: item.displayTitle, author: item.author ?? "",
-                                    description: item.description ?? "", imageURL: item.imageURL ?? "",
-                                    updatedAt: item.publishedUpdatedAt ?? 0)
-        meta.appID = item.appID; meta.gameName = item.gameName; meta.tags = item.tags
-        meta.rating = item.rating; meta.ratingCount = item.ratingCount
-        preview = meta
-    }
     func updateAll() {
         guard devTask == nil else { operationMessage = "A simulated run is on screen. Let it finish first."; return }
         let picks = library.filter { $0.updateAvailable }
@@ -3199,6 +3182,8 @@ final class WorkshopStore: ObservableObject {
         }
         guard isAuthenticated else { operationMessage = "Sign in to Steam and this download can start."; showLogin = true; return }
         // The rest of the rows stay: a retry adds to the list rather than replacing it.
+        input = "https://steamcommunity.com/sharedfiles/filedetails/?id=\(id)"
+        preview = meta
         updateRow(id, progress: 0, state: .downloading)
         beginDownload(id: id, meta: meta, keepQueue: true)
     }
