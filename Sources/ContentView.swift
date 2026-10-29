@@ -735,6 +735,14 @@ final class WorkshopStore: ObservableObject {
     @Published var isExporting = false
     /// A transfer stopped on purpose, keeping what it had already written so it can carry on.
     @Published var isPaused = false
+    /// A resume asked for while the paused transfer was still winding down.
+    private var resumePending = false
+    /// The small ring beside the sign-in pill: shown while a transfer runs and for ten seconds after
+    /// it finishes, when its arrow turns blue.
+    @Published var ringVisible = false
+    @Published var ringDone = false
+    @Published var ringProgress = 0.0
+    private var ringHideTask: Task<Void, Never>?
     @Published var isFetching = false
     @Published var preview: WorkshopMetadata?
     @Published var library: [WorkshopItem] = []
@@ -1265,7 +1273,8 @@ final class WorkshopStore: ObservableObject {
         let fallback = WorkshopMetadata(id: id, title: "Workshop item \(id)", author: "", description: "", imageURL: "", updatedAt: 0)
         let meta: WorkshopMetadata = override ?? ((preview?.id == id ? preview : nil) ?? fallback)
         // One transfer at a time, so anything else joins the queue and starts when its turn comes.
-        if isBusy {
+        // A paused transfer still owns the engine's slot, so new mods wait rather than taking over.
+        if isBusy || isPaused {
             enqueue(id, meta: meta)
             return
         }
@@ -1300,6 +1309,13 @@ final class WorkshopStore: ObservableObject {
         lastMovementAt = nil
         isDownloadStalled = false
         isInstalling = false
+        isPaused = false
+        resumePending = false
+        // A new transfer takes the ring back over from a finished one.
+        ringHideTask?.cancel()
+        ringVisible = true
+        ringDone = false
+        ringProgress = 0
         downloadExpectedBytes = meta.fileSize > 0
             ? meta.fileSize
             : (library.first(where: { $0.id == id })?.byteCount ?? 0)
@@ -1347,7 +1363,8 @@ final class WorkshopStore: ObservableObject {
         guard let engine else { return }
         let result = engine.downloadWorkshopItem(id, targetDir: staging.path)
         if !result.isEmpty {
-            try? FileManager.default.removeItem(at: staging)
+            // Whatever is already in the staging folder is kept: the engine may have written chunks
+            // before refusing, and a retry can carry on from them.
             let message = ErrorText.friendly(result)
             errorMessage = message; status = "Download failed"
             log("engine refused \(id): \(result)")
@@ -1667,6 +1684,7 @@ final class WorkshopStore: ObservableObject {
            queueRows[index].state == .downloading {
             queueRows[index].progress = nextProgress
         }
+        if ringVisible, !ringDone { ringProgress = ringBatchProgress }
         guard isBusy else { stopPolling(); return }
 
         let s = nextStatus.lowercased()
@@ -1690,6 +1708,10 @@ final class WorkshopStore: ObservableObject {
             }
             status = "Paused"
             log("paused \(activeID)")
+            if resumePending {
+                resumePending = false
+                resumeActive()
+            }
             return
         }
         let meta = activeMeta ?? WorkshopMetadata(id: activeID, title: activeTitle, author: "", description: "", imageURL: "", updatedAt: 0)
@@ -1759,6 +1781,7 @@ final class WorkshopStore: ObservableObject {
             refreshInstalledMetadata(id: activeID)
             updateRow(activeID, progress: 1, state: .done)
             progress = 1
+            ringFinished()
             lastOutcome = "Download completed"
             Haptics.success()
         } else {
@@ -1768,6 +1791,7 @@ final class WorkshopStore: ObservableObject {
             updateHistory(id: activeID, result: cancelled ? "Cancelled" : "Failed", error: reason)
             if !cancelled { errorMessage = reason }
             lastOutcome = cancelled ? "Download cancelled" : "Download failed"
+            if !cancelled { ringStopped() }
             log("failed \(activeID): \(reason)")
             if !error.isEmpty { log("engine said: \(error)") }
             if cancelled { queue.removeAll() } else { queueFailed += 1; updateRow(activeID, state: .failed) }
@@ -1811,16 +1835,60 @@ final class WorkshopStore: ObservableObject {
     func togglePause() {
         if isPaused {
             isPaused = false
-            let meta = activeMeta ?? WorkshopMetadata(id: activeID, title: activeTitle, author: "",
-                                                      description: "", imageURL: "", updatedAt: 0)
-            log("resume \(activeID)")
-            beginDownload(id: activeID, meta: meta, keepQueue: true)
+            if isBusy {
+                // The engine has not reported the cancellation yet; resume once it has.
+                resumePending = true
+            } else {
+                resumeActive()
+            }
         } else if isDownloading {
             isPaused = true
+            resumePending = false
             status = "Paused"
             engine?.cancelDownload()
             log("pause requested")
         }
+    }
+
+    private func resumeActive() {
+        guard !activeID.isEmpty else { return }
+        let meta = activeMeta ?? WorkshopMetadata(id: activeID, title: activeTitle, author: "",
+                                                  description: "", imageURL: "", updatedAt: 0)
+        log("resume \(activeID)")
+        beginDownload(id: activeID, meta: meta, keepQueue: true)
+    }
+
+    /// The ring shows the whole batch when several mods are queued, not just the one moving.
+    private var ringBatchProgress: Double {
+        if queueRows.count > 1 {
+            let total = queueRows.reduce(0.0) { sum, row in
+                sum + (row.state == .done ? 1 : min(1, max(0, row.progress)))
+            }
+            return min(1, total / Double(queueRows.count))
+        }
+        return min(1, max(0, progress))
+    }
+
+    /// Marks the ring finished and keeps it on screen for ten seconds before it goes.
+    private func ringFinished() {
+        guard ringVisible else { return }
+        ringProgress = 1
+        ringDone = true
+        ringHideTask?.cancel()
+        ringHideTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 10_000_000_000)
+            guard !isDownloading, !isPaused else { return }
+            ringVisible = false
+            ringDone = false
+            ringProgress = 0
+        }
+    }
+
+    private func ringStopped() {
+        ringHideTask?.cancel()
+        ringVisible = false
+        ringDone = false
+        ringProgress = 0
     }
 
     /// Stops one download: a waiting one leaves the queue, and the one running ends the batch.
@@ -1840,6 +1908,8 @@ final class WorkshopStore: ObservableObject {
 
     func cancel() {
         isPaused = false
+        resumePending = false
+        ringStopped()
         log("cancel requested (queue \(queue.count), active \(activeID)")
         if let task = devTask {
             task.cancel()
@@ -3974,7 +4044,11 @@ struct ContentView: View {
                     .accessibilityLabel("Developer")
                 }
                 Spacer()
-                if store.isDownloading { downloadRing }
+                if store.ringVisible || store.isDownloading || store.isPaused {
+                    Button { Haptics.tap(); selectedTab = 0 } label: { downloadRing }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Open downloads")
+                }
                 signInPill
             }
             .padding(.horizontal, 16).padding(.top, 0).padding(.bottom, 14)
@@ -3985,18 +4059,19 @@ struct ContentView: View {
     /// A quiet ring beside the sign-in pill while a download runs: grey, filling blue, with an arrow.
     private var downloadRing: some View {
         ZStack {
+            Circle().fill(Color.primary.opacity(0.06))
             Circle().stroke(Color.primary.opacity(0.1), lineWidth: 2.5)
             Circle()
-                .trim(from: 0, to: max(0.04, min(1, store.progress)))
+                .trim(from: 0, to: max(0.04, min(1, store.ringProgress)))
                 .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
                 .rotationEffect(.degrees(-90))
-            Image(systemName: "arrow.down")
+            Image(systemName: store.isPaused ? "pause.fill" : "arrow.down")
                 .font(.system(size: 9, weight: .bold))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(store.ringDone ? Color.accentColor : Color.secondary)
         }
         .frame(width: 26, height: 26)
-        .animation(.easeOut(duration: 0.3), value: store.progress)
-        .accessibilityLabel("Downloading \(Int(store.progress * 100)) percent")
+        .animation(.easeOut(duration: 0.3), value: store.ringProgress)
+        .accessibilityLabel(store.ringDone ? "Download finished" : "Downloading \(Int(store.ringProgress * 100)) percent")
     }
 
     /// The artwork lives in the asset catalogue: a white one for the dark appearance, a black one
@@ -4238,6 +4313,11 @@ struct ContentView: View {
                         if store.isFetching {
                             HStack(spacing: 10) { ProgressView(); Text("Loading Workshop details…").font(.subheadline).foregroundStyle(.secondary) }.padding(.vertical, 2)
                         }
+                        if let item = store.preview,
+                           !store.queueRows.contains(where: { $0.id == item.id }) {
+                            if store.isBusy || store.isPaused { queuedDownloadCard(item) }
+                            downloadButton(item)
+                        }
                         if store.isDownloading || store.isPaused {
                             HStack(spacing: 10) {
                                 Button { Haptics.tap(); store.togglePause() } label: {
@@ -4276,11 +4356,6 @@ struct ContentView: View {
         }
                         if !store.queueRows.isEmpty {
                             queueCard
-                        }
-                        if let item = store.preview,
-                           !store.queueRows.contains(where: { $0.id == item.id }) {
-                            if store.isBusy { queuedDownloadCard(item) }
-                            downloadButton(item)
                         }
                     }
                     .padding(.horizontal, 15).padding(.top, 10).padding(.bottom, tabBarReserve)
@@ -4417,19 +4492,8 @@ struct ContentView: View {
                 .frame(width: 84, height: 84)
                 .overlay(CachedImage(urlString: row.imageURL, fill: false, maxPixel: 320).allowsHitTesting(false))
             VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 8) {
-                    MarqueeText(text: row.title, fontSize: 14, weight: .semibold, height: 18,
-                                active: row.state == .downloading)
-                    Button { Haptics.tap(); store.cancelItem(row.id) } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundStyle(.secondary)
-                            .frame(width: 22, height: 22)
-                            .background(Circle().fill(Color.primary.opacity(0.06)))
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Cancel this download")
-                }
+                MarqueeText(text: row.title, fontSize: 14, weight: .semibold, height: 18,
+                            active: row.state == .downloading)
                 if let game = row.gameName, !game.isEmpty {
                     Text(game).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
                 }
@@ -4438,28 +4502,38 @@ struct ContentView: View {
                     .foregroundStyle(queueTint(row))
                     .lineLimit(1)
                 Spacer(minLength: 2)
-                HStack(spacing: 8) {
-                    queueBar(row)
-                    if failed {
-                        Button { Haptics.tap(); store.download(row.id) } label: {
-                            Image(systemName: "arrow.clockwise")
-                                .font(.system(size: 11, weight: .bold))
-                                .foregroundStyle(Color.accentColor)
-                                .frame(width: 40, height: 22)
-                                .background(Capsule().fill(Color.accentColor.opacity(0.14)))
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Retry download")
-                    } else {
-                        Text(row.state == .downloading && store.isPreparingDownload
-                             ? "" : "\(Int(row.progress * 100))%")
-                            .font(.system(size: 11, weight: .semibold).monospacedDigit())
-                            .foregroundStyle(queueTint(row))
-                            .frame(width: 36, alignment: .trailing)
-                    }
-                }
+                queueBar(row)
             }
             .frame(height: 84, alignment: .top)
+            HStack(spacing: 8) {
+                if failed {
+                    Button { Haptics.tap(); store.download(row.id) } label: {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(Color.accentColor)
+                            .frame(width: 40, height: 22)
+                            .background(Capsule().fill(Color.accentColor.opacity(0.14)))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Retry download")
+                } else {
+                    Text(row.state == .downloading && store.isPreparingDownload
+                         ? "" : "\(Int(row.progress * 100))%")
+                        .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(queueTint(row))
+                        .frame(width: 36, alignment: .trailing)
+                }
+                Button { Haptics.tap(); store.cancelItem(row.id) } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 22, height: 22)
+                        .background(Circle().fill(Color.primary.opacity(0.06)))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Cancel this download")
+            }
+            .frame(height: 84, alignment: .center)
         }
         .padding(.horizontal, 14).padding(.vertical, 10)
     }
@@ -4646,23 +4720,29 @@ struct ContentView: View {
     /// The mod that a button is about to add to the queue, with its name visible while another
     /// download runs. Without it the Download tab only showed the lookup field.
     private func queuedDownloadCard(_ item: WorkshopMetadata) -> some View {
-        HStack(spacing: 10) {
-            Color.clear
-                .frame(width: 44, height: 44)
-                .overlay(CachedImage(urlString: item.imageURL, fill: true, maxPixel: 160).allowsHitTesting(false))
-                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-            VStack(alignment: .leading, spacing: 2) {
-                Text(item.title).font(.system(size: 15, weight: .semibold)).lineLimit(2)
-                if let game = item.gameName, !game.isEmpty {
-                    Text(game).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 12) {
+                Color.clear
+                    .frame(width: 84, height: 84)
+                    .overlay(CachedImage(urlString: item.imageURL, fill: false, maxPixel: 320).allowsHitTesting(false))
+                VStack(alignment: .leading, spacing: 5) {
+                    MarqueeText(text: item.title, fontSize: 15, weight: .semibold, height: 19)
+                    RatingLine(rating: item.rating, count: item.ratingCount, size: 13)
+                    if let game = item.gameName, !game.isEmpty {
+                        Text(game).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+                    }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            Spacer(minLength: 0)
-            if item.fileSize > 0 {
-                Text(Fmt.bytes(item.fileSize)).font(.system(size: 12)).foregroundStyle(.secondary)
+            HStack(spacing: 6) {
+                Image(systemName: "text.line.first.and.arrowtriangle.forward")
+                    .font(.system(size: 11, weight: .semibold))
+                Text("Joins the queue when the current download ends")
+                    .font(.system(size: 11))
             }
+            .foregroundStyle(.secondary)
         }
-        .padding(10)
+        .padding(12)
         .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.05), lineWidth: 1))
     }
@@ -4670,7 +4750,7 @@ struct ContentView: View {
     private func downloadButton(_ item: WorkshopMetadata) -> some View {
         let existing = store.library.first(where: { $0.id == item.id })
         var label = "Download mod"
-        if store.isBusy { label = "Add to queue" }
+        if store.isBusy || store.isPaused { label = "Add to queue" }
         else if let existing { label = existing.updateAvailable ? "Update mod" : "Download again" }
         return Button {
             dismissKeyboard(); Haptics.medium(); store.download(item.id)
@@ -4970,7 +5050,7 @@ struct ContentView: View {
                     .font(.system(size: 12, weight: .medium))
                     .foregroundColor(Color(uiColor: .secondaryLabel))
                     .lineLimit(1)
-                    .minimumScaleFactor(0.85)
+                    .fixedSize(horizontal: true, vertical: false)
                     .layoutPriority(1)
             }
             .padding(.horizontal, 10).padding(.vertical, 7)
@@ -5294,9 +5374,9 @@ struct ContentView: View {
 
     private func navCircle(_ symbol: String, _ action: @escaping () -> Void) -> some View {
         Button { Haptics.tap(); action() } label: {
-            Image(systemName: symbol).font(.system(size: 14, weight: .semibold)).foregroundStyle(Color.accentColor)
+            Image(systemName: symbol).font(.system(size: 14, weight: .semibold)).foregroundStyle(.secondary)
                 .frame(width: 34, height: 34)
-                .background(Circle().fill(Color.accentColor.opacity(0.16)))
+                .background(Circle().fill(Color.primary.opacity(0.06)))
         }
         .buttonStyle(.plain)
     }
@@ -5315,7 +5395,7 @@ struct ContentView: View {
                         .overlay(CachedImage(urlString: item.imageURL, fill: true, maxPixel: 300).allowsHitTesting(false))
                         .overlay(Rectangle().stroke(Color.accentColor, lineWidth: picked ? 3 : 0))
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(item.displayTitle).font(.system(size: 15, weight: .semibold)).lineLimit(2).multilineTextAlignment(.leading)
+                        MarqueeText(text: item.displayTitle, fontSize: 15, weight: .semibold, height: 19)
                         HStack(spacing: 6) {
                             RatingLine(rating: item.rating, count: item.ratingCount, size: 13)
                             if showIDs {
@@ -5330,6 +5410,7 @@ struct ContentView: View {
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(height: 84)
                 }
                 .contentShape(Rectangle())
             }
@@ -5397,43 +5478,45 @@ struct ContentView: View {
 
     private func historyRow(_ record: DownloadRecord) -> some View {
         let failed = record.result == "Failed" || record.result == "Cancelled"
-        return HStack(alignment: .top, spacing: 12) {
-            Color.clear.frame(width: 56, height: 56)
-                .overlay(CachedImage(urlString: record.imageURL, fill: true, maxPixel: 200))
-            VStack(alignment: .leading, spacing: 5) {
-                Text(record.title).font(.system(size: 15, weight: .semibold)).lineLimit(2)
-                HStack(spacing: 6) {
-                    Text(record.result)
-                        .font(.system(size: 12, weight: .semibold)).foregroundStyle(historyColor(record.result))
-                        .padding(.horizontal, 8).padding(.vertical, 3)
-                        .background(Capsule().fill(historyColor(record.result).opacity(0.15)))
-                    if let game = record.gameName {
+        return HStack(alignment: .center, spacing: 12) {
+            Color.clear.frame(width: 84, height: 84)
+                .overlay(CachedImage(urlString: record.imageURL, fill: true, maxPixel: 300))
+            VStack(alignment: .leading, spacing: 4) {
+                MarqueeText(text: record.title, fontSize: 15, weight: .semibold, height: 19)
+                HStack(spacing: 5) {
+                    if let game = record.gameName, !game.isEmpty {
                         Text(game).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+                        Text("•").font(.system(size: 12)).foregroundStyle(.secondary)
                     }
-                    Spacer(minLength: 4)
                     TimelineView(.everyMinute) { _ in
                         Text(Fmt.historyTime(record.date)).font(.system(size: 12)).foregroundStyle(.secondary)
                     }
                 }
-                if failed, let error = record.error, !error.isEmpty {
-                    Text(error).font(.system(size: 12)).foregroundStyle(Color.red.opacity(0.9)).lineLimit(3).fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 5) {
+                    StatusGlyph(status: historyStatus(record), size: 12)
+                    Text(record.result).font(.system(size: 12, weight: .medium)).foregroundStyle(historyColor(record.result))
                 }
-                if failed {
-                    Button { Haptics.tap(); store.retry(record); selectedTab = 0 } label: {
-                        Label("Try again", systemImage: "arrow.clockwise").font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(Color.accentColor)
-                            .padding(.horizontal, 11).frame(height: 30)
-                            .background(Capsule().fill(Color.accentColor.opacity(0.14)))
-                    }.buttonStyle(.plain)
+                if failed, let error = record.error, !error.isEmpty {
+                    Text(error).font(.system(size: 12)).foregroundStyle(Color.red.opacity(0.9)).lineLimit(1)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            Button { Haptics.tap(); contextHistory = record } label: {
-                Image(systemName: "ellipsis").font(.system(size: 14, weight: .bold)).foregroundStyle(.secondary)
-                    .frame(width: 32, height: 40).contentShape(Rectangle())
-            }.buttonStyle(.plain)
+            .frame(height: 84)
+            VStack(spacing: 8) {
+                navCircle("arrow.clockwise") { store.retry(record); selectedTab = 0 }
+                navCircle("ellipsis") { contextHistory = record }
+            }
         }
         .padding(.horizontal, 15).padding(.vertical, 10)
+    }
+
+    private func historyStatus(_ record: DownloadRecord) -> ModStatus {
+        switch record.result {
+        case "Downloaded": return .upToDate
+        case "Failed": return .broken
+        case "Cancelled": return .moved
+        default: return .notChecked
+        }
     }
 
     private func emptyState(_ title: String, detail: String, symbol: String) -> some View {
@@ -6955,6 +7038,7 @@ struct BrowserHome: View {
     @AppStorage("browser.recentGames") private var recentJSON = "[]"
     @AppStorage("browser.favGames") private var favJSON = "[]"
     @AppStorage("browser.recentMods") private var viewedJSON = "[]"
+    @State private var confirmClearViewed = false
 
     private var recent: [GameHit] { GameListStore.decode(recentJSON) }
     private var favourites: [GameHit] { GameListStore.decode(favJSON) }
@@ -6982,6 +7066,12 @@ struct BrowserHome: View {
             .padding(.bottom, 110)
         }
         .background(Color(uiColor: .systemGroupedBackground))
+        .alert(viewedClearPrompt, isPresented: $confirmClearViewed) {
+            Button("Clear", role: .destructive) { viewedJSON = "[]" }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("They will appear again as you browse the Workshop.")
+        }
         .task(id: query) { await runSearch() }
         .onAppear { if isFirstRun { searchFocused = true } }
     }
@@ -7059,10 +7149,37 @@ struct BrowserHome: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 10) {
                     ForEach(viewedMods) { hit in viewedTile(hit) }
+                    clearViewedTile
                 }
                 .padding(.horizontal, 1).padding(.vertical, 2)
             }
         }
+    }
+
+    /// Empties the recently viewed list, with a confirmation before it does.
+    private var viewedClearPrompt: String { "Clear recently viewed mods?" }
+
+    private var clearViewedTile: some View {
+        Button { Haptics.tap(); confirmClearViewed = true } label: {
+            VStack(alignment: .leading, spacing: 6) {
+                Color.clear
+                    .frame(width: 78, height: 78)
+                    .overlay(
+                        Image(systemName: "trash")
+                            .font(.system(size: 20, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    )
+                    .background(Color(uiColor: .tertiarySystemFill), in: UnevenRoundedRectangle(topLeadingRadius: 0, bottomLeadingRadius: 12, bottomTrailingRadius: 12, topTrailingRadius: 0))
+                Text("CLEAR")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 78, alignment: .leading)
+            }
+            .padding(6)
+            .background(Color(uiColor: .secondarySystemGroupedBackground), in: UnevenRoundedRectangle(topLeadingRadius: 0, bottomLeadingRadius: 12, bottomTrailingRadius: 12, topTrailingRadius: 0))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Clear recently viewed mods")
     }
 
     private func viewedTile(_ hit: GameHit) -> some View {
