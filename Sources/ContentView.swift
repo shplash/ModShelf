@@ -1285,14 +1285,14 @@ final class WorkshopStore: ObservableObject {
             return
         }
         guard let id = Self.workshopID(from: raw ?? input) else { errorMessage = "Enter a Workshop link or item ID."; return }
+        let fallback = WorkshopMetadata(id: id, title: "Workshop item \(id)", author: "", description: "", imageURL: "", updatedAt: 0)
+        let meta: WorkshopMetadata = override ?? ((preview?.id == id ? preview : nil) ?? fallback)
         if blockedByWifiOnly {
             operationMessage = "Wi-Fi only is on, so this will start when you're on Wi-Fi."
             enqueue(id, meta: meta)
             startNextInQueue()
             return
         }
-        let fallback = WorkshopMetadata(id: id, title: "Workshop item \(id)", author: "", description: "", imageURL: "", updatedAt: 0)
-        let meta: WorkshopMetadata = override ?? ((preview?.id == id ? preview : nil) ?? fallback)
         // One transfer at a time. A paused one still owns the engine's slot, so new mods wait.
         if isBusy || isPaused {
             enqueue(id, meta: meta)
