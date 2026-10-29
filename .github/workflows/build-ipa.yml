@@ -90,15 +90,22 @@ jobs:
         run: |
           set -euo pipefail
           test -d SteamEngine.xcframework
-          for slice in ios-arm64 ios-arm64_x86_64-simulator; do
-            framework="SteamEngine.xcframework/$slice/SteamEngine.framework"
+          patched=0
+          # Every slice the framework carries, whatever gomobile named them this time.
+          for framework in SteamEngine.xcframework/*/SteamEngine.framework; do
+            [ -d "$framework" ] || continue
             plist="$framework/Info.plist"
-            if [ -f "$plist" ]; then
-              /usr/bin/plutil -replace MinimumOSVersion -string "16.0" "$plist"
-              # The plist is part of the signature, so sign the slice again.
-              /usr/bin/codesign --force --sign - --timestamp=none "$framework"
-            fi
+            [ -f "$plist" ] || continue
+            /usr/bin/plutil -replace MinimumOSVersion -string "16.0" "$plist"
+            # The plist is part of the signature, so sign the slice again.
+            /usr/bin/codesign --force --sign - --timestamp=none "$framework"
+            echo "patched $framework -> $(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$plist")"
+            patched=$((patched + 1))
           done
+          if [ "$patched" -eq 0 ]; then
+            echo "ERROR: no SteamEngine.framework slice was found to patch."
+            exit 1
+          fi
 
       - name: Restore the Homebrew cache
         uses: actions/cache@v6
@@ -162,6 +169,16 @@ jobs:
           rm -rf Payload ModShelf.ipa
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/ModShelf.app
+
+          # A stale build cache can hand back an app whose embedded engine still carries
+          # gomobile's 100.0 minimum, so the copy that actually ships is corrected here too.
+          for framework in Payload/ModShelf.app/Frameworks/*.framework; do
+            [ -d "$framework" ] || continue
+            plist="$framework/Info.plist"
+            [ -f "$plist" ] || continue
+            /usr/bin/plutil -replace MinimumOSVersion -string "16.0" "$plist"
+          done
+
           rm -rf Payload/ModShelf.app/_CodeSignature
 
           # Ad-hoc signing: installers such as Feather and LiveContainer accept
@@ -181,6 +198,27 @@ jobs:
           /usr/bin/unzip -Z1 ModShelf.ipa | grep -q '^Payload/ModShelf.app/_CodeSignature/'
 
           /usr/bin/plutil -p Payload/ModShelf.app/Info.plist | head -30
+
+          # Fail here rather than on a device: an app or framework that asks for an iOS
+          # version no phone has crashes the moment it launches.
+          APP_MINIMUM=$(/usr/libexec/PlistBuddy -c "Print :MinimumOSVersion" Payload/ModShelf.app/Info.plist 2>/dev/null || true)
+          echo "app: MinimumOSVersion ${APP_MINIMUM:-unset}, CFBundleVersion $(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' Payload/ModShelf.app/Info.plist)"
+          if [ -n "$APP_MINIMUM" ] && [ "$APP_MINIMUM" != "16.0" ]; then
+            echo "ERROR: the app asks for iOS $APP_MINIMUM."
+            exit 1
+          fi
+          for framework in Payload/ModShelf.app/Frameworks/*.framework; do
+            [ -d "$framework" ] || continue
+            plist="$framework/Info.plist"
+            [ -f "$plist" ] || continue
+            minimum=$(/usr/libexec/PlistBuddy -c "Print :MinimumOSVersion" "$plist" 2>/dev/null || true)
+            echo "$(basename "$framework"): MinimumOSVersion ${minimum:-unset}"
+            if [ -n "$minimum" ] && [ "$minimum" != "16.0" ]; then
+              echo "ERROR: $(basename "$framework") asks for iOS $minimum."
+              exit 1
+            fi
+          done
+
           SIZE=$(stat -f%z ModShelf.ipa)
           if [ "$SIZE" -lt 1000000 ]; then
             echo "ERROR: IPA is only $SIZE bytes; it would not be installable."
