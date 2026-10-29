@@ -72,7 +72,7 @@ Files app → ModShelf → Downloaded Mods → <game name> → <mod>
 
 Moving a mod into its game is normal use, so ModShelf shows those as moved out and keeps the install record for update checks.
 
-## Notes & License
+## Notes & Licensing
 
 Steam and the Steam Workshop are trademarks of Valve Corporation. ModShelf is not made by or endorsed by Valve.
 
