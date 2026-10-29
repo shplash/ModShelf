@@ -1329,6 +1329,7 @@ final class WorkshopStore: ObservableObject {
         let insertAt = queueRows.firstIndex(where: { $0.state == .done }) ?? queueRows.count
         queueRows.insert(row, at: insertAt)
         queueTotal = queueRows.count
+        refreshRingProgress()
         log("queued \(id) \"\(meta.title)\" at \(queueRows.count) in line")
         Haptics.tap()
     }
@@ -1374,6 +1375,7 @@ final class WorkshopStore: ObservableObject {
             log("not enough space: need \(Fmt.bytes(downloadExpectedBytes)), free \(Fmt.bytes(Int64(free)))")
             record(id, title: meta.title, result: "Failed", error: errorMessage, game: meta.gameName)
             updateRow(id, state: .failed)
+            ringStopped()
             Haptics.error()
             return
         }
@@ -1388,9 +1390,10 @@ final class WorkshopStore: ObservableObject {
             log("staging failed for \(id): \(error)")
             record(id, title: meta.title, result: "Failed", error: errorMessage, game: meta.gameName)
             updateRow(id, state: .failed)
+            ringStopped()
             return
         }
-        guard let engine else { updateRow(id, state: .failed); return }
+        guard let engine else { updateRow(id, state: .failed); ringStopped(); return }
         let result = engine.downloadWorkshopItem(id, targetDir: staging.path)
         if !result.isEmpty {
             // Keep what is already staged: the engine may have written chunks before refusing.
@@ -1399,6 +1402,7 @@ final class WorkshopStore: ObservableObject {
             log("engine refused \(id): \(result)")
             record(id, title: meta.title, result: "Failed", error: message, imageURL: meta.imageURL.isEmpty ? nil : meta.imageURL, game: meta.gameName)
             updateRow(id, state: .failed)
+            ringStopped()
             Haptics.error()
             return
         }
@@ -1913,6 +1917,7 @@ final class WorkshopStore: ObservableObject {
                     queueRows.removeAll { $0.id == activeID }
                     queueTotal = queueRows.count
                     queueStep = min(queueStep, max(queueTotal, 1))
+                    if queueRows.isEmpty { ringStopped() } else { refreshRingProgress() }
                     log("cancelled \(activeID); the rest of the queue continues")
                 } else {
                     queue.removeAll()
@@ -2021,6 +2026,12 @@ final class WorkshopStore: ObservableObject {
     }
 
     /// Keeps the ring up for ten seconds after a batch finishes.
+    /// Keeps the ring in step when the queue changes size, not just when a tick arrives.
+    private func refreshRingProgress() {
+        guard ringVisible, !ringDone else { return }
+        ringProgress = ringBatchProgress
+    }
+
     private func ringFinished() {
         guard ringVisible else { return }
         ringProgress = 1
@@ -2119,7 +2130,12 @@ final class WorkshopStore: ObservableObject {
             input = ""
         }
         log("removed \(id) from the queue")
-        if queueRows.isEmpty, !isBusy { finishQueue() }
+        if queueRows.isEmpty {
+            if !isBusy { ringStopped() }
+            finishQueue()
+        } else {
+            refreshRingProgress()
+        }
     }
 
     /// The app is leaving the screen: remember what was running, because iOS will stop it.
@@ -2192,12 +2208,14 @@ final class WorkshopStore: ObservableObject {
                 queueTotal = queueRows.count
                 queueStep = min(queueStep, max(queueTotal, 1))
                 if !queue.isEmpty {
+                    refreshRingProgress()
                     startNextInQueue()
                     return
                 }
                 queueRows.removeAll()
                 queueTotal = 0
             }
+            if queueRows.isEmpty { ringStopped() } else { refreshRingProgress() }
             status = "Ready"
             operationMessage = "Download cancelled."
             return
