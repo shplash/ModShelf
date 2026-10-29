@@ -72,7 +72,7 @@ Files app → ModShelf → Downloaded Mods → <game name> → <mod>
 
 Moving a mod into its game is normal use, so ModShelf shows those as moved out and keeps the install record for update checks.
 
-If using [LiveContainer](https://github.com/LiveContainer/LiveContainer) , either check the directory shown in ModShelf’s own options or while in LiveContainer > Apps > Hold ModShelf’s app > “Open Data Folder” and the backtrack and keep its directory in mind.
+If using [LiveContainer](https://github.com/LiveContainer/LiveContainer) , either check the directory shown in ModShelf’s own options or while in LiveContainer > Apps > Hold ModShelf’s app > “Open Data Folder” and keep its path in mind as you backtrack to “On My (Your Device Type)”.
 
 ## Notes & Licensing
 
