@@ -64,23 +64,27 @@ Use:
 - iOS 16 or newer
 - A Steam account and the game in your Steam library: Steam only hands over a game's Workshop items when your account holds its license. Free-to-play games give you that license when you add them to your library once.
 
+
 ## Where mods go
 
+ModShelf organises downloads into a separate folder for each game.
+
+Use the **open directory** button in ModShelf > Options > Downloads to jump straight to your downloads folder, regardless of how the app was installed.
+
+Your downloads are organised like this:
+
 ```
-Files app → ModShelf → Downloaded Mods → <game name> → <mod>
+Downloaded Mods/<game name>/<mod>
 ```
 
-Moving a mod into its game is normal use, so ModShelf shows those as moved out and keeps the install record for update checks.
 
 ## Notes & Licensing
 
 Steam and the Steam Workshop are trademarks of Valve Corporation. ModShelf is not made by or endorsed by Valve.
 
-ModShelf is licensed under [GPL-3](LICENSE).
+ModShelf is licensed under [GPL-3.0](LICENSE).
 
-It bundles [go-steam](https://github.com/BirknerAlex/go-steam) by Alexander Birkner, which is MIT licensed.
-
-Also bundles [ZIPFoundation](https://github.com/weichsel/ZIPFoundation) by Thomas Zoechling, which is MIT licensed.
+It bundles [go-steam](https://github.com/BirknerAlex/go-steam) by Alexander Birkner and [ZIPFoundation](https://github.com/weichsel/ZIPFoundation) by Thomas Zoechling, both [MIT](https://opensource.org/license/mit) licensed.
 
 Third-party notices and the full licence texts are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), and in the app under Options → Credits.
 
