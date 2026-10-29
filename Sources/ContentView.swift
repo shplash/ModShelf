@@ -182,6 +182,8 @@ struct DownloadQueueRow: Identifiable, Equatable {
     var title: String
     var imageURL: String?
     var gameName: String? = nil
+    /// The mod's expected size, used to weigh it in the batch percentage.
+    var fileSize: Int64 = 0
     var progress: Double = 0
     var state: State = .waiting
 }
@@ -737,6 +739,13 @@ final class WorkshopStore: ObservableObject {
     @Published var isPaused = false
     /// A resume asked for while the paused transfer was still winding down.
     private var resumePending = false
+    /// When the transfer was paused and where its half-written files live, so a long pause can start
+    /// again from scratch rather than trusting a staging folder the engine may have lost.
+    private var pausedAt: Date?
+    private var pausedStaging: URL?
+    /// Set while a moved mod is waiting for the current transfer to let go of the engine.
+    private var startAfterCancel: String?
+    private var keepActiveOnCancel = false
     /// The small ring beside the sign-in pill: shown while a transfer runs and for ten seconds after
     /// it finishes, when its arrow turns blue.
     @Published var ringVisible = false
@@ -769,7 +778,7 @@ final class WorkshopStore: ObservableObject {
     /// left to inference rather than named here.
     private let engine = SteamengineNewEngine()
     private var poller: Timer?
-    private var activeID = ""
+    private(set) var activeID = ""
     private var activeMeta: WorkshopMetadata?
     private var queue: [String] = []
     /// How far through "Update all" the run is, so the download screen can say which one it is on.
@@ -1291,7 +1300,7 @@ final class WorkshopStore: ObservableObject {
         pendingMeta[id] = meta
         queueRows.append(DownloadQueueRow(id: id, title: meta.title,
                                          imageURL: meta.imageURL.isEmpty ? nil : meta.imageURL,
-                                         gameName: meta.gameName))
+                                         gameName: meta.gameName, fileSize: meta.fileSize))
         queueTotal = queueRows.count
         operationMessage = "\(meta.title) joins the queue."
         log("queued \(id) \"\(meta.title)\" at \(queueRows.count) in line")
@@ -1381,11 +1390,13 @@ final class WorkshopStore: ObservableObject {
         if let index = queueRows.firstIndex(where: { $0.id == id }) {
             queueRows[index].state = .downloading
             queueRows[index].progress = 0
+            queueRows[index].fileSize = meta.fileSize
             queueStep = index + 1
         } else {
             queueRows.append(DownloadQueueRow(id: id, title: meta.title,
                                               imageURL: meta.imageURL.isEmpty ? nil : meta.imageURL,
                                               gameName: meta.gameName,
+                                              fileSize: meta.fileSize,
                                               state: .downloading))
             queueStep = queueRows.count
         }
@@ -1459,7 +1470,8 @@ final class WorkshopStore: ObservableObject {
         }
         queue = picks.map(\.id)
         queueRows = picks.map { DownloadQueueRow(id: $0.id, title: $0.displayTitle,
-                                                 imageURL: $0.imageURL, gameName: $0.gameName) }
+                                                 imageURL: $0.imageURL, gameName: $0.gameName,
+                                                 fileSize: $0.byteCount ?? 0) }
         queueStep = 0
         queueTotal = queue.count
         queueFailed = 0
@@ -1700,6 +1712,38 @@ final class WorkshopStore: ObservableObject {
         let error = engine?.lastError() ?? ""
         let successStatus = s.contains("download complete")
         let cancelled = s.contains("download cancelled")
+        // A row moved onto the running one: let the engine go, keep the running mod in the queue,
+        // then start the moved one.
+        if cancelled, keepActiveOnCancel {
+            keepActiveOnCancel = false
+            isPaused = false
+            resumePending = false
+            if let index = queueRows.firstIndex(where: { $0.id == activeID }) {
+                queueRows[index].state = .waiting
+            }
+            status = "Paused"
+            history.removeAll { $0.workshopID == activeID && $0.result == "Downloading" }
+            saveHistory()
+            // The stopped mod keeps its place in the queue, and the one dropped on top of it goes
+            // first, so the order the rows show is the order they will run in.
+            syncQueueOrder()
+            log("stopped \(activeID), kept in the queue")
+            let next = startAfterCancel
+            startAfterCancel = nil
+            if let next, let meta = pendingMeta.removeValue(forKey: next) ?? metaFor(next) {
+                queue.removeAll { $0 == next }
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 400_000_000)
+                    self.beginDownload(id: next, meta: meta, keepQueue: true)
+                }
+            } else if !queue.isEmpty {
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 400_000_000)
+                    self.startNextInQueue()
+                }
+            }
+            return
+        }
         // A paused transfer stops the engine but keeps its staging folder, so resuming carries on
         // from the chunks already written instead of starting again.
         if cancelled, isPaused {
@@ -1708,12 +1752,19 @@ final class WorkshopStore: ObservableObject {
             }
             status = "Paused"
             log("paused \(activeID)")
+            // Pausing is not an attempt: take the placeholder entry back out of history.
+            history.removeAll { $0.workshopID == activeID && $0.result == "Downloading" }
+            saveHistory()
             if resumePending {
                 resumePending = false
                 resumeActive()
             }
             return
         }
+        // A move that asked the engine to stop is over: if Steam reported something other than a
+        // cancellation, the flags must not change how the next download ends.
+        keepActiveOnCancel = false
+        startAfterCancel = nil
         let meta = activeMeta ?? WorkshopMetadata(id: activeID, title: activeTitle, author: "", description: "", imageURL: "", updatedAt: 0)
         var success = false
         var failureText = ""
@@ -1844,6 +1895,8 @@ final class WorkshopStore: ObservableObject {
         } else if isDownloading {
             isPaused = true
             resumePending = false
+            pausedAt = Date()
+            pausedStaging = activeStaging
             status = "Paused"
             engine?.cancelDownload()
             log("pause requested")
@@ -1852,21 +1905,33 @@ final class WorkshopStore: ObservableObject {
 
     private func resumeActive() {
         guard !activeID.isEmpty else { return }
+        // A long pause can outlive whatever the engine cached; start that download cleanly again.
+        if let at = pausedAt, let url = pausedStaging,
+           Date().timeIntervalSince(at) > 30 {
+            try? FileManager.default.removeItem(at: url)
+            log("cleared staging after a long pause")
+        }
+        pausedAt = nil
+        pausedStaging = nil
         let meta = activeMeta ?? WorkshopMetadata(id: activeID, title: activeTitle, author: "",
                                                   description: "", imageURL: "", updatedAt: 0)
         log("resume \(activeID)")
         beginDownload(id: activeID, meta: meta, keepQueue: true)
     }
 
-    /// The ring shows the whole batch when several mods are queued, not just the one moving.
+    /// The ring shows the whole batch when several mods are queued, weighted by each mod's size so a
+    /// big mod does not count the same as a tiny one.
     private var ringBatchProgress: Double {
-        if queueRows.count > 1 {
-            let total = queueRows.reduce(0.0) { sum, row in
-                sum + (row.state == .done ? 1 : min(1, max(0, row.progress)))
-            }
-            return min(1, total / Double(queueRows.count))
+        guard !queueRows.isEmpty else { return 0 }
+        let weights = queueRows.map { max(1, Double($0.fileSize)) }
+        let total = weights.reduce(0, +)
+        guard total > 0 else { return 0 }
+        var done = 0.0
+        for (index, row) in queueRows.enumerated() {
+            let fraction = row.state == .done ? 1 : min(1, max(0, row.progress))
+            done += weights[index] * fraction
         }
-        return min(1, max(0, progress))
+        return min(1, done / total)
     }
 
     /// Marks the ring finished and keeps it on screen for ten seconds before it goes.
@@ -1891,6 +1956,60 @@ final class WorkshopStore: ObservableObject {
         ringProgress = 0
     }
 
+    /// Moves a row within the queue and rebuilds the order the batch will follow.
+    func moveRow(_ id: String, to target: Int) {
+        guard let from = queueRows.firstIndex(where: { $0.id == id }) else { return }
+        let row = queueRows.remove(at: from)
+        let clamped = max(0, min(target, queueRows.count))
+        queueRows.insert(row, at: clamped)
+        syncQueueOrder()
+        log("moved \(id) to \(clamped + 1) in the queue")
+    }
+
+    /// The queue array only holds mods that have not started, in display order.
+    private func syncQueueOrder() {
+        queue = queueRows.filter { $0.state == .waiting }.map(\.id)
+        queueTotal = queueRows.count
+        queueStep = min(queueStep, max(queueTotal, 1))
+    }
+
+    /// Drops a moved mod on the place held by the running one, asking the engine to let go first.
+    /// The running mod is kept at the top of the queue so nothing is lost.
+    func startMovedMod(_ id: String) {
+        guard let meta = pendingMeta[id] ?? metaFor(id) else { return }
+        moveRow(id, to: 0)
+        guard isDownloading || isPaused else {
+            // The download that was running may have ended while the question was on screen; then
+            // the moved mod simply goes first and starts straight away.
+            if !isBusy {
+                queue.removeAll { $0 == id }
+                pendingMeta.removeValue(forKey: id)
+                beginDownload(id: id, meta: meta, keepQueue: true)
+            }
+            // Still busy putting the last one away: the queue starts it as soon as that is done.
+            return
+        }
+        startAfterCancel = id
+        keepActiveOnCancel = true
+        isPaused = false
+        resumePending = false
+        status = "Paused"
+        engine?.cancelDownload()
+        log("stopping \(activeID) to start \(id)")
+    }
+
+    /// Stops the running download but leaves it first in the queue, for when it has been moved.
+    func stopActiveKeepingInQueue() {
+        guard isDownloading || isPaused else { return }
+        keepActiveOnCancel = true
+        startAfterCancel = nil
+        isPaused = false
+        resumePending = false
+        status = "Paused"
+        engine?.cancelDownload()
+        log("stopping \(activeID) to move it in the queue")
+    }
+
     /// Stops one download: a waiting one leaves the queue, and the one running ends the batch.
     func cancelItem(_ id: String) {
         if id == activeID, isDownloading || isPaused {
@@ -1909,6 +2028,11 @@ final class WorkshopStore: ObservableObject {
     func cancel() {
         isPaused = false
         resumePending = false
+        pausedAt = nil
+        pausedStaging = nil
+        // Cancelling the batch calls off any move that was waiting on the engine to let go.
+        keepActiveOnCancel = false
+        startAfterCancel = nil
         ringStopped()
         log("cancel requested (queue \(queue.count), active \(activeID)")
         if let task = devTask {
@@ -1964,7 +2088,8 @@ final class WorkshopStore: ObservableObject {
     private func devRunFake(ids: [String], failEvery: Int, seconds: Double) {
         queueRows = ids.compactMap { id in
             library.first(where: { $0.id == id }).map {
-                DownloadQueueRow(id: id, title: $0.displayTitle, imageURL: $0.imageURL)
+                DownloadQueueRow(id: id, title: $0.displayTitle, imageURL: $0.imageURL,
+                                 fileSize: $0.byteCount ?? 0)
             }
         }
         queueStep = 0
@@ -3408,17 +3533,18 @@ struct MarqueeText: UIViewRepresentable {
     var speed: CGFloat = 26
     var active = true
     var restartToken = 0
+    var color: UIColor = .label
 
     func makeUIView(context: Context) -> MarqueeUIView {
         let view = MarqueeUIView()
         view.update(text: text, font: .systemFont(ofSize: fontSize, weight: weight),
-                    active: active, token: restartToken, speed: speed)
+                    active: active, token: restartToken, speed: speed, color: color)
         return view
     }
 
     func updateUIView(_ view: MarqueeUIView, context: Context) {
         view.update(text: text, font: .systemFont(ofSize: fontSize, weight: weight),
-                    active: active, token: restartToken, speed: speed)
+                    active: active, token: restartToken, speed: speed, color: color)
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, uiView: MarqueeUIView, context: Context) -> CGSize? {
@@ -3450,9 +3576,10 @@ final class MarqueeUIView: UIView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    func update(text: String, font: UIFont, active: Bool, token: Int, speed: CGFloat) {
+    func update(text: String, font: UIFont, active: Bool, token: Int, speed: CGFloat, color: UIColor = .label) {
         self.speed = speed
         if label.font != font { label.font = font }
+        if label.textColor != color { label.textColor = color }
         if label.text != text { label.text = text }
         let changed = text != lastText || token != lastToken || active != self.active
             || abs(speed - lastSpeed) > 0.01
@@ -3564,6 +3691,12 @@ struct ExportPrompt: Identifiable {
     let total: Int
 }
 
+/// A mod that was dropped on the running one, waiting for a yes before the engine is stopped.
+struct ReorderRequest: Identifiable {
+    let id: String
+    let title: String
+}
+
 struct ContentView: View {
     @StateObject private var store = WorkshopStore()
     @Environment(\.scenePhase) private var scenePhase
@@ -3610,6 +3743,7 @@ struct ContentView: View {
     @State private var marqueeToken = 0
     @State private var freeSpaceCache: Int64 = 0
     @State private var pendingAutoDownload: String?
+    @State private var confirmClearViewed = false
     @State private var selectedGame: String? = nil
     @State private var selectedTag: String? = nil
     @State private var favouritesOnly = false
@@ -3627,6 +3761,10 @@ struct ContentView: View {
     @AppStorage("dev.unlocked") private var devUnlocked = false
     @State private var logoTapCount = 0
     @State private var lastLogoTap = Date.distantPast
+    @State private var dragRowID: String?
+    @State private var dragOffsetY: CGFloat = 0
+    @State private var dragTarget: Int?
+    @State private var confirmReorder: ReorderRequest?
 
     /// Space reserved under every tab for the tab bar, so content can always scroll clear of it.
     private var tabBarReserve: CGFloat { tabStyle == "bar" ? 84 : 100 }
@@ -3811,6 +3949,14 @@ struct ContentView: View {
             // Auto download starts with its confirmation armed, and off with it off.
             confirmAutoDownload = on
         }
+        .alert("Clear recently viewed mods?", isPresented: $confirmClearViewed) {
+            Button("Clear", role: .destructive) {
+                UserDefaults.standard.set("[]", forKey: "browser.recentMods")
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("They will appear again as you browse the Workshop.")
+        }
         .onChange(of: store.preview) { _ in
             mediaIndex = 0
             mediaViewer = nil
@@ -3974,6 +4120,20 @@ struct ContentView: View {
                          },
                          cancel: { confirmBulkDelete = false })
                 .padding(30).zIndex(15)
+        }
+        if let request = confirmReorder {
+            Color.black.opacity(0.38).ignoresSafeArea().contentShape(Rectangle())
+                .onTapGesture { confirmReorder = nil }.zIndex(30)
+            ConfirmPopup(heading: "Start this mod now?",
+                         message: "\(request.title) will jump the queue and the download running now will stop. It stays in the queue for later.",
+                         actionTitle: "Download now",
+                         tint: .accentColor,
+                         confirm: {
+                             confirmReorder = nil
+                             store.startMovedMod(request.id)
+                         },
+                         cancel: { confirmReorder = nil })
+                .padding(30).zIndex(31)
         }
         if let prompt = exportPrompt {
             Color.black.opacity(0.38).ignoresSafeArea().contentShape(Rectangle())
@@ -4362,6 +4522,7 @@ struct ContentView: View {
                 }
             }
             .coordinateSpace(name: "scroll")
+            .scrollDisabled(dragRowID != nil)
             .scrollDismissesKeyboard(.interactively)
             .background(Color(uiColor: .systemGroupedBackground))
             .toolbar(.hidden, for: .navigationBar)
@@ -4388,42 +4549,43 @@ struct ContentView: View {
         let failed = store.queueRows.filter { $0.state == .failed }
         return VStack(alignment: .leading, spacing: 0) {
             if store.queueTotal > 1 {
-            ZStack {
-                HStack(spacing: 8) {
-                    ZStack {
-                        Circle().fill(Color.accentColor.opacity(0.14))
-                        Image(systemName: "arrow.down")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundStyle(Color.accentColor)
-                    }
-                    .frame(width: 24, height: 24)
-                    Text(queueHeadline)
-                        .font(.system(size: 14, weight: .semibold))
-                        .lineLimit(1)
-                    Text("\(Int(queueOverallProgress * 100))%")
-                        .font(.system(size: 13, weight: .semibold).monospacedDigit())
-                        .foregroundStyle(Color.accentColor)
+            HStack(spacing: 10) {
+                ZStack {
+                    Circle().fill(Color.primary.opacity(0.08))
+                    Image(systemName: "arrow.down")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(.secondary)
                 }
-                .frame(maxWidth: .infinity)
-                HStack {
-                    Spacer(minLength: 0)
-                    Button { Haptics.tap(); store.cancel() } label: {
-                        Image(systemName: "xmark").font(.system(size: 11, weight: .bold))
-                            .foregroundStyle(.secondary)
-                            .frame(width: 26, height: 26)
-                            .background(Circle().fill(Color.primary.opacity(0.07)))
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Cancel downloads")
+                .frame(width: 24, height: 24)
+                Text(queueHeadline)
+                    .font(.system(size: 14, weight: .semibold))
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                Text("\(Int(queueOverallProgress * 100))%")
+                    .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 46)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(Color.primary.opacity(0.06)))
+                Button { Haptics.tap(); store.cancel() } label: {
+                    Image(systemName: "xmark").font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 26, height: 26)
+                        .background(Circle().fill(Color.primary.opacity(0.07)))
                 }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Cancel downloads")
             }
             .padding(.horizontal, 14).padding(.top, 12).padding(.bottom, 8)
             }
 
             VStack(spacing: 0) {
                 ForEach(Array(active.enumerated()), id: \.element.id) { index, row in
-                    if index > 0 { Divider().padding(.horizontal, 14) }
-                    queueRow(row)
+                    if index > 0, !(dragRowID != nil && dragTarget == index) {
+                        Divider().padding(.horizontal, 14)
+                    }
+                    if dragRowID != nil, dragTarget == index { dropLine }
+                    queueRow(row, index: index, count: active.count)
                 }
                 if !failed.isEmpty {
                     if !active.isEmpty { Divider().padding(.horizontal, 14) }
@@ -4445,6 +4607,17 @@ struct ContentView: View {
         }
         .padding(.bottom, 6)
         .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+        // A drag must never outlive the rows it was moving, or scrolling would stay switched off.
+        .onDisappear { endReorder() }
+        .onChange(of: store.queueRows.count) { _ in
+            if dragRowID != nil, !store.queueRows.contains(where: { $0.id == dragRowID }) { endReorder() }
+        }
+    }
+
+    private func endReorder() {
+        dragRowID = nil
+        dragOffsetY = 0
+        dragTarget = nil
     }
 
     private var queueHeadline: String {
@@ -4465,13 +4638,18 @@ struct ContentView: View {
         return "\(done) of \(store.queueRows.count) done"
     }
 
-    /// How far the whole batch has come, so the card can show one line of progress as well as each row.
+    /// How far the whole batch has come, weighted by each mod's size.
     private var queueOverallProgress: Double {
         guard !store.queueRows.isEmpty else { return 0 }
-        let total = store.queueRows.reduce(0.0) { sum, row in
-            sum + (row.state == .done ? 1 : min(1, max(0, row.progress)))
+        let weights = store.queueRows.map { max(1, Double($0.fileSize)) }
+        let total = weights.reduce(0, +)
+        guard total > 0 else { return 0 }
+        var done = 0.0
+        for (index, row) in store.queueRows.enumerated() {
+            let fraction = row.state == .done ? 1 : min(1, max(0, row.progress))
+            done += weights[index] * fraction
         }
-        return min(1, total / Double(store.queueRows.count))
+        return min(1, done / total)
     }
 
     private func queueTint(_ row: DownloadQueueRow) -> Color {
@@ -4485,26 +4663,41 @@ struct ContentView: View {
         }
     }
 
-    private func queueRow(_ row: DownloadQueueRow) -> some View {
+    /// How much room one row takes, so a drag can tell which slot the finger is over.
+    private let queueRowSpan: CGFloat = 104
+
+    private func queueRow(_ row: DownloadQueueRow, index: Int? = nil, count: Int = 0) -> some View {
         let failed = row.state == .failed
+        let dragged = dragRowID == row.id
         return HStack(alignment: .top, spacing: 12) {
+            if let index, !failed, count > 1 {
+                dragHandle(row, index: index, count: count)
+                    .frame(height: 84)
+            }
             Color.clear
                 .frame(width: 84, height: 84)
                 .overlay(CachedImage(urlString: row.imageURL, fill: false, maxPixel: 320).allowsHitTesting(false))
-            VStack(alignment: .leading, spacing: 6) {
-                MarqueeText(text: row.title, fontSize: 14, weight: .semibold, height: 18,
-                            active: row.state == .downloading)
-                if let game = row.gameName, !game.isEmpty {
-                    Text(game).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+            VStack(alignment: .leading, spacing: 0) {
+                Spacer(minLength: 0)
+                VStack(alignment: .leading, spacing: 5) {
+                    MarqueeText(text: row.title, fontSize: 14, weight: .semibold, height: 18,
+                                active: row.state == .downloading)
+                    if let game = row.gameName, !game.isEmpty {
+                        Text(game).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                    queueStatusText(row)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(queueTint(row))
+                        .lineLimit(1)
                 }
-                queueStatusText(row)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(queueTint(row))
-                    .lineLimit(1)
-                Spacer(minLength: 2)
+                // The percent sits on the line under the state, where it has room to be read.
+                queuePercent(row)
+                    .padding(.top, 2)
+                    .frame(height: 14, alignment: .leading)
+                Spacer(minLength: 0)
                 queueBar(row)
             }
-            .frame(height: 84, alignment: .top)
+            .frame(height: 84)
             HStack(spacing: 8) {
                 if failed {
                     Button { Haptics.tap(); store.download(row.id) } label: {
@@ -4516,12 +4709,6 @@ struct ContentView: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Retry download")
-                } else {
-                    Text(row.state == .downloading && store.isPreparingDownload
-                         ? "" : "\(Int(row.progress * 100))%")
-                        .font(.system(size: 12, weight: .semibold).monospacedDigit())
-                        .foregroundStyle(queueTint(row))
-                        .frame(width: 36, alignment: .trailing)
                 }
                 Button { Haptics.tap(); store.cancelItem(row.id) } label: {
                     Image(systemName: "xmark")
@@ -4536,6 +4723,96 @@ struct ContentView: View {
             .frame(height: 84, alignment: .center)
         }
         .padding(.horizontal, 14).padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(dragged ? Color(uiColor: .secondarySystemGroupedBackground) : Color.clear)
+        )
+        .offset(y: dragged ? dragOffsetY : 0)
+        .zIndex(dragged ? 1 : 0)
+        .shadow(color: dragged ? .black.opacity(0.16) : .clear, radius: dragged ? 9 : 0, y: dragged ? 4 : 0)
+        .animation(.easeOut(duration: 0.18), value: dragTarget)
+    }
+
+    /// Two grey lines on a grey pill: enough of a grip to be found, quiet enough to stay out of the way.
+    private func dragHandle(_ row: DownloadQueueRow, index: Int, count: Int) -> some View {
+        VStack(spacing: 3) {
+            Capsule().fill(Color.primary.opacity(0.24)).frame(width: 11, height: 2)
+            Capsule().fill(Color.primary.opacity(0.24)).frame(width: 11, height: 2)
+        }
+        .frame(width: 20, height: 30)
+        .background(Capsule(style: .continuous).fill(Color.primary.opacity(0.07)))
+        .contentShape(Capsule(style: .continuous))
+        .highPriorityGesture(reorderGesture(row, index: index, count: count))
+        .accessibilityLabel("Move \(row.title) in the queue")
+    }
+
+    /// A hold on the grip picks the row up, and the drag that follows slides it within the card.
+    private func reorderGesture(_ row: DownloadQueueRow, index: Int, count: Int) -> some Gesture {
+        LongPressGesture(minimumDuration: 0.4, maximumDistance: 14)
+            .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .global))
+            .onChanged { value in
+                guard case .second(true, let drag?) = value else { return }
+                if dragRowID != row.id {
+                    dragRowID = row.id
+                    dragOffsetY = 0
+                    dragTarget = index
+                    Haptics.medium()
+                }
+                let low: CGFloat = -CGFloat(index) * queueRowSpan
+                let high = max(low, CGFloat(count - 1 - index) * queueRowSpan)
+                dragOffsetY = min(max(drag.translation.height, low), high)
+                let steps = Int((dragOffsetY / queueRowSpan).rounded())
+                let target = max(0, min(count - 1, index + steps))
+                if target != dragTarget {
+                    dragTarget = target
+                    Haptics.select()
+                }
+            }
+            .onEnded { _ in
+                guard dragRowID == row.id else { return }
+                finishReorder(row, to: dragTarget ?? index)
+            }
+    }
+
+    /// Puts the row where the blue line was, and asks first when that means stopping a running one.
+    private func finishReorder(_ row: DownloadQueueRow, to target: Int) {
+        dragRowID = nil
+        dragOffsetY = 0
+        dragTarget = nil
+        let order = store.queueRows.filter { $0.state != .failed }
+        guard target >= 0, target < order.count,
+              let from = store.queueRows.firstIndex(where: { $0.id == row.id }) else { return }
+        let to = store.queueRows.firstIndex(where: { $0.id == order[target].id }) ?? from
+        guard to != from else { return }
+        Haptics.tap()
+        if row.state == .waiting, order[target].id == store.activeID,
+           store.isDownloading || store.isPaused {
+            confirmReorder = ReorderRequest(id: row.id, title: row.title)
+            return
+        }
+        store.moveRow(row.id, to: to)
+    }
+
+    /// The line that shows where a row picked up by its grip will land.
+    private var dropLine: some View {
+        Capsule()
+            .fill(Color.accentColor)
+            .frame(height: 3)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 3)
+            .transition(.opacity)
+    }
+
+    /// The percent for one row, on the line under its state.
+    @ViewBuilder private func queuePercent(_ row: DownloadQueueRow) -> some View {
+        if row.state == .done
+            || (row.state == .downloading && !store.isPreparingDownload) {
+            Text("\(Int(row.progress * 100))%")
+                .font(.system(size: 11, weight: .semibold).monospacedDigit())
+                .foregroundStyle(queueTint(row))
+        } else {
+            Color.clear.frame(height: 14)
+        }
     }
 
     private func queueBar(_ row: DownloadQueueRow) -> some View {
@@ -4721,7 +4998,7 @@ struct ContentView: View {
     /// download runs. Without it the Download tab only showed the lookup field.
     private func queuedDownloadCard(_ item: WorkshopMetadata) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .top, spacing: 12) {
+            HStack(alignment: .center, spacing: 12) {
                 Color.clear
                     .frame(width: 84, height: 84)
                     .overlay(CachedImage(urlString: item.imageURL, fill: false, maxPixel: 320).allowsHitTesting(false))
@@ -4733,6 +5010,7 @@ struct ContentView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(height: 84)
             }
             HStack(spacing: 6) {
                 Image(systemName: "text.line.first.and.arrowtriangle.forward")
@@ -4922,7 +5200,9 @@ struct ContentView: View {
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
-                        .padding(.horizontal, 10).padding(.vertical, 7)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .layoutPriority(2)
+                        .padding(.horizontal, 9).padding(.vertical, 6)
                         .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                 }
                 HStack(spacing: 8) {
@@ -5024,7 +5304,7 @@ struct ContentView: View {
                 }
             }
             .foregroundStyle(.secondary)
-            .padding(.horizontal, 10).padding(.vertical, 7)
+            .padding(.horizontal, 9).padding(.vertical, 6)
             .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
     }
@@ -5050,10 +5330,10 @@ struct ContentView: View {
                     .font(.system(size: 12, weight: .medium))
                     .foregroundColor(Color(uiColor: .secondaryLabel))
                     .lineLimit(1)
-                    .fixedSize(horizontal: true, vertical: false)
-                    .layoutPriority(1)
+                    .truncationMode(.tail)
+                    .layoutPriority(0)
             }
-            .padding(.horizontal, 10).padding(.vertical, 7)
+            .padding(.horizontal, 9).padding(.vertical, 6)
             .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
     }
@@ -5497,7 +5777,7 @@ struct ContentView: View {
                     Text(record.result).font(.system(size: 12, weight: .medium)).foregroundStyle(historyColor(record.result))
                 }
                 if failed, let error = record.error, !error.isEmpty {
-                    Text(error).font(.system(size: 12)).foregroundStyle(Color.red.opacity(0.9)).lineLimit(1)
+                    MarqueeText(text: error, fontSize: 12, weight: .regular, height: 16, color: .systemRed)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -5626,6 +5906,11 @@ struct ContentView: View {
                 toggleRow("Auto download from browser", symbol: "arrow.down.circle", isOn: $autoDownload)
                 divider
                 toggleRow("Confirm auto download", symbol: "checkmark.circle", isOn: $confirmAutoDownload)
+                divider
+                Button { Haptics.tap(); confirmClearViewed = true } label: {
+                    rowContent("Clear recently viewed mods in the browser", symbol: "trash", detail: nil)
+                }
+                .buttonStyle(.plain)
             }
         )
     }
@@ -7038,7 +7323,6 @@ struct BrowserHome: View {
     @AppStorage("browser.recentGames") private var recentJSON = "[]"
     @AppStorage("browser.favGames") private var favJSON = "[]"
     @AppStorage("browser.recentMods") private var viewedJSON = "[]"
-    @State private var confirmClearViewed = false
 
     private var recent: [GameHit] { GameListStore.decode(recentJSON) }
     private var favourites: [GameHit] { GameListStore.decode(favJSON) }
@@ -7066,12 +7350,6 @@ struct BrowserHome: View {
             .padding(.bottom, 110)
         }
         .background(Color(uiColor: .systemGroupedBackground))
-        .alert(viewedClearPrompt, isPresented: $confirmClearViewed) {
-            Button("Clear", role: .destructive) { viewedJSON = "[]" }
-            Button("Cancel", role: .cancel) { }
-        } message: {
-            Text("They will appear again as you browse the Workshop.")
-        }
         .task(id: query) { await runSearch() }
         .onAppear { if isFirstRun { searchFocused = true } }
     }
@@ -7149,37 +7427,10 @@ struct BrowserHome: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 10) {
                     ForEach(viewedMods) { hit in viewedTile(hit) }
-                    clearViewedTile
                 }
                 .padding(.horizontal, 1).padding(.vertical, 2)
             }
         }
-    }
-
-    /// Empties the recently viewed list, with a confirmation before it does.
-    private var viewedClearPrompt: String { "Clear recently viewed mods?" }
-
-    private var clearViewedTile: some View {
-        Button { Haptics.tap(); confirmClearViewed = true } label: {
-            VStack(alignment: .leading, spacing: 6) {
-                Color.clear
-                    .frame(width: 78, height: 78)
-                    .overlay(
-                        Image(systemName: "trash")
-                            .font(.system(size: 20, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                    )
-                    .background(Color(uiColor: .tertiarySystemFill), in: UnevenRoundedRectangle(topLeadingRadius: 0, bottomLeadingRadius: 12, bottomTrailingRadius: 12, topTrailingRadius: 0))
-                Text("CLEAR")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 78, alignment: .leading)
-            }
-            .padding(6)
-            .background(Color(uiColor: .secondarySystemGroupedBackground), in: UnevenRoundedRectangle(topLeadingRadius: 0, bottomLeadingRadius: 12, bottomTrailingRadius: 12, topTrailingRadius: 0))
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Clear recently viewed mods")
     }
 
     private func viewedTile(_ hit: GameHit) -> some View {
