@@ -523,6 +523,10 @@ enum CookieVault {
         }
         group.notify(queue: .main) { completion() }
     }
+    static func clearStored() {
+        Keychain.delete(key)
+    }
+
     static func hasSteamLogin() -> Bool {
         guard let text = Keychain.read(key), let data = text.data(using: .utf8),
               let rows = try? JSONDecoder().decode([[String: String]].self, from: data) else { return false }
@@ -855,6 +859,10 @@ final class WorkshopStore: ObservableObject {
 
     /// "ModShelf/Downloaded Mods", as Files shows it.
     var downloadsFolderLabel: String { Self.readablePath(downloadsFolderURL) }
+    /// Wi-Fi only is on, and the phone is on a metered link right now.
+    private var blockedByWifiOnly: Bool {
+        UserDefaults.standard.bool(forKey: "options.wifiOnly") && NetworkWatcher.shared.isExpensive
+    }
     private var sessionPath: String {
         let fm = FileManager.default
         let library = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -1199,7 +1207,7 @@ final class WorkshopStore: ObservableObject {
             Keychain.write(pass, key: "steam.password")
             guardCode = ""; showLogin = false; status = "Signed in to Steam"
             loginError = ""
-            log("signed in as \(user)")
+            log("signed in")
             Haptics.success()
         } else {
             let raw = result.isEmpty ? (engine?.lastError() ?? "") : result
@@ -1247,8 +1255,24 @@ final class WorkshopStore: ObservableObject {
     func signOut() {
         guard !isBusy else { errorMessage = "Let the current download finish first."; return }
         log("signed out")
-        engine?.logout(); Keychain.delete("steam.password"); password = ""; guardCode = ""
+        engine?.logout()
+        Keychain.delete("steam.password")
+        Keychain.delete("steam.username")
+        CookieVault.clearStored()
+        clearSteamSessionFiles()
+        password = ""
+        username = ""
+        guardCode = ""
         status = "Signed out"
+    }
+
+    private func clearSteamSessionFiles() {
+        let fm = FileManager.default
+        let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("ModShelf/SteamSession/steam-session", isDirectory: true)
+        for file in (try? fm.contentsOfDirectory(at: base, includingPropertiesForKeys: nil)) ?? [] {
+            try? fm.removeItem(at: file)
+        }
     }
 
 
@@ -1261,9 +1285,10 @@ final class WorkshopStore: ObservableObject {
             return
         }
         guard let id = Self.workshopID(from: raw ?? input) else { errorMessage = "Enter a Workshop link or item ID."; return }
-        if UserDefaults.standard.bool(forKey: "options.wifiOnly") && NetworkWatcher.shared.isExpensive {
-            errorMessage = "Wi-Fi only is on, so this will wait until you're on Wi-Fi."
-            queue.removeAll()
+        if blockedByWifiOnly {
+            operationMessage = "Wi-Fi only is on, so this will start when you're on Wi-Fi."
+            enqueue(id, meta: meta)
+            startNextInQueue()
             return
         }
         let fallback = WorkshopMetadata(id: id, title: "Workshop item \(id)", author: "", description: "", imageURL: "", updatedAt: 0)
@@ -1451,6 +1476,15 @@ final class WorkshopStore: ObservableObject {
     }
     private func startNextInQueue() {
         guard !isBusy else { return }
+        if blockedByWifiOnly, !queue.isEmpty {
+            operationMessage = "Wi-Fi only is on, so the queue is waiting for Wi-Fi."
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 15_000_000_000)
+                guard !self.isBusy, !self.queue.isEmpty else { return }
+                self.startNextInQueue()
+            }
+            return
+        }
         while let id = queue.first {
             queue.removeFirst()
             guard let meta = pendingMeta.removeValue(forKey: id) ?? metaFor(id) else { continue }
@@ -3282,17 +3316,22 @@ final class WorkshopStore: ObservableObject {
         isCheckingAppUpdate = true
         appUpdateMessage = "Checking for updates…"
         Task { @MainActor in
-            isCheckingAppUpdate = false
-            var request = URLRequest(url: URL(string: "https://api.github.com/repos/\(Self.appRepo)/releases/latest")!)
-            request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-            request.timeoutInterval = 15
-            guard let (data, _) = try? await URLSession.shared.data(for: request),
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let tag = json["tag_name"] as? String else {
+            defer { isCheckingAppUpdate = false }
+            // Follow the releases/latest redirect instead of the API, which rate-limits by IP.
+            guard let url = URL(string: "https://github.com/\(Self.appRepo)/releases/latest") else {
                 appUpdateMessage = "Couldn't check for updates."
                 return
             }
-            let latest = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 15
+            guard let (_, response) = try? await URLSession.shared.data(for: request),
+                  let finalURL = response.url,
+                  let tag = finalURL.pathComponents.last,
+                  tag.hasPrefix("v") else {
+                appUpdateMessage = "Couldn't check for updates."
+                return
+            }
+            let latest = String(tag.dropFirst())
             appUpdateMessage = Self.version(latest, isNewerThan: modShelfVersion)
                 ? "v\(latest) is available."
                 : "You're on the latest version."
@@ -4133,10 +4172,6 @@ struct ContentView: View {
                 selection = selection.intersection(liveIDs)
                 if selection.isEmpty { selecting = false }
             }
-            .onChange(of: autoDownload) { on in
-                // Auto download starts with its confirmation armed, and off with it off.
-                confirmAutoDownload = on
-            }
             .alert("Clear recently viewed mods?", isPresented: $confirmClearViewed) {
                 Button("Clear", role: .destructive) {
                     UserDefaults.standard.set("[]", forKey: "browser.recentMods")
@@ -4537,7 +4572,7 @@ struct ContentView: View {
                         bannerLine("Checking for updates", updateLine, tint: .accentColor)
                     }
                     if !note.isEmpty {
-                        bannerLine(bannerTitle, note, tint: .accentColor)
+                        bannerLine("Status", note, tint: .accentColor)
                     }
                 }
                 Spacer(minLength: 0)
@@ -4568,6 +4603,7 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title).font(.system(size: 13, weight: .semibold)).foregroundStyle(tint)
             Text(text).font(.system(size: 13)).foregroundStyle(.secondary)
+                .lineLimit(3)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -4576,16 +4612,6 @@ struct ContentView: View {
     /// Turns raw engine text into one short line a person can act on.
     private func friendlyError(_ raw: String) -> String {
         ErrorText.friendly(raw)
-    }
-
-    /// The heading of the info banner, so it names what is actually running.
-    private var bannerTitle: String {
-        if store.isExporting { return "Building a ZIP" }
-        if store.isVerifyingAll { return "Validating files" }
-        if store.isCheckingUpdates { return "Checking for updates" }
-        if store.isDownloading { return "Downloading" }
-        if store.isBusy { return "Please wait" }
-        return "Status"
     }
 
     /// A percent that can never trap: a missing or infinite figure reads as 0%.
