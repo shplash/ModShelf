@@ -2,7 +2,7 @@
 
 ModShelf itself is licensed under the GNU General Public License, version 3.0 only. The full text is in [LICENSE](LICENSE).
 
-This file lists the third-party components that ship inside the app, with their copyright lines and licence texts. The same text is available in the app under Options → Credits → Third-party notices.
+This file lists the third-party components that ship inside the app, with their copyright lines and licence texts.
 
 ---
 
