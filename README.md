@@ -76,7 +76,7 @@ Moving a mod into its game is normal use, so ModShelf shows those as moved out a
 
 Steam and the Steam Workshop are trademarks of Valve Corporation. ModShelf is not made by or endorsed by Valve.
 
-ModShelf is licensed under [GPL-3] License(LICENSE).
+ModShelf is licensed under [GPL-3.0-or-later](LICENSE).
 
 It bundles [go-steam](https://github.com/BirknerAlex/go-steam) by Alexander Birkner, which is MIT licensed.
 
