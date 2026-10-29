@@ -1356,8 +1356,9 @@ final class WorkshopStore: ObservableObject {
         }
         log("start \(id) \"\(meta.title)\" expected \(Fmt.bytes(downloadExpectedBytes)), game \(meta.gameName ?? "-")")
         // However a download starts (library update, history retry, auto download), the download
-        // screen shows that item rather than whatever was looked up last.
-        if preview?.id != id {
+        // screen shows that item rather than whatever was looked up last. A batch leaves the screen
+        // alone, so the Workshop page does not jump from mod to mod while it runs.
+        if preview?.id != id, queueRows.count <= 1 {
             input = "https://steamcommunity.com/sharedfiles/filedetails/?id=\(id)"
             preview = meta
             if meta.title == "Workshop item \(id)" { fetchPreview() }
@@ -1507,21 +1508,13 @@ final class WorkshopStore: ObservableObject {
         if let state { queueRows[index].state = state }
     }
 
-    /// The end of a batch: the queue card goes away and the banner carries a short summary, so a run
-    /// of several updates does not just go quiet when it is done.
+    /// The end of a batch. The rows stay on screen, so what downloaded and what did not can still be
+    /// read afterwards; they are cleared when the next download starts or a row is removed.
     private func finishQueue(cancelled: Bool = false) {
         let total = queueTotal
         let done = max(0, queueStep - (cancelled ? 1 : 0))
         let failed = queueFailed
         queueStep = 0; queueTotal = 0; queueFailed = 0
-        // The finished rows stay for a moment so the last 100% is actually seen.
-        let endedRows = queueRows
-        if !endedRows.isEmpty {
-            Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 900_000_000)
-                if queueRows == endedRows { queueRows.removeAll() }
-            }
-        }
         guard total > 0 else { return }
         if total == 1 {
             operationMessage = cancelled ? "Download cancelled." : (failed > 0 ? "That one didn't finish." : "Downloaded.")
@@ -1835,18 +1828,8 @@ final class WorkshopStore: ObservableObject {
                     log("kept the downloaded files for \(activeID)")
                 }
                 // Steam said it finished but handed over nothing. That is sometimes a manifest that
-                // was still being published, so one more attempt is worth making before giving up.
-                if failure.code == 1, autoRetries < 1 {
-                    autoRetries += 1
-                    isInstalling = false
-                    lastOutcome = "Carrying on"
-                    log("retrying \(activeID) after an empty download")
-                    Task { @MainActor in
-                        try? await Task.sleep(nanoseconds: 1_500_000_000)
-                        self.download(activeID, meta: meta)
-                    }
-                    return
-                }
+                // was still being published, so the one retry in the failure path is worth having.
+                if failure.code == 1 { log("finished with nothing to install for \(activeID)") }
             }
             isInstalling = false
         } else if cancelled, !stagingPath.isEmpty {
@@ -1867,6 +1850,9 @@ final class WorkshopStore: ObservableObject {
                 let finished = queueRows.remove(at: index)
                 queueRows.append(finished)
             }
+            // A later attempt at this mod gets its retry back.
+            autoRetries = 0
+            autoRetryItem = ""
             progress = 1
             ringFinished()
             lastOutcome = "Download completed"
@@ -1906,21 +1892,22 @@ final class WorkshopStore: ObservableObject {
                     self.download(activeID, meta: meta)
                 }
                 return
+            } else if autoRetries < 1 {
+                // One more go in the same slot before it is set aside as failed. The staging folder
+                // is kept, so the second attempt carries on from the chunks already written.
+                autoRetries += 1
+                updateRow(activeID, progress: 0, state: .downloading)
+                history.removeAll { $0.workshopID == activeID && $0.result == "Downloading" }
+                saveHistory()
+                log("retrying \(activeID) once, in place")
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 1_500_000_000)
+                    self.beginDownload(id: activeID, meta: meta, keepQueue: true)
+                }
+                return
             } else {
                 queueFailed += 1
                 updateRow(activeID, state: .failed)
-            }
-            // A stalled transfer keeps its half-written files, so one quiet retry can carry on from
-            // the chunks that already landed instead of starting the whole download again.
-            if !cancelled, queue.isEmpty, autoRetries < 2,
-               error.localizedCaseInsensitiveContains("stopped sending"),
-               FileManager.default.fileExists(atPath: staging.path) {
-                autoRetries += 1
-                log("auto-retry \(autoRetries) for \(activeID)")
-                Task { @MainActor in
-                    try? await Task.sleep(nanoseconds: 2_000_000_000)
-                    self.download(activeID, meta: meta)
-                }
             }
             Haptics.error()
         }
@@ -4801,6 +4788,7 @@ struct ContentView: View {
             metadataCard(item)
         }
         if !store.queueRows.isEmpty { queueCard }
+        if store.queueRows.contains(where: { $0.state == .failed }) { failedCard }
     }
 
     /// Taps on the logo are counted silently; nothing in the app suggests they lead anywhere.
@@ -4862,7 +4850,6 @@ struct ContentView: View {
     }
 
     private func queueRowsList(active: [DownloadQueueRow]) -> some View {
-        let failed = store.queueRows.filter { $0.state == .failed }
         return VStack(spacing: 0) {
             ForEach(Array(active.enumerated()), id: \.element.id) { index, row in
                 if index > 0 { Divider().padding(.horizontal, 14) }
@@ -4876,15 +4863,24 @@ struct ContentView: View {
                 if dragRowID != nil, let target = dragTarget,
                    target > dragRowStart, index == target { dropLine }
             }
-            if !failed.isEmpty {
-                if !active.isEmpty { Divider().padding(.horizontal, 14) }
-                queueFailedHeader
+        }
+    }
+
+    /// Mods that did not finish, in a card of their own under the queue, drawn exactly like a queue
+    /// row so they read the same way.
+    private var failedCard: some View {
+        let failed = store.queueRows.filter { $0.state == .failed }
+        return VStack(alignment: .leading, spacing: 0) {
+            queueFailedHeader
+            VStack(spacing: 0) {
                 ForEach(Array(failed.enumerated()), id: \.element.id) { index, row in
                     if index > 0 { Divider().padding(.horizontal, 14) }
                     queueRow(row)
                 }
             }
         }
+        .padding(.bottom, 6)
+        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
     }
 
     private var queueFailedHeader: some View {
@@ -5504,8 +5500,8 @@ struct ContentView: View {
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
-                        .truncationMode(.tail)
-                        .layoutPriority(0)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .layoutPriority(2)
                         .padding(.horizontal, 9).padding(.vertical, 6)
                         .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                 }
@@ -5599,19 +5595,16 @@ struct ContentView: View {
                 Image(systemName: "line.3.horizontal.decrease.circle")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(Color.accentColor)
-                if libraryFilter != "All" {
-                    Text("•").font(.system(size: 12, weight: .medium))
-                        .foregroundColor(Color(uiColor: .secondaryLabel))
-                    Image(systemName: filterSymbol(libraryFilter))
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(filterTint(libraryFilter))
-                }
-                // The chosen filter is always named in full: the chip grows, it never clips.
-                Text(libraryFilter)
-                    .font(.system(size: 12, weight: .medium))
+                // The separator and the filter's own icon keep their place for "All" too, so the
+                // chip is the same width whatever is chosen and nothing beside it moves.
+                Text("•").font(.system(size: 12, weight: .medium))
                     .foregroundColor(Color(uiColor: .secondaryLabel))
-                    .lineLimit(1)
-                    .fixedSize(horizontal: true, vertical: false)
+                    .opacity(libraryFilter == "All" ? 0 : 1)
+                Image(systemName: filterSymbol(libraryFilter))
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(filterTint(libraryFilter))
+                    .frame(width: 16)
+                    .opacity(libraryFilter == "All" ? 0 : 1)
             }
             .foregroundStyle(.secondary)
             .padding(.horizontal, 9).padding(.vertical, 6)
