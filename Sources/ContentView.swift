@@ -2146,6 +2146,7 @@ final class WorkshopStore: ObservableObject {
     func cancel(keepingQueue: Bool = false) {
         let wasPaused = isPaused
         let wasRunning = isDownloading
+        let cancelledID = activeID
         isPaused = false
         resumePending = false
         pausedAt = nil
@@ -2185,16 +2186,20 @@ final class WorkshopStore: ObservableObject {
             activeStaging = nil
             activeID = ""
             if keepingQueue {
-                queueRows.removeAll { $0.id == activeID }
+                queue.removeAll { $0 == cancelledID }
+                pendingMeta[cancelledID] = nil
+                queueRows.removeAll { $0.id == cancelledID }
                 queueTotal = queueRows.count
                 queueStep = min(queueStep, max(queueTotal, 1))
                 if !queue.isEmpty {
                     startNextInQueue()
                     return
                 }
+                queueRows.removeAll()
+                queueTotal = 0
             }
             status = "Ready"
-            if !keepingQueue { operationMessage = "Download cancelled." }
+            operationMessage = "Download cancelled."
             return
         }
         status = "Cancelling download…"
@@ -5017,9 +5022,11 @@ struct ContentView: View {
     private var queueHeadline: String {
         let total = max(store.queueTotal, store.queueRows.count)
         guard total > 1 else {
-            return store.isDownloading || store.isPaused ? "Downloading" : "Finished"
+            if store.isPaused { return "Paused" }
+            return store.isDownloading ? "Downloading" : "Finished"
         }
         let done = store.queueRows.filter { $0.state == .done }.count
+        if store.isPaused { return "Paused \(min(done, total)) of \(total)" }
         if store.queueRows.contains(where: { $0.state == .downloading }) {
             return "Downloading \(min(done + 1, total)) of \(total)"
         }
