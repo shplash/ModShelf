@@ -1,8 +1,5 @@
 name: Prune workflow runs
 
-# Deletes every workflow run except the two newest. The run this creates counts as one of them, so
-# the run before it is kept as well: dispatch it and come back to a clean Actions list.
-
 on:
   workflow_dispatch:
 
@@ -27,7 +24,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Every run in this repository, newest first.
           gh api --paginate "repos/$REPO/actions/runs?per_page=100" \
             --jq '.workflow_runs[] | [.id, .status, .created_at] | @tsv' \
             | sort -k3 -r > runs.tsv
@@ -38,12 +34,10 @@ jobs:
             exit 0
           fi
 
-          # This run is the newest, so the one just behind it is the last real build to keep.
           kept=$(head -n2 runs.tsv | cut -f1 | tr '\n' ' ')
           echo "Keeping runs $kept (newest two of $total)."
 
           tail -n +3 runs.tsv | while IFS=$'\t' read -r id status created; do
-            # Only finished runs are deleted: removing a queued or running one would cancel it.
             if [ "$status" != "completed" ]; then
               echo "Skipping $id: $status"
               continue

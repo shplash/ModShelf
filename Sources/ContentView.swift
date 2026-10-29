@@ -8344,8 +8344,6 @@ struct WorkshopWebContainer: UIViewRepresentable {
 }
 
 
-// Nothing in the app points here: it opens after twenty quick taps on the credit row in Options.
-
 struct DeveloperMenuView: View {
     @ObservedObject var store: WorkshopStore
     @Environment(\.dismiss) private var dismiss

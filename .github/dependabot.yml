@@ -1,5 +1,3 @@
-# Keeps the GitHub Actions used by the workflows current, so a deprecated or removed action is
-# noticed here rather than by a failed build.
 version: 2
 updates:
   - package-ecosystem: github-actions

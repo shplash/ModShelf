@@ -2,8 +2,6 @@ name: Build ModShelf IPA
 
 on:
   workflow_dispatch:
-  # Every push that can change the app runs the build; documentation, licences and the
-  # repository's own housekeeping files cannot, so they don't spend a Mac runner on it.
   push:
     branches: [main]
     paths-ignore:
@@ -16,8 +14,6 @@ on:
 permissions:
   contents: write
 
-# One build at a time: a second dispatch replaces the queued one instead of
-# waiting behind it for a macOS runner.
 concurrency:
   group: modshelf-ipa
   cancel-in-progress: true
@@ -27,8 +23,6 @@ env:
   HOMEBREW_NO_INSTALL_CLEANUP: "1"
   HOMEBREW_NO_ENV_HINTS: "1"
   HOMEBREW_NO_ANALYTICS: "1"
-  # go-steam and x/mobile now ask for Go 1.26; allow setup-go to fetch it rather than
-  # failing on the runner's default local toolchain.
   GOTOOLCHAIN: auto
 
 jobs:
@@ -40,11 +34,8 @@ jobs:
       - name: Check out the repository
         uses: actions/checkout@v7
         with:
-          # Full history: the build number is the commit count, so a shallow clone would start at 1.
           fetch-depth: 0
 
-      # The Go bind is the slowest part of this job, so the framework it
-      # produces is reused until ios-engine changes.
       - name: Restore SteamEngine.xcframework
         id: engine-cache
         uses: actions/cache@v6
@@ -56,7 +47,6 @@ jobs:
         if: steps.engine-cache.outputs.cache-hit != 'true'
         uses: actions/setup-go@v7
         with:
-          # The engine module states the Go version it needs, so it is never guessed here.
           go-version-file: ios-engine/go.mod
           check-latest: true
           cache: true
@@ -69,8 +59,6 @@ jobs:
           go install golang.org/x/mobile/cmd/gobind@latest
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
-      # gomobile bind looks for the gobind binary that init sets up, so this has
-      # to run before the bind even though gomobile is already installed.
       - name: Initialise gomobile
         if: steps.engine-cache.outputs.cache-hit != 'true'
         run: gomobile init
@@ -84,20 +72,16 @@ jobs:
           go mod tidy
           gomobile bind -v -target=ios -o ../SteamEngine.xcframework .
 
-      # Runs even on a cache hit: gomobile writes MinimumOSVersion 100.0 into
-      # the framework, and iOS refuses to install or launch an app that ships it.
       - name: Fix the engine framework's minimum OS version
         run: |
           set -euo pipefail
           test -d SteamEngine.xcframework
           patched=0
-          # Every slice the framework carries, whatever gomobile named them this time.
           for framework in SteamEngine.xcframework/*/SteamEngine.framework; do
             [ -d "$framework" ] || continue
             plist="$framework/Info.plist"
             [ -f "$plist" ] || continue
             /usr/bin/plutil -replace MinimumOSVersion -string "16.0" "$plist"
-            # The plist is part of the signature, so sign the slice again.
             /usr/bin/codesign --force --sign - --timestamp=none "$framework"
             echo "patched $framework -> $(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$plist")"
             patched=$((patched + 1))
@@ -127,12 +111,9 @@ jobs:
       - name: Generate the Xcode project
         run: xcodegen generate
 
-      # The build number is the commit count, so every commit gets its own build.
       - name: Set the build number
         run: echo "BUILD_NUMBER=$(git rev-list --count HEAD)" >> "$GITHUB_ENV"
 
-      # Swift packages and the previous build are keyed on the sources, so a
-      # rebuild after an app change still gets the warm DerivedData.
       - name: Restore Swift packages and build output
         uses: actions/cache@v6
         with:
@@ -170,8 +151,6 @@ jobs:
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/ModShelf.app
 
-          # A stale build cache can hand back an app whose embedded engine still carries
-          # gomobile's 100.0 minimum, so the copy that actually ships is corrected here too.
           for framework in Payload/ModShelf.app/Frameworks/*.framework; do
             [ -d "$framework" ] || continue
             plist="$framework/Info.plist"
@@ -181,13 +160,9 @@ jobs:
 
           rm -rf Payload/ModShelf.app/_CodeSignature
 
-          # Ad-hoc signing: installers such as Feather and LiveContainer accept
-          # the archive and re-sign it for their own device.
           /usr/bin/codesign --force --deep --sign - --timestamp=none Payload/ModShelf.app
           /usr/bin/codesign --verify --deep --strict Payload/ModShelf.app
 
-          # An IPA is a zip with Payload/ at its root; zip keeps it readable by
-          # every installer and by the Finder.
           /usr/bin/zip -qry ModShelf.ipa Payload
 
           echo "Checking the IPA archive..."
@@ -199,8 +174,6 @@ jobs:
 
           /usr/bin/plutil -p Payload/ModShelf.app/Info.plist | head -30
 
-          # Fail here rather than on a device: an app or framework that asks for an iOS
-          # version no phone has crashes the moment it launches.
           APP_MINIMUM=$(/usr/libexec/PlistBuddy -c "Print :MinimumOSVersion" Payload/ModShelf.app/Info.plist 2>/dev/null || true)
           echo "app: MinimumOSVersion ${APP_MINIMUM:-unset}, CFBundleVersion $(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' Payload/ModShelf.app/Info.plist)"
           if [ -n "$APP_MINIMUM" ] && [ "$APP_MINIMUM" != "16.0" ]; then
@@ -227,8 +200,6 @@ jobs:
           shasum -a 256 ModShelf.ipa
           ls -lh ModShelf.ipa
 
-      # Every run keeps its IPA as a real file on a draft release, which only people with write
-      # access can see or download. Publishing is done by hand when a release is wanted.
       - name: Attach the IPA to the private build draft
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -246,7 +217,6 @@ jobs:
           fi
           cp ModShelf.ipa "ModShelf-$VERSION-$BUILD.ipa"
           gh release upload "$TAG" "ModShelf-$VERSION-$BUILD.ipa" --clobber --repo "$GITHUB_REPOSITORY"
-          # Keep only the newest build on the draft.
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' |
             while read -r asset; do
               [ -z "$asset" ] && continue

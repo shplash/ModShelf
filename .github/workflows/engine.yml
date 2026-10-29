@@ -2,10 +2,8 @@ name: Steam Engine
 
 on:
   workflow_dispatch:
-  # Weekly, so a change in go-steam shows up even when nothing here has moved.
   schedule:
     - cron: '0 6 * * 1'
-  # A push that touches the engine runs the tests straight away.
   push:
     paths:
       - 'ios-engine/**'
@@ -15,7 +13,6 @@ permissions:
   contents: read
 
 env:
-  # The engine and x/mobile now ask for Go 1.26, so the toolchain may be fetched.
   GOTOOLCHAIN: auto
 
 concurrency:
@@ -34,11 +31,9 @@ jobs:
       - name: Download the go-steam source
         run: git clone --depth 1 https://github.com/BirknerAlex/go-steam.git engine
 
-      # Go is set up after the clone so its module cache can be keyed on go.sum.
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          # The cloned engine states its own Go version, so it is taken from there.
           go-version-file: engine/go.mod
           check-latest: true
           cache: true

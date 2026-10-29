@@ -1,8 +1,5 @@
 name: Update AltSource
 
-# Keeps the ModShelf entry in shplash-repo/apps.json in step with a published release, the same way
-# IPAID does it. Needs a SOURCE_REPO_TOKEN secret with write access to shplash/shplash-repo.
-
 on:
   workflow_dispatch:
   release:

@@ -19,10 +19,6 @@ targets:
     sources:
       - Sources
       - Assets.xcassets
-    # A real Info.plist is required here: UIFileSharingEnabled has no INFOPLIST_KEY_ build
-    # setting, so with a generated plist it was silently dropped and ModShelf never showed up
-    # in Files. The empty UILaunchScreen is what stops iOS letterboxing the app at a legacy
-    # resolution (the wrong aspect on newer screens).
     info:
       path: Sources/Info.plist
       properties:
@@ -32,8 +28,6 @@ targets:
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
         UILaunchScreen: {}
-        # One layout, one orientation: on a bigger screen iOS scales the app up, which is what
-        # every screen in it is laid out for.
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
     dependencies:
@@ -46,9 +40,7 @@ targets:
         PRODUCT_NAME: ModShelf
         TARGETED_DEVICE_FAMILY: "1"
         MARKETING_VERSION: "1.0"
-        # Overridden by CI with the commit count; a local build gets this default.
         CURRENT_PROJECT_VERSION: "1"
-        # A single 1024 image in the asset catalogue covers every screen size.
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         GENERATE_INFOPLIST_FILE: YES
         CODE_SIGNING_ALLOWED: NO
