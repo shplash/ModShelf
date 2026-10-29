@@ -746,6 +746,8 @@ final class WorkshopStore: ObservableObject {
     /// Set while a moved mod is waiting for the current transfer to let go of the engine.
     private var startAfterCancel: String?
     private var keepActiveOnCancel = false
+    /// A cancellation that should leave the rest of the batch in the queue.
+    private var keepQueueOnCancel = false
     /// The small ring beside the sign-in pill: shown while a transfer runs and for ten seconds after
     /// it finishes, when its arrow turns blue.
     @Published var ringVisible = false
@@ -1833,6 +1835,11 @@ final class WorkshopStore: ObservableObject {
             // the version that really landed, and the info file is rewritten with it.
             refreshInstalledMetadata(id: activeID)
             updateRow(activeID, progress: 1, state: .done)
+            // A finished mod drops to the bottom of the card, so the top shows what is running next.
+            if let index = queueRows.firstIndex(where: { $0.id == activeID }) {
+                let finished = queueRows.remove(at: index)
+                queueRows.append(finished)
+            }
             progress = 1
             ringFinished()
             lastOutcome = "Download completed"
@@ -1847,7 +1854,21 @@ final class WorkshopStore: ObservableObject {
             if !cancelled { ringStopped() }
             log("failed \(activeID): \(reason)")
             if !error.isEmpty { log("engine said: \(error)") }
-            if cancelled { queue.removeAll() } else { queueFailed += 1; updateRow(activeID, state: .failed) }
+            if cancelled {
+                if keepQueueOnCancel {
+                    keepQueueOnCancel = false
+                    // This one is out of the batch; the rest of the queue carries on.
+                    queueRows.removeAll { $0.id == activeID }
+                    queueTotal = queueRows.count
+                    queueStep = min(queueStep, max(queueTotal, 1))
+                    log("cancelled \(activeID); the rest of the queue continues")
+                } else {
+                    queue.removeAll()
+                }
+            } else {
+                queueFailed += 1
+                updateRow(activeID, state: .failed)
+            }
             // A stalled transfer keeps its half-written files, so one quiet retry can carry on from
             // the chunks that already landed instead of starting the whole download again.
             if !cancelled, queue.isEmpty, autoRetries < 2,
@@ -1980,9 +2001,16 @@ final class WorkshopStore: ObservableObject {
     func startMovedMod(_ id: String) {
         guard let meta = pendingMeta[id] ?? metaFor(id) else { return }
         moveRow(id, to: 0)
-        guard isDownloading || isPaused else {
-            // The download that was running may have ended while the question was on screen; then
-            // the moved mod simply goes first and starts straight away.
+        // A paused transfer is not running in the engine, so there is nothing to stop: the moved mod
+        // goes first and starts now. Waiting for a cancellation that never arrives is what left the
+        // whole queue sitting still.
+        guard isDownloading, isBusy else {
+            isPaused = false
+            resumePending = false
+            pausedAt = nil
+            pausedStaging = nil
+            startAfterCancel = nil
+            keepActiveOnCancel = false
             if !isBusy {
                 queue.removeAll { $0 == id }
                 pendingMeta.removeValue(forKey: id)
@@ -2002,7 +2030,7 @@ final class WorkshopStore: ObservableObject {
 
     /// Stops the running download but leaves it first in the queue, for when it has been moved.
     func stopActiveKeepingInQueue() {
-        guard isDownloading || isPaused else { return }
+        guard isDownloading, isBusy else { return }
         keepActiveOnCancel = true
         startAfterCancel = nil
         isPaused = false
@@ -2012,10 +2040,10 @@ final class WorkshopStore: ObservableObject {
         log("stopping \(activeID) to move it in the queue")
     }
 
-    /// Stops one download: a waiting one leaves the queue, and the one running ends the batch.
+    /// Stops one download: a waiting one leaves the queue, and the one running hands over to the rest.
     func cancelItem(_ id: String) {
         if id == activeID, isDownloading || isPaused {
-            cancel()
+            cancel(keepingQueue: true)
             return
         }
         queue.removeAll { $0 == id }
@@ -2023,19 +2051,26 @@ final class WorkshopStore: ObservableObject {
         queueRows.removeAll { $0.id == id }
         queueTotal = queueRows.count
         queueStep = min(queueStep, queueTotal)
+        // A mod taken out of the queue must not come back as the one on display.
+        if preview?.id == id {
+            preview = nil
+            input = ""
+        }
         log("removed \(id) from the queue")
         if queueRows.isEmpty, !isBusy { finishQueue() }
     }
 
-    func cancel() {
+    /// Stops the batch, or just the transfer that is running when the rest of the queue should stay.
+    func cancel(keepingQueue: Bool = false) {
         isPaused = false
         resumePending = false
         pausedAt = nil
         pausedStaging = nil
-        // Cancelling the batch calls off any move that was waiting on the engine to let go.
+        // Cancelling calls off any move that was waiting on the engine to let go.
         keepActiveOnCancel = false
         startAfterCancel = nil
-        ringStopped()
+        keepQueueOnCancel = keepingQueue
+        if !keepingQueue { ringStopped() }
         log("cancel requested (queue \(queue.count), active \(activeID)")
         if let task = devTask {
             task.cancel()
@@ -2045,7 +2080,7 @@ final class WorkshopStore: ObservableObject {
             status = "Ready"
             return
         }
-        queue.removeAll()
+        if !keepingQueue { queue.removeAll() }
         engine?.cancelDownload()
         isInstalling = false
         status = "Cancelling download…"
@@ -3699,6 +3734,27 @@ struct ReorderRequest: Identifiable {
     let title: String
 }
 
+/// One place to work out how fast a marquee should run, from the scrolling text options. Anything
+/// outside this screen reads the same stored values, so every scrolling name obeys them.
+enum MarqueeSpeed {
+    private static func stored(_ key: String, fallback: Double) -> Double {
+        UserDefaults.standard.object(forKey: key) as? Double ?? fallback
+    }
+    private static var oneSpeedForAll: Bool {
+        UserDefaults.standard.object(forKey: "options.marqueeGlobal") as? Bool ?? true
+    }
+    private static var one: Double { stored("options.marqueeSpeed", fallback: 1) }
+    /// The speed used inside the library, in either layout.
+    static var library: Double { oneSpeedForAll ? one : stored("options.marqueeSpeedLibrary", fallback: 1) }
+    /// The speed used everywhere else: the download queue, history and the browser's start page.
+    static var other: Double { oneSpeedForAll ? one : stored("options.marqueeSpeedOther", fallback: 1) }
+    static var librarySpeed: CGFloat { CGFloat(26 * library) }
+    static var otherSpeed: CGFloat { CGFloat(26 * other) }
+    /// Below this, scrolling text is switched off and the name is cut with an ellipsis instead.
+    static var libraryRunning: Bool { library >= 0.25 }
+    static var otherRunning: Bool { other >= 0.25 }
+}
+
 /// How far the page has moved and how far it has run upwards, held off the view's state on purpose.
 final class ScrollTracker {
     var lastY: CGFloat = 0
@@ -3715,6 +3771,10 @@ struct ContentView: View {
     @AppStorage("options.compactLibrary") private var compactLibrary = true
     @AppStorage("options.haptics") private var haptics = true
     @AppStorage("options.marqueeSpeed") private var marqueeSpeed = 1.0
+    /// One speed everywhere, or a separate speed for the library and for everything else.
+    @AppStorage("options.marqueeGlobal") private var marqueeGlobal = true
+    @AppStorage("options.marqueeSpeedLibrary") private var marqueeSpeedLibrary = 1.0
+    @AppStorage("options.marqueeSpeedOther") private var marqueeSpeedOther = 1.0
     @AppStorage("browser.autoDownload") private var autoDownload = false
     @AppStorage("browser.confirmAutoDownload") private var confirmAutoDownload = false
     @AppStorage("options.gifDownloads") private var gifDownloads = true
@@ -4349,7 +4409,7 @@ struct ContentView: View {
             let isError = !store.errorMessage.isEmpty && !store.showLogin
             let text = isError ? friendlyError(store.errorMessage) : store.operationMessage
             let tint: Color = isError ? .orange : Color.accentColor
-            HStack(alignment: .top, spacing: 10) {
+            HStack(alignment: .center, spacing: 10) {
                 if store.isExporting || store.isCheckingUpdates || store.isVerifyingAll {
                     ProgressView().scaleEffect(0.7).frame(width: 16, height: 18)
                 } else {
@@ -4794,7 +4854,8 @@ struct ContentView: View {
             Spacer(minLength: 0)
             VStack(alignment: .leading, spacing: 5) {
                 MarqueeText(text: row.title, fontSize: 14, weight: .semibold, height: 18,
-                            active: row.state == .downloading)
+                            speed: MarqueeSpeed.otherSpeed,
+                            active: row.state == .downloading && MarqueeSpeed.otherRunning)
                 if let game = row.gameName, !game.isEmpty {
                     Text(game).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
                 }
@@ -5105,7 +5166,8 @@ struct ContentView: View {
                     .frame(width: 84, height: 84)
                     .overlay(CachedImage(urlString: item.imageURL, fill: false, maxPixel: 320).allowsHitTesting(false))
                 VStack(alignment: .leading, spacing: 5) {
-                    MarqueeText(text: item.title, fontSize: 15, weight: .semibold, height: 19)
+                    MarqueeText(text: item.title, fontSize: 15, weight: .semibold, height: 19,
+                                speed: MarqueeSpeed.otherSpeed, active: MarqueeSpeed.otherRunning)
                     RatingLine(rating: item.rating, count: item.ratingCount, size: 13)
                     if let game = item.gameName, !game.isEmpty {
                         Text(game).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
@@ -5117,7 +5179,7 @@ struct ContentView: View {
             HStack(spacing: 6) {
                 Image(systemName: "text.line.first.and.arrowtriangle.forward")
                     .font(.system(size: 11, weight: .semibold))
-                Text("Joins the queue when the current download ends")
+                Text("Queued behind the download that is running")
                     .font(.system(size: 11))
             }
             .foregroundStyle(.secondary)
@@ -5302,8 +5364,8 @@ struct ContentView: View {
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
-                        .layoutPriority(2)
+                        .truncationMode(.tail)
+                        .layoutPriority(0)
                         .padding(.horizontal, 9).padding(.vertical, 6)
                         .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                 }
@@ -5404,6 +5466,12 @@ struct ContentView: View {
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(filterTint(libraryFilter))
                 }
+                // The chosen filter is always named in full: the chip grows, it never clips.
+                Text(libraryFilter)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(Color(uiColor: .secondaryLabel))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
             }
             .foregroundStyle(.secondary)
             .padding(.horizontal, 9).padding(.vertical, 6)
@@ -5432,8 +5500,7 @@ struct ContentView: View {
                     .font(.system(size: 12, weight: .medium))
                     .foregroundColor(Color(uiColor: .secondaryLabel))
                     .lineLimit(1)
-                    .truncationMode(.tail)
-                    .layoutPriority(0)
+                    .fixedSize(horizontal: true, vertical: false)
             }
             .padding(.horizontal, 9).padding(.vertical, 6)
             .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
@@ -5728,8 +5795,8 @@ struct ContentView: View {
             Button(action: tap) {
                 VStack(alignment: .leading, spacing: 1) {
                     MarqueeText(text: item.displayTitle, fontSize: 14, weight: .semibold,
-                                height: 17, speed: 26 * marqueeSpeed,
-                                active: selectedTab == 2 && marqueeSpeed >= 0.25,
+                                height: 17, speed: MarqueeSpeed.librarySpeed,
+                                active: selectedTab == 2 && MarqueeSpeed.libraryRunning,
                                 restartToken: marqueeToken)
                     HStack(spacing: 6) {
                         if item.rating != nil {
@@ -5777,7 +5844,8 @@ struct ContentView: View {
                         .overlay(CachedImage(urlString: item.imageURL, fill: true, maxPixel: 300).allowsHitTesting(false))
                         .overlay(Rectangle().stroke(Color.accentColor, lineWidth: picked ? 3 : 0))
                     VStack(alignment: .leading, spacing: 4) {
-                        MarqueeText(text: item.displayTitle, fontSize: 15, weight: .semibold, height: 19)
+                        MarqueeText(text: item.displayTitle, fontSize: 15, weight: .semibold, height: 19,
+                                    speed: MarqueeSpeed.librarySpeed, active: MarqueeSpeed.libraryRunning)
                         HStack(spacing: 6) {
                             RatingLine(rating: item.rating, count: item.ratingCount, size: 13)
                             if showIDs {
@@ -5864,7 +5932,8 @@ struct ContentView: View {
             Color.clear.frame(width: 84, height: 84)
                 .overlay(CachedImage(urlString: record.imageURL, fill: true, maxPixel: 300))
             VStack(alignment: .leading, spacing: 4) {
-                MarqueeText(text: record.title, fontSize: 15, weight: .semibold, height: 19)
+                MarqueeText(text: record.title, fontSize: 15, weight: .semibold, height: 19,
+                            speed: MarqueeSpeed.otherSpeed, active: MarqueeSpeed.otherRunning)
                 HStack(spacing: 5) {
                     if let game = record.gameName, !game.isEmpty {
                         Text(game).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
@@ -5879,7 +5948,9 @@ struct ContentView: View {
                     Text(record.result).font(.system(size: 12, weight: .medium)).foregroundStyle(historyColor(record.result))
                 }
                 if failed, let error = record.error, !error.isEmpty {
-                    MarqueeText(text: error, fontSize: 12, weight: .regular, height: 16, color: .systemRed)
+                    MarqueeText(text: error, fontSize: 12, weight: .regular, height: 16,
+                                speed: MarqueeSpeed.otherSpeed, active: MarqueeSpeed.otherRunning,
+                                color: .systemRed)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -5987,17 +6058,15 @@ struct ContentView: View {
                 divider
                 toggleRow("Haptic feedback", symbol: "hand.tap", isOn: $haptics)
                 divider
-                row("Scrolling text speed", symbol: "speedometer") {
-                    Text(marqueeSpeed < 0.25 ? "Off" : String(format: "%.2f×", marqueeSpeed))
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(.secondary).monospacedDigit()
+                toggleRow("One speed for all scrolling text", symbol: "textformat", isOn: $marqueeGlobal)
+                divider
+                marqueeSpeedRow("Scrolling text speed", value: $marqueeSpeed)
+                if !marqueeGlobal {
+                    divider
+                    marqueeSpeedRow("Library scrolling speed", value: $marqueeSpeedLibrary)
+                    divider
+                    marqueeSpeedRow("Everything else", value: $marqueeSpeedOther)
                 }
-                Slider(value: Binding(get: { marqueeSpeed }, set: { value in
-                    // Off is one step below the slowest speed, not a stretch of dead slider.
-                    marqueeSpeed = value < 0.25 ? 0 : max(0.25, value)
-                }), in: 0...2, step: 0.05)
-                    .tint(.accentColor)
-                    .padding(.leading, 51).padding(.trailing, 15).padding(.bottom, 12)
             }
         )
     }
@@ -6126,7 +6195,7 @@ struct ContentView: View {
     private var creditsSettings: AnyView {
         AnyView(
             settingsGroup("Credits") {
-                creditRow("ModShelf", "Created by Splash (@shplash)")
+                creditLicenseRow("ModShelf", "Created by Splash (@shplash)", license: "MPL-2.0 License")
                 divider
                 creditLicenseRow("go-steam", "Engine by Alexander Birkner (@BirknerAlex)", license: "MIT License")
                 divider
@@ -6184,6 +6253,23 @@ struct ContentView: View {
     private func toggleRow(_ title: String, symbol: String, isOn: Binding<Bool>) -> some View {
         row(title, symbol: symbol) {
             Toggle("", isOn: Binding(get: { isOn.wrappedValue }, set: { isOn.wrappedValue = $0; Haptics.select() })).labelsHidden()
+        }
+    }
+
+    /// A speed's value on the right, with its slider underneath. The bottom step is Off.
+    private func marqueeSpeedRow(_ title: String, value: Binding<Double>) -> some View {
+        VStack(spacing: 0) {
+            row(title, symbol: "speedometer") {
+                Text(value.wrappedValue < 0.25 ? "Off" : String(format: "%.2f×", value.wrappedValue))
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.secondary).monospacedDigit()
+            }
+            Slider(value: Binding(get: { value.wrappedValue }, set: { new in
+                // Off is one step below the slowest speed, not a stretch of dead slider.
+                value.wrappedValue = new < 0.25 ? 0 : max(0.25, new)
+            }), in: 0...2, step: 0.05)
+                .tint(.accentColor)
+                .padding(.leading, 51).padding(.trailing, 15).padding(.bottom, 12)
         }
     }
 
@@ -7546,7 +7632,8 @@ struct BrowserHome: View {
                 Color.clear
                     .frame(width: 78, height: 78)
                     .overlay(CachedImage(urlString: hit.tiny_image, fill: false, maxPixel: 220).allowsHitTesting(false))
-                MarqueeText(text: hit.name, fontSize: 11, weight: .medium, height: 15)
+                MarqueeText(text: hit.name, fontSize: 11, weight: .medium, height: 15,
+                            speed: MarqueeSpeed.otherSpeed, active: MarqueeSpeed.otherRunning)
                     .frame(width: 78, alignment: .leading)
             }
             .padding(6)
@@ -7617,7 +7704,8 @@ struct BrowserHome: View {
                         .frame(height: 66)
                         .overlay(CachedImage(urlString: hit.tiny_image, fill: true, maxPixel: 300))
                         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    MarqueeText(text: hit.name, fontSize: 12, weight: .semibold, height: 15)
+                    MarqueeText(text: hit.name, fontSize: 12, weight: .semibold, height: 15,
+                                speed: MarqueeSpeed.otherSpeed, active: MarqueeSpeed.otherRunning)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .padding(8)
