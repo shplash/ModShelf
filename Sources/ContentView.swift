@@ -1292,9 +1292,12 @@ final class WorkshopStore: ObservableObject {
         queueRows.removeAll { $0.id == id && $0.state != .downloading }
         queue.append(id)
         pendingMeta[id] = meta
-        queueRows.append(DownloadQueueRow(id: id, title: meta.title,
-                                         imageURL: meta.imageURL.isEmpty ? nil : meta.imageURL,
-                                         gameName: meta.gameName, fileSize: meta.fileSize))
+        // New work goes above anything already finished, so the batch reads in the order it runs.
+        let row = DownloadQueueRow(id: id, title: meta.title,
+                                   imageURL: meta.imageURL.isEmpty ? nil : meta.imageURL,
+                                   gameName: meta.gameName, fileSize: meta.fileSize)
+        let insertAt = queueRows.firstIndex(where: { $0.state == .done }) ?? queueRows.count
+        queueRows.insert(row, at: insertAt)
         queueTotal = queueRows.count
         log("queued \(id) \"\(meta.title)\" at \(queueRows.count) in line")
         Haptics.tap()
@@ -5302,7 +5305,7 @@ struct ContentView: View {
             HStack(spacing: 6) {
                 Image(systemName: "text.line.first.and.arrowtriangle.forward")
                     .font(.system(size: 11, weight: .semibold))
-                Text("Queued behind the download that is running")
+                Text("Queued to the bottom of the list")
                     .font(.system(size: 11))
             }
             .foregroundStyle(.secondary)
