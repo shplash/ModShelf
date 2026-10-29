@@ -86,9 +86,7 @@ ModShelf is licensed under [GPL-3.0](LICENSE).
 
 It bundles [go-steam](https://github.com/BirknerAlex/go-steam) by Alexander Birkner and [ZIPFoundation](https://github.com/weichsel/ZIPFoundation) by Thomas Zoechling, both [MIT](https://opensource.org/license/mit) licensed.
 
-Third-party notices and the full licence texts are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), and a copy ships inside the app.
-
-The complete source for every release is this repository, with the engine in `ios-engine/` and the build in `.github/workflows/build-ipa.yml`.
+Third-party notices and the full licence texts are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## <a href="https://ko-fi.com/shplash"><img src="https://img.shields.io/badge/Support-ko--fi-FF5E5B?style=for-the-badge" alt="Support"></a>
 
