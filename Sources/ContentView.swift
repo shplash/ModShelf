@@ -4464,69 +4464,100 @@ struct ContentView: View {
 
     private var downloadView: some View {
         NavigationStack {
-            ScrollView {
-                VStack(spacing: 0) {
-                    ScrollSpy(onChange: handleScroll)
-                    VStack(alignment: .leading, spacing: 14) {
-                        if downloadIntro { downloadHeader }
-                        lookupCard
-                        if store.isFetching {
-                            HStack(spacing: 10) { ProgressView(); Text("Loading Workshop details…").font(.subheadline).foregroundStyle(.secondary) }.padding(.vertical, 2)
-                        }
-                        if let item = store.preview,
-                           !store.queueRows.contains(where: { $0.id == item.id }) {
-                            if store.isBusy || store.isPaused { queuedDownloadCard(item) }
-                            downloadButton(item)
-                        }
-                        if store.isDownloading || store.isPaused {
-                            HStack(spacing: 10) {
-                                Button { Haptics.tap(); store.togglePause() } label: {
-                                    HStack(spacing: 6) {
-                                        Image(systemName: store.isPaused ? "play.fill" : "pause.fill")
-                                            .font(.system(size: 12, weight: .semibold))
-                                            .foregroundStyle(Color.accentColor)
-                                        Text(store.isPaused ? "Resume" : "Pause")
-                                            .font(.system(size: 13, weight: .semibold))
-                                            .foregroundStyle(.secondary)
-                                    }
-                                    .frame(maxWidth: .infinity).frame(height: 38)
-                                    .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                                }
-                                .buttonStyle(.plain)
-                                Button { Haptics.tap(); store.cancel() } label: {
-                                    HStack(spacing: 6) {
-                                        Image(systemName: "xmark")
-                                            .font(.system(size: 12, weight: .semibold))
-                                            .foregroundStyle(Color.accentColor)
-                                        Text("Cancel")
-                                            .font(.system(size: 13, weight: .semibold))
-                                            .foregroundStyle(.secondary)
-                                    }
-                                    .frame(maxWidth: .infinity).frame(height: 38)
-                                    .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
-                        if downloadIntro {
-                            glanceCard
-                        }
-                        if !store.isDownloading, store.queueRows.isEmpty, let item = store.preview {
-            metadataCard(item)
+            downloadScroll
         }
-                        if !store.queueRows.isEmpty {
-                            queueCard
-                        }
-                    }
-                    .padding(.horizontal, 15).padding(.top, 10).padding(.bottom, tabBarReserve)
-                }
-            }
+    }
+
+    /// The ScrollView is kept apart from its modifiers, so no single expression has to carry the
+    /// whole tab: a type that big overflows the main thread's stack while it is being built.
+    private var downloadScroll: some View {
+        downloadColumn
             .coordinateSpace(name: "scroll")
             .scrollDisabled(dragRowID != nil)
             .scrollDismissesKeyboard(.interactively)
             .background(Color(uiColor: .systemGroupedBackground))
             .toolbar(.hidden, for: .navigationBar)
+    }
+
+    private var downloadColumn: some View {
+        ScrollView {
+            VStack(spacing: 0) {
+                ScrollSpy(onChange: handleScroll)
+                downloadCards
+            }
+            .padding(.horizontal, 15).padding(.top, 10).padding(.bottom, tabBarReserve)
         }
+    }
+
+    /// One group of cards per property, so the tab is built from a handful of small view types.
+    private var downloadCards: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            downloadLookupCards
+            downloadPreviewCards
+            downloadControlCards
+            downloadQueueCards
+        }
+    }
+
+    @ViewBuilder private var downloadLookupCards: some View {
+        if downloadIntro { downloadHeader }
+        lookupCard
+    }
+
+    @ViewBuilder private var downloadPreviewCards: some View {
+        if store.isFetching { downloadLoadingRow }
+        if let item = store.preview,
+           !store.queueRows.contains(where: { $0.id == item.id }) {
+            if store.isBusy || store.isPaused { queuedDownloadCard(item) }
+            downloadButton(item)
+        }
+    }
+
+    private var downloadLoadingRow: some View {
+        HStack(spacing: 10) {
+            ProgressView()
+            Text("Loading Workshop details…").font(.subheadline).foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 2)
+    }
+
+    @ViewBuilder private var downloadControlCards: some View {
+        if store.isDownloading || store.isPaused { downloadControlTiles }
+        if downloadIntro { glanceCard }
+    }
+
+    private var downloadControlTiles: some View {
+        HStack(spacing: 10) {
+            downloadControlTile(symbol: store.isPaused ? "play.fill" : "pause.fill",
+                                title: store.isPaused ? "Resume" : "Pause",
+                                action: { store.togglePause() })
+            downloadControlTile(symbol: "xmark", title: "Cancel",
+                                action: { store.cancel() })
+        }
+    }
+
+    private func downloadControlTile(symbol: String, title: String,
+                                     action: @escaping () -> Void) -> some View {
+        Button { Haptics.tap(); action() } label: {
+            HStack(spacing: 6) {
+                Image(systemName: symbol)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity).frame(height: 38)
+            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder private var downloadQueueCards: some View {
+        if !store.isDownloading, store.queueRows.isEmpty, let item = store.preview {
+            metadataCard(item)
+        }
+        if !store.queueRows.isEmpty { queueCard }
     }
 
     /// Taps on the logo are counted silently; nothing in the app suggests they lead anywhere.
@@ -4545,73 +4576,86 @@ struct ContentView: View {
 
     /// The running batch: what it is on, a line of progress for the whole set, then a row per mod.
     private var queueCard: some View {
-        let active = store.queueRows.filter { $0.state != .failed }
-        let failed = store.queueRows.filter { $0.state == .failed }
-        return VStack(alignment: .leading, spacing: 0) {
-            if store.queueTotal > 1 {
-            HStack(spacing: 10) {
-                ZStack {
-                    Circle().fill(Color.primary.opacity(0.08))
-                    Image(systemName: "arrow.down")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(.secondary)
-                }
-                .frame(width: 24, height: 24)
-                Text(queueHeadline)
-                    .font(.system(size: 14, weight: .semibold))
-                    .lineLimit(1)
-                Spacer(minLength: 8)
-                Text("\(Int(queueOverallProgress * 100))%")
-                    .font(.system(size: 12, weight: .semibold).monospacedDigit())
-                    .foregroundStyle(Color.accentColor)
-                    .frame(width: 46)
-                    .padding(.vertical, 3)
-                    .background(Capsule().fill(Color.primary.opacity(0.06)))
-                Button { Haptics.tap(); store.cancel() } label: {
-                    Image(systemName: "xmark").font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 26, height: 26)
-                        .background(Circle().fill(Color.primary.opacity(0.07)))
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Cancel downloads")
+        queueCardBody
+            .padding(.bottom, 6)
+            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+            // A drag must never outlive the rows it was moving, or scrolling would stay switched off.
+            .onDisappear { endReorder() }
+            .onChange(of: store.queueRows.count) { _ in
+                if dragRowID != nil, !store.queueRows.contains(where: { $0.id == dragRowID }) { endReorder() }
             }
-            .padding(.horizontal, 14).padding(.top, 12).padding(.bottom, 8)
-            }
+    }
 
-            VStack(spacing: 0) {
-                ForEach(Array(active.enumerated()), id: \.element.id) { index, row in
-                    if index > 0, !(dragRowID != nil && dragTarget == index) {
-                        Divider().padding(.horizontal, 14)
-                    }
-                    if dragRowID != nil, dragTarget == index { dropLine }
-                    queueRow(row, index: index, count: active.count)
+    private var queueCardBody: some View {
+        let active = store.queueRows.filter { $0.state != .failed }
+        return VStack(alignment: .leading, spacing: 0) {
+            if store.queueTotal > 1 { queueCardHeader }
+            queueRowsList(active: active)
+                .padding(.top, store.queueTotal > 1 ? 6 : 2)
+        }
+    }
+
+    private var queueCardHeader: some View {
+        HStack(spacing: 10) {
+            ZStack {
+                Circle().fill(Color.primary.opacity(0.08))
+                Image(systemName: "arrow.down")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.secondary)
+            }
+            .frame(width: 24, height: 24)
+            Text(queueHeadline)
+                .font(.system(size: 14, weight: .semibold))
+                .lineLimit(1)
+            Spacer(minLength: 8)
+            Text("\(Int(queueOverallProgress * 100))%")
+                .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 46)
+                .padding(.vertical, 3)
+                .background(Capsule().fill(Color.primary.opacity(0.06)))
+            Button { Haptics.tap(); store.cancel() } label: {
+                Image(systemName: "xmark").font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 26, height: 26)
+                    .background(Circle().fill(Color.primary.opacity(0.07)))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Cancel downloads")
+        }
+        .padding(.horizontal, 14).padding(.top, 12).padding(.bottom, 8)
+    }
+
+    private func queueRowsList(active: [DownloadQueueRow]) -> some View {
+        let failed = store.queueRows.filter { $0.state == .failed }
+        return VStack(spacing: 0) {
+            ForEach(Array(active.enumerated()), id: \.element.id) { index, row in
+                if index > 0, !(dragRowID != nil && dragTarget == index) {
+                    Divider().padding(.horizontal, 14)
                 }
-                if !failed.isEmpty {
-                    if !active.isEmpty { Divider().padding(.horizontal, 14) }
-                    HStack(spacing: 6) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .font(.system(size: 11, weight: .semibold)).foregroundStyle(.red)
-                        Text("Didn't finish")
-                            .font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
-                        Spacer(minLength: 0)
-                    }
-                    .padding(.horizontal, 14).padding(.top, 10).padding(.bottom, 2)
-                    ForEach(Array(failed.enumerated()), id: \.element.id) { index, row in
-                        if index > 0 { Divider().padding(.horizontal, 14) }
-                        queueRow(row)
-                    }
+                if dragRowID != nil, dragTarget == index { dropLine }
+                queueRow(row, index: index, count: active.count)
+            }
+            if !failed.isEmpty {
+                if !active.isEmpty { Divider().padding(.horizontal, 14) }
+                queueFailedHeader
+                ForEach(Array(failed.enumerated()), id: \.element.id) { index, row in
+                    if index > 0 { Divider().padding(.horizontal, 14) }
+                    queueRow(row)
                 }
             }
-            .padding(.top, store.queueTotal > 1 ? 6 : 2)
         }
-        .padding(.bottom, 6)
-        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
-        // A drag must never outlive the rows it was moving, or scrolling would stay switched off.
-        .onDisappear { endReorder() }
-        .onChange(of: store.queueRows.count) { _ in
-            if dragRowID != nil, !store.queueRows.contains(where: { $0.id == dragRowID }) { endReorder() }
+    }
+
+    private var queueFailedHeader: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 11, weight: .semibold)).foregroundStyle(.red)
+            Text("Didn't finish")
+                .font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+            Spacer(minLength: 0)
         }
+        .padding(.horizontal, 14).padding(.top, 10).padding(.bottom, 2)
     }
 
     private func endReorder() {
@@ -4667,70 +4711,81 @@ struct ContentView: View {
     private let queueRowSpan: CGFloat = 104
 
     private func queueRow(_ row: DownloadQueueRow, index: Int? = nil, count: Int = 0) -> some View {
-        let failed = row.state == .failed
-        let dragged = dragRowID == row.id
-        return HStack(alignment: .top, spacing: 12) {
-            if let index, !failed, count > 1 {
+        queueRowBody(row, index: index, count: count)
+            .padding(.horizontal, 14).padding(.vertical, 10)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(dragRowID == row.id ? Color(uiColor: .secondarySystemGroupedBackground) : Color.clear)
+            )
+            .offset(y: dragRowID == row.id ? dragOffsetY : 0)
+            .zIndex(dragRowID == row.id ? 1 : 0)
+            .shadow(color: dragRowID == row.id ? .black.opacity(0.16) : .clear,
+                    radius: dragRowID == row.id ? 9 : 0, y: dragRowID == row.id ? 4 : 0)
+            .animation(.easeOut(duration: 0.18), value: dragTarget)
+    }
+
+    private func queueRowBody(_ row: DownloadQueueRow, index: Int?, count: Int) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            if let index, row.state != .failed, count > 1 {
                 dragHandle(row, index: index, count: count)
                     .frame(height: 84)
             }
             Color.clear
                 .frame(width: 84, height: 84)
                 .overlay(CachedImage(urlString: row.imageURL, fill: false, maxPixel: 320).allowsHitTesting(false))
-            VStack(alignment: .leading, spacing: 0) {
-                Spacer(minLength: 0)
-                VStack(alignment: .leading, spacing: 5) {
-                    MarqueeText(text: row.title, fontSize: 14, weight: .semibold, height: 18,
-                                active: row.state == .downloading)
-                    if let game = row.gameName, !game.isEmpty {
-                        Text(game).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
-                    }
-                    queueStatusText(row)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(queueTint(row))
-                        .lineLimit(1)
+            queueRowText(row)
+            queueRowActions(row)
+        }
+    }
+
+    private func queueRowText(_ row: DownloadQueueRow) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Spacer(minLength: 0)
+            VStack(alignment: .leading, spacing: 5) {
+                MarqueeText(text: row.title, fontSize: 14, weight: .semibold, height: 18,
+                            active: row.state == .downloading)
+                if let game = row.gameName, !game.isEmpty {
+                    Text(game).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
                 }
-                // The percent sits on the line under the state, where it has room to be read.
-                queuePercent(row)
-                    .padding(.top, 2)
-                    .frame(height: 14, alignment: .leading)
-                Spacer(minLength: 0)
-                queueBar(row)
+                queueStatusText(row)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(queueTint(row))
+                    .lineLimit(1)
             }
-            .frame(height: 84)
-            HStack(spacing: 8) {
-                if failed {
-                    Button { Haptics.tap(); store.download(row.id) } label: {
-                        Image(systemName: "arrow.clockwise")
-                            .font(.system(size: 11, weight: .bold))
-                            .foregroundStyle(Color.accentColor)
-                            .frame(width: 40, height: 22)
-                            .background(Capsule().fill(Color.accentColor.opacity(0.14)))
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Retry download")
-                }
-                Button { Haptics.tap(); store.cancelItem(row.id) } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 22, height: 22)
-                        .background(Circle().fill(Color.primary.opacity(0.06)))
+            // The percent sits on the line under the state, where it has room to be read.
+            queuePercent(row)
+                .padding(.top, 2)
+                .frame(height: 14, alignment: .leading)
+            Spacer(minLength: 0)
+            queueBar(row)
+        }
+        .frame(height: 84)
+    }
+
+    private func queueRowActions(_ row: DownloadQueueRow) -> some View {
+        HStack(spacing: 8) {
+            if row.state == .failed {
+                Button { Haptics.tap(); store.download(row.id) } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(Color.accentColor)
+                        .frame(width: 40, height: 22)
+                        .background(Capsule().fill(Color.accentColor.opacity(0.14)))
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Cancel this download")
+                .accessibilityLabel("Retry download")
             }
-            .frame(height: 84, alignment: .center)
+            Button { Haptics.tap(); store.cancelItem(row.id) } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 22, height: 22)
+                    .background(Circle().fill(Color.primary.opacity(0.06)))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Cancel this download")
         }
-        .padding(.horizontal, 14).padding(.vertical, 10)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(dragged ? Color(uiColor: .secondarySystemGroupedBackground) : Color.clear)
-        )
-        .offset(y: dragged ? dragOffsetY : 0)
-        .zIndex(dragged ? 1 : 0)
-        .shadow(color: dragged ? .black.opacity(0.16) : .clear, radius: dragged ? 9 : 0, y: dragged ? 4 : 0)
-        .animation(.easeOut(duration: 0.18), value: dragTarget)
+        .frame(height: 84, alignment: .center)
     }
 
     /// Two grey lines on a grey pill: enough of a grip to be found, quiet enough to stay out of the way.
