@@ -23,7 +23,7 @@
     <img src="https://img.shields.io/github/v/release/shplash/ModShelf?style=for-the-badge&label=release&color=0A84FF">
   </a>
 
-  <a href="https://github.com/shplash/ModShelf/releases/latest/download/ModShelf.ipa">
+  <a href="https://github.com/shplash/ModShelf/releases/latest">
     <img src="https://img.shields.io/badge/Download-IPA-0A84FF?style=for-the-badge">
   </a>
 
@@ -48,7 +48,7 @@ If you found ModShelf useful, a GitHub star is always appreciated.
 
 ## Install
 
-1. Download `ModShelf.ipa` from the [latest release](https://github.com/shplash/ModShelf/releases/latest).
+1. Open the [latest release](https://github.com/shplash/ModShelf/releases/latest) and download the IPA.
 2. Install it with a sideloading tool that signs for your device.
 
 Use:
