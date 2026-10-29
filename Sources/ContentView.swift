@@ -1681,7 +1681,12 @@ final class WorkshopStore: ObservableObject {
             status = nextStatus
             log("phase: \(nextStatus)")
         }
-        if abs(progress - nextProgress) > 0.001 {
+        // Everything above measured the transfer; the figure on screen is a whole percent, so the
+        // views are only told when that changes. A download still tracks every byte, it just draws
+        // when the number a person reads moves.
+        let shownNow = Int((max(0, min(1, progress)) * 100).rounded())
+        let shownNext = Int((max(0, min(1, nextProgress)) * 100).rounded())
+        if shownNext != shownNow {
             progress = nextProgress
             let decade = Int(nextProgress * 10)
             if isDownloading, decade != lastLoggedDecade {
@@ -1698,9 +1703,15 @@ final class WorkshopStore: ObservableObject {
         if currentFile != nextFile { currentFile = nextFile }
         if isDownloading, let index = queueRows.firstIndex(where: { $0.id == activeID }),
            queueRows[index].state == .downloading {
-            queueRows[index].progress = nextProgress
+            // The row's bar is read as a whole percent too, so it is written on the same rule.
+            let rowShown = Int((max(0, min(1, queueRows[index].progress)) * 100).rounded())
+            let rowNext = Int((max(0, min(1, nextProgress)) * 100).rounded())
+            if rowNext != rowShown { queueRows[index].progress = nextProgress }
         }
-        if ringVisible, !ringDone { ringProgress = ringBatchProgress }
+        if ringVisible, !ringDone {
+            let next = ringBatchProgress
+            if Int((next * 100).rounded()) != Int((ringProgress * 100).rounded()) { ringProgress = next }
+        }
         guard isBusy else { stopPolling(); return }
 
         let s = nextStatus.lowercased()
@@ -3132,22 +3143,40 @@ final class WorkshopStore: ObservableObject {
     func runLaunchChecks() {
         guard !didLaunchChecks else { return }
         didLaunchChecks = true
-        repairFolders()
-        // ZIPs and abandoned partial downloads count against the app's storage, so every launch
-        // starts from the library and nothing else.
-        let freed = purgeTemporaryFiles()
-        if freed > 0 { log("launch cleanup freed \(Fmt.bytes(freed))") }
+        // The cleanup only deletes files and reads sizes; it touches nothing the screens show, so it
+        // runs off the main thread and is not waited for. Only the two folders are captured.
+        let documents = documents
+        let downloadsRoot = downloadsRoot
+        let cleanup = Task.detached(priority: .utility) {
+            Self.purgeTemporaryFiles(documents: documents, downloadsRoot: downloadsRoot)
+        }
+        Task { @MainActor in
+            let freed = await cleanup.value
+            if freed > 0 { self.log("launch cleanup freed \(Fmt.bytes(freed))") }
+        }
+        // The folder repair edits the library, so it stays on this actor. A short pause lets the
+        // first frame draw before it starts, so launch is never waiting behind a disk walk.
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            self.repairFolders()
+            self.refreshMovedFlags()
+            if UserDefaults.standard.object(forKey: "options.autoCheck") as? Bool ?? true {
+                self.checkAllUpdates(silent: true)
+            }
+        }
+    }
+
+    /// Files that were moved into a game are simply not here any more, which is normal use: that
+    /// counts as moved out, never as a problem.
+    private func refreshMovedFlags() {
         var changed = false
         let fm = FileManager.default
         for i in library.indices {
-            // Files that were moved into a game are simply not here any more, which is normal use:
-            // that counts as moved out, never as a problem.
             let movedAway = !library[i].isInsideModShelf || !fm.fileExists(atPath: library[i].folder)
             if library[i].filesMoved != movedAway { library[i].filesMoved = movedAway; changed = true }
             if movedAway, library[i].filesBroken { library[i].filesBroken = false; changed = true }
         }
         if changed { saveLibrary() }
-        if UserDefaults.standard.object(forKey: "options.autoCheck") as? Bool ?? true { checkAllUpdates(silent: true) }
     }
 
     func retry(_ record: DownloadRecord) {
@@ -3169,9 +3198,9 @@ final class WorkshopStore: ObservableObject {
     }
 
     /// Removes what the library does not need: shared ZIPs, stale partial downloads and replaced
-    /// copies. Run at launch as well as from Options, so nothing quietly piles up in storage.
+    /// copies. Nothing here reads or writes the library, so it is safe to run off the main thread.
     @discardableResult
-    private func purgeTemporaryFiles() -> Int64 {
+    nonisolated static func purgeTemporaryFiles(documents: URL, downloadsRoot: URL) -> Int64 {
         let fm = FileManager.default
         var freed: Int64 = 0
         // An older build kept a visible "ModShelfTemporary" folder in Documents; nothing needs it now.
@@ -3187,15 +3216,21 @@ final class WorkshopStore: ObservableObject {
         }
         // Leftover partial downloads and replaced copies from interrupted sessions, in any game
         // folder they were left in.
-        for url in Self.partialLeftovers(in: downloadsRoot) {
+        for url in partialLeftovers(in: downloadsRoot) {
             freed += sizeOnDisk(url)
             try? fm.removeItem(at: url)
         }
         return freed
     }
 
+    /// The same cleanup for the places that call it from this screen.
+    @discardableResult
+    private func purgeTemporaryFiles() -> Int64 {
+        Self.purgeTemporaryFiles(documents: documents, downloadsRoot: downloadsRoot)
+    }
+
     /// What a file or folder takes up on disk, for saying how much a cleanup recovered.
-    private func sizeOnDisk(_ url: URL) -> Int64 {
+    nonisolated private static func sizeOnDisk(_ url: URL) -> Int64 {
         let keys: Set<URLResourceKey> = [.isDirectoryKey, .totalFileAllocatedSizeKey, .fileAllocatedSizeKey, .fileSizeKey]
         let values = try? url.resourceValues(forKeys: keys)
         if values?.isDirectory == true { return Self.directoryBytes(url) }
@@ -3821,6 +3856,8 @@ struct ContentView: View {
     @State private var tabStyleOpen = false
     @State private var sortOpen = false
     @State private var confirmClearHistory = false
+    /// The cross in the queue card stops everything, so it asks first.
+    @State private var confirmCancelQueue = false
     /// Scroll bookkeeping kept in a reference type, so a scroll frame never re-renders the whole app.
     @State private var scrollTracker = ScrollTracker()
     @AppStorage("options.libraryFilter") private var libraryFilter = "All"
@@ -4190,6 +4227,21 @@ struct ContentView: View {
 
     @ViewBuilder private var overlayDialogs: some View {
         ZStack {
+            if confirmCancelQueue {
+                Color.black.opacity(0.38).ignoresSafeArea().contentShape(Rectangle())
+                    .onTapGesture { confirmCancelQueue = false }.zIndex(16)
+                ConfirmPopup(heading: "Cancel the whole queue?",
+                             message: "The download running now stops, and every mod waiting behind it is taken off the queue.",
+                             actionTitle: "Cancel all",
+                             tint: .red,
+                             cancelTitle: "No",
+                             confirm: {
+                                 confirmCancelQueue = false
+                                 store.cancel()
+                             },
+                             cancel: { confirmCancelQueue = false })
+                    .padding(30).zIndex(17)
+            }
             if confirmClearHistory {
                 Color.black.opacity(0.38).ignoresSafeArea().contentShape(Rectangle())
                     .onTapGesture { confirmClearHistory = false }.zIndex(12)
@@ -4725,14 +4777,14 @@ struct ContentView: View {
                 .frame(width: 46)
                 .padding(.vertical, 3)
                 .background(Capsule().fill(Color.primary.opacity(0.06)))
-            Button { Haptics.tap(); store.cancel() } label: {
+            Button { Haptics.tap(); confirmCancelQueue = true } label: {
                 Image(systemName: "xmark").font(.system(size: 11, weight: .bold))
                     .foregroundStyle(.secondary)
                     .frame(width: 26, height: 26)
                     .background(Circle().fill(Color.primary.opacity(0.07)))
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Cancel downloads")
+            .accessibilityLabel("Cancel all downloads")
         }
         .padding(.horizontal, 14).padding(.top, 12).padding(.bottom, 8)
     }
@@ -6567,6 +6619,8 @@ struct ConfirmPopup: View {
     let message: String
     let actionTitle: String
     var tint: Color = .red
+    /// The wording of the button that closes the popup without doing anything.
+    var cancelTitle: String = "Cancel"
     let confirm: () -> Void
     let cancel: () -> Void
     var body: some View {
@@ -6576,7 +6630,8 @@ struct ConfirmPopup: View {
                 .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 10) {
                 Button(action: cancel) {
-                    Text("Cancel").font(.system(size: 16, weight: .semibold)).frame(maxWidth: .infinity).frame(height: 44)
+                    Text(cancelTitle)
+                        .font(.system(size: 16, weight: .semibold)).frame(maxWidth: .infinity).frame(height: 44)
                         .background(RoundedRectangle(cornerRadius: 12).fill(Color(uiColor: .tertiarySystemFill)))
                 }.buttonStyle(.plain)
                 Button { Haptics.medium(); confirm() } label: {
