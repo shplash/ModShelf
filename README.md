@@ -72,7 +72,7 @@ Files app → ModShelf → Downloaded Mods → <game name> → <mod>
 
 Moving a mod into its game is normal use, so ModShelf shows those as moved out and keeps the install record for update checks.
 
-## Notes & License
+## Notes & Licensing
 
 Steam and the Steam Workshop are trademarks of Valve Corporation. ModShelf is not made by or endorsed by Valve.
 
@@ -80,7 +80,7 @@ ModShelf is licensed under [GPL-3](LICENSE).
 
 It bundles [go-steam](https://github.com/BirknerAlex/go-steam) by Alexander Birkner, which is MIT licensed.
 
-It bundles [ZIPFoundation](https://github.com/weichsel/ZIPFoundation) by Thomas Zoechling, which is MIT licensed.
+Also bundles [ZIPFoundation](https://github.com/weichsel/ZIPFoundation) by Thomas Zoechling, which is MIT licensed.
 
 ## <a href="https://ko-fi.com/shplash"><img src="https://img.shields.io/badge/Support-ko--fi-FF5E5B?style=for-the-badge" alt="Support"></a>
 
