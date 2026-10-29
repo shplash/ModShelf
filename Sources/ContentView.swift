@@ -8391,6 +8391,7 @@ struct WorkshopWebContainer: UIViewRepresentable {
 struct DeveloperMenuView: View {
     @ObservedObject var store: WorkshopStore
     @Environment(\.dismiss) private var dismiss
+    @AppStorage("dev.unlocked") private var devUnlocked = false
 
     @State private var fakeCount = 3
     @State private var fakeEvery = 0
@@ -8463,6 +8464,21 @@ struct DeveloperMenuView: View {
                         UIPasteboard.general.string = store.devSnapshot
                         report = "Snapshot copied."
                     }
+                }
+
+                Section {
+                    Toggle("Developer menu", isOn: Binding(
+                        get: { devUnlocked },
+                        set: { on in
+                            devUnlocked = on
+                            if !on {
+                                store.clearRuntimeLog()
+                                dismiss()
+                            }
+                        }
+                    ))
+                } footer: {
+                    Text("Turning this off hides the wrench and stops the runtime log. Tap the logo twenty times to bring it back.")
                 }
 
                 if let report {
