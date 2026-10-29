@@ -69,7 +69,7 @@ Use:
 
 ModShelf organises downloads into a separate folder for each game.
 
-Use the **open directory** button in ModShelf to jump straight to your downloads folder, regardless of how the app was installed.
+Use the **open directory** button in ModShelf > Options > Downloads to jump straight to your downloads folder, regardless of how the app was installed.
 
 Your downloads are organised like this:
 
