@@ -3750,7 +3750,6 @@ extension View {
             self
         }
     }
-
     /// A chip, a menu label or a small control.
     func chipSurface(radius: CGFloat = Theme.control, fill: Color = Theme.cardFill) -> some View {
         self
@@ -3759,6 +3758,31 @@ extension View {
                 RoundedRectangle(cornerRadius: radius, style: .continuous)
                     .strokeBorder(Theme.hairline, lineWidth: 1)
             )
+    }
+}
+
+/// The heading every tab uses: the same size and place as the library's.
+struct TabHeader: View {
+    let title: String
+    var subtitle: String? = nil
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(title)
+                .font(.system(size: 26, weight: .bold, design: .rounded))
+                .lineLimit(1)
+            if let subtitle, !subtitle.isEmpty {
+                Text(subtitle)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, Theme.page)
+        .padding(.top, 2)
+        .padding(.bottom, 8)
     }
 }
 
@@ -4305,7 +4329,7 @@ struct ContentView: View {
     @State private var dragTarget: Int?
     @State private var confirmReorder: ReorderRequest?
     @State private var keyboardDragSeen = false
-    @State private var showingFilterPopover = false
+    @State private var showingGameMenu = false
     @AppStorage("options.appUpdateNotice") private var appUpdateNoticeOn = true
     @State private var bannerClearTask: Task<Void, Never>?
 
@@ -4580,6 +4604,15 @@ struct ContentView: View {
                       onTap: { tabTapped($0) })
                 .frame(maxWidth: .infinity)
                 .frame(height: tabBarReserve, alignment: .bottom)
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 12)
+                        .onChanged { _ in
+                            guard !keyboardDragSeen else { return }
+                            keyboardDragSeen = true
+                            dismissKeyboard()
+                        }
+                        .onEnded { _ in keyboardDragSeen = false }
+                )
         }
         .tint(Color.accentColor)
         .preferredColorScheme(appearance == "System" ? nil : (appearance == "Dark" ? .dark : .light))
@@ -5137,7 +5170,11 @@ struct ContentView: View {
 
     private var downloadView: some View {
         NavigationStack {
-            downloadScroll
+            VStack(spacing: 0) {
+                TabHeader(title: "Download",
+                          subtitle: "Paste a Workshop link, or browse the Workshop to find a mod.")
+                downloadScroll
+            }
         }
     }
 
@@ -5163,8 +5200,6 @@ struct ContentView: View {
 
     private var downloadCards: some View {
         VStack(alignment: .leading, spacing: Theme.gap) {
-            PageTitle(title: "Download",
-                      subtitle: "Paste a Workshop link, or browse the Workshop to find a mod.")
             lookupCard
             downloadPreviewCards
             downloadControlCards
@@ -5636,8 +5671,7 @@ struct ContentView: View {
                 glanceStat("\(gameCount)", gameCount == 1 ? "game" : "games", symbol: "gamecontroller.fill",
                            enabled: gameCount > 1) {
                     openLibrary(filter: "All")
-                    // The full filter, opened on the game list, wherever the library's menu lives.
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showingFilterPopover = true }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showingGameMenu = true }
                 }
             }
             HStack(spacing: 8) {
@@ -5894,7 +5928,65 @@ struct ContentView: View {
             }
             .background(Theme.pageFill)
             .toolbar(.hidden, for: .navigationBar)
+            .overlay(alignment: .topTrailing) {
+                if showingGameMenu {
+                    ZStack(alignment: .topTrailing) {
+                        Color.black.opacity(0.06).ignoresSafeArea()
+                            .onTapGesture { showingGameMenu = false }
+                        gameMenuCard
+                            .padding(.top, 50)
+                            .padding(.trailing, 64)
+                            .transition(.opacity)
+                    }
+                }
+            }
         }
+    }
+
+    /// The game list, drawn as a menu card under the filter button, for the overview's Games tile.
+    private var gameMenuCard: some View {
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(spacing: 0) {
+                    gameMenuRow("All games", id: nil)
+                    Divider().padding(.leading, 16)
+                    ForEach(Array(installedGameOptions.enumerated()), id: \.element.id) { index, game in
+                        if index > 0 { Divider().padding(.leading, 16) }
+                        gameMenuRow(game.name, id: game.id)
+                    }
+                }
+            }
+            .frame(maxHeight: 340)
+        }
+        .frame(width: 250)
+        .cardSurface(radius: 13)
+        .shadow(color: .black.opacity(0.18), radius: 16, y: 6)
+    }
+
+    private func gameMenuRow(_ title: String, id: String?) -> some View {
+        Button {
+            Haptics.select()
+            selectedGame = id
+            selectedTag = nil
+            showingGameMenu = false
+        } label: {
+            HStack(spacing: 8) {
+                Text(title)
+                    .font(.system(size: 17))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                if selectedGame == id {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(Color.accentColor)
+                }
+            }
+            .padding(.horizontal, 16)
+            .frame(height: 44)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     private var librarySearch: Binding<String> {
@@ -5992,35 +6084,6 @@ struct ContentView: View {
     }
 
     private var filterCircle: some View {
-        Button {
-            Haptics.tap()
-            showingFilterPopover = true
-        } label: {
-            Image(systemName: activeFilterCount > 0
-                  ? "line.3.horizontal.decrease.circle.fill"
-                  : "line.3.horizontal.decrease.circle")
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(activeFilterCount > 0 ? Color.accentColor : Color.secondary)
-                .frame(width: 40, height: 40)
-                .background(Circle().fill(Theme.insetFill))
-                .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .popover(isPresented: $showingFilterPopover, arrowEdge: .top) {
-            LibraryFilterSheet(filter: $libraryFilter,
-                               sortOrder: $sortOrder,
-                               selectedGame: $selectedGame,
-                               selectedTag: $selectedTag,
-                               games: installedGameOptions,
-                               tags: installedTagOptions,
-                               sortOrders: sortOrders)
-                .frame(width: 340, height: 460)
-                .compactPopover()
-        }
-        .accessibilityLabel(activeFilterCount > 0 ? "Filters, \(activeFilterCount) active" : "Filters")
-    }
-
-    private var legacyFilterMenu: some View {
         Menu {
             if !installedGameOptions.isEmpty {
                 Menu {
@@ -6096,6 +6159,7 @@ struct ContentView: View {
                   : "line.3.horizontal.decrease.circle")
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(activeFilterCount > 0 ? Color.accentColor : Color.secondary)
+                .opacity(showingGameMenu ? 0.7 : 1)
                 .frame(width: 40, height: 40)
                 .background(Circle().fill(Theme.insetFill))
                 .contentShape(Circle())
@@ -6536,25 +6600,27 @@ struct ContentView: View {
 
     private var optionsView: some View {
         NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: Theme.gap) {
-                    ScrollSpy(onChange: handleScroll)
-                    ScrollToTopSentinel()
-                    PageTitle(title: "Options", subtitle: "Everything ModShelf does, in one place.")
-                    appearanceSettings
-                    downloadsSettings
-                    browserSettings
-                    steamAccountSettings
-                    aboutSettings
-                    creditsSettings
+            VStack(spacing: 0) {
+                TabHeader(title: "Options", subtitle: "Everything ModShelf does, in one place.")
+                ScrollView {
+                    VStack(alignment: .leading, spacing: Theme.gap) {
+                        ScrollSpy(onChange: handleScroll)
+                        ScrollToTopSentinel()
+                        appearanceSettings
+                        downloadsSettings
+                        browserSettings
+                        steamAccountSettings
+                        aboutSettings
+                        creditsSettings
+                    }
+                    .padding(.horizontal, Theme.page)
+                    .padding(.bottom, tabBarReserve)
                 }
-                .padding(.horizontal, Theme.page)
-                .padding(.bottom, tabBarReserve)
+                .coordinateSpace(name: "scroll")
+                .background(Theme.pageFill)
+                .toolbar(.hidden, for: .navigationBar)
+                .scrollDismissesKeyboard(.interactively)
             }
-            .coordinateSpace(name: "scroll")
-            .background(Theme.pageFill)
-            .toolbar(.hidden, for: .navigationBar)
-            .scrollDismissesKeyboard(.interactively)
         }
     }
 
@@ -8109,24 +8175,26 @@ struct BrowserHome: View {
     private var isFirstRun: Bool { recent.isEmpty && favourites.isEmpty && lastPage == nil }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: Theme.gap) {
-                ScrollSpy(onChange: onScroll)
-                PageTitle(title: "Workshop", subtitle: "Find a game, then browse its Workshop.")
-                if let lastPage { continueCard(lastPage) }
-                searchField
-                if !query.trimmingCharacters(in: .whitespaces).isEmpty {
-                    resultsSection
-                } else {
-                    if !favourites.isEmpty { favouritesSection }
-                    if !viewedMods.isEmpty { viewedModsSection }
-                    if !recentlyOpened.isEmpty { recentsSection }
-                    if isFirstRun { firstRunCard }
+        VStack(spacing: 0) {
+            TabHeader(title: "Workshop", subtitle: "Find a game, then browse its Workshop.")
+            ScrollView {
+                VStack(alignment: .leading, spacing: Theme.gap) {
+                    ScrollSpy(onChange: onScroll)
+                    if let lastPage { continueCard(lastPage) }
+                    searchField
+                    if !query.trimmingCharacters(in: .whitespaces).isEmpty {
+                        resultsSection
+                    } else {
+                        if !favourites.isEmpty { favouritesSection }
+                        if !viewedMods.isEmpty { viewedModsSection }
+                        if !recentlyOpened.isEmpty { recentsSection }
+                        if isFirstRun { firstRunCard }
+                    }
                 }
+                .padding(.horizontal, Theme.page)
+                .padding(.top, 0)
+                .padding(.bottom, 110)
             }
-            .padding(.horizontal, Theme.page)
-            .padding(.top, 2)
-            .padding(.bottom, 110)
         }
         .background(Theme.pageFill)
         .task(id: query) { await runSearch() }
