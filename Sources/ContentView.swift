@@ -3737,6 +3737,15 @@ extension View {
         modifier(PopupSurface(radius: radius))
     }
 
+    /// Keeps a popover a popover on iPhone wherever the system allows it.
+    @ViewBuilder func compactPopover() -> some View {
+        if #available(iOS 16.4, *) {
+            presentationCompactAdaptation(.popover)
+        } else {
+            self
+        }
+    }
+
     /// A chip, a menu label or a small control.
     func chipSurface(radius: CGFloat = Theme.control, fill: Color = Theme.cardFill) -> some View {
         self
@@ -4290,7 +4299,7 @@ struct ContentView: View {
     @State private var dragOffsetY: CGFloat = 0
     @State private var dragTarget: Int?
     @State private var confirmReorder: ReorderRequest?
-    @State private var showingFilterSheet = false
+    @State private var showingFilterPopover = false
     @AppStorage("options.appUpdateNotice") private var appUpdateNoticeOn = true
     @State private var bannerClearTask: Task<Void, Never>?
 
@@ -4500,15 +4509,6 @@ struct ContentView: View {
                 selection = selection.intersection(liveIDs)
                 if selection.isEmpty { selecting = false }
             }
-            .alert("Clear recently viewed mods and games?", isPresented: $confirmClearViewed) {
-                Button("Clear", role: .destructive) {
-                    UserDefaults.standard.set("[]", forKey: "browser.recentMods")
-                    UserDefaults.standard.set("[]", forKey: "browser.recentGames")
-                }
-                Button("Cancel", role: .cancel) { }
-            } message: {
-                Text("They will appear again as you browse the Workshop. Your favourite games are kept.")
-            }
             .onChange(of: store.preview) { _ in
                 mediaIndex = 0
                 mediaViewer = nil
@@ -4604,7 +4604,7 @@ struct ContentView: View {
                                     if confirmAutoDownload {
                                         pendingAutoDownload = id
                                     } else {
-                                        store.download(id)
+                                        downloadFromBrowser(id)
                                     }
                                 } else {
                                     store.input = id
@@ -4742,6 +4742,21 @@ struct ContentView: View {
                              cancel: { exportPrompt = nil })
                     .padding(30).zIndex(15)
             }
+            if confirmClearViewed {
+                Color.black.opacity(0.38).ignoresSafeArea().contentShape(Rectangle())
+                    .onTapGesture { confirmClearViewed = false }.zIndex(18)
+                ConfirmPopup(heading: "Clear recently viewed mods and games?",
+                             message: "They will appear again as you browse the Workshop. Your favourite games are kept.",
+                             actionTitle: "Clear",
+                             cancelTitle: "No",
+                             confirm: {
+                                 UserDefaults.standard.set("[]", forKey: "browser.recentMods")
+                                 UserDefaults.standard.set("[]", forKey: "browser.recentGames")
+                                 confirmClearViewed = false
+                             },
+                             cancel: { confirmClearViewed = false })
+                    .padding(30).zIndex(19)
+            }
             if let id = pendingAutoDownload {
                 Color.black.opacity(0.34).ignoresSafeArea().contentShape(Rectangle())
                     .onTapGesture { pendingAutoDownload = nil }.zIndex(23)
@@ -4751,7 +4766,7 @@ struct ContentView: View {
                              tint: .accentColor,
                              confirm: {
                                  pendingAutoDownload = nil
-                                 store.download(id)
+                                 downloadFromBrowser(id)
                              },
                              cancel: { pendingAutoDownload = nil })
                     .padding(30).zIndex(24)
@@ -5606,7 +5621,7 @@ struct ContentView: View {
                            enabled: gameCount > 1) {
                     openLibrary(filter: "All")
                     // The full filter, opened on the game list, wherever the library's menu lives.
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showingFilterSheet = true }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showingFilterPopover = true }
                 }
             }
             HStack(spacing: 8) {
@@ -5670,6 +5685,14 @@ struct ContentView: View {
         .buttonStyle(.plain)
         .disabled(!enabled)
         .accessibilityLabel("\(value) \(label)")
+    }
+
+    /// Ask Workshop for the details first, so an automatic download never starts from the placeholder.
+    private func downloadFromBrowser(_ id: String) {
+        Task { @MainActor in
+            let meta = await SteamMeta.fetch(id: id, includePage: false)
+            store.download(id, meta: meta)
+        }
     }
 
     /// Opens the library on a filter, or grouped by game for the game count.
@@ -5855,15 +5878,6 @@ struct ContentView: View {
             }
             .background(Theme.pageFill)
             .toolbar(.hidden, for: .navigationBar)
-            .sheet(isPresented: $showingFilterSheet) {
-                LibraryFilterSheet(filter: $libraryFilter,
-                                   sortOrder: $sortOrder,
-                                   selectedGame: $selectedGame,
-                                   selectedTag: $selectedTag,
-                                   games: installedGameOptions,
-                                   tags: installedTagOptions,
-                                   sortOrders: sortOrders)
-            }
         }
     }
 
@@ -5962,6 +5976,35 @@ struct ContentView: View {
     }
 
     private var filterCircle: some View {
+        Button {
+            Haptics.tap()
+            showingFilterPopover = true
+        } label: {
+            Image(systemName: activeFilterCount > 0
+                  ? "line.3.horizontal.decrease.circle.fill"
+                  : "line.3.horizontal.decrease.circle")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(activeFilterCount > 0 ? Color.accentColor : Color.secondary)
+                .frame(width: 40, height: 40)
+                .background(Circle().fill(Theme.insetFill))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .popover(isPresented: $showingFilterPopover, arrowEdge: .top) {
+            LibraryFilterSheet(filter: $libraryFilter,
+                               sortOrder: $sortOrder,
+                               selectedGame: $selectedGame,
+                               selectedTag: $selectedTag,
+                               games: installedGameOptions,
+                               tags: installedTagOptions,
+                               sortOrders: sortOrders)
+                .frame(width: 340, height: 460)
+                .compactPopover()
+        }
+        .accessibilityLabel(activeFilterCount > 0 ? "Filters, \(activeFilterCount) active" : "Filters")
+    }
+
+    private var legacyFilterMenu: some View {
         Menu {
             if !installedGameOptions.isEmpty {
                 Menu {
@@ -6162,7 +6205,7 @@ struct ContentView: View {
         .coordinateSpace(name: "scroll")
         .scrollDismissesKeyboard(.interactively)
         // Pull the grid down to check every mod's Workshop state.
-        .refreshable { store.checkAllUpdates() }
+        .refreshable { store.refreshAndVerify() }
     }
 
     private func listContent(_ items: [WorkshopItem]) -> some View {
@@ -6187,7 +6230,7 @@ struct ContentView: View {
         .background(Theme.pageFill)
         .scrollDismissesKeyboard(.interactively)
         // Pull the list down to check every mod's Workshop state.
-        .refreshable { store.checkAllUpdates() }
+        .refreshable { store.refreshAndVerify() }
     }
 
     private func dateLine(_ item: WorkshopItem) -> (String, Color) {
