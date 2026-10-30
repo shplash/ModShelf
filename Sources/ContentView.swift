@@ -43,7 +43,7 @@ extension ModStatus {
         switch self {
         case .upToDate, .moved, .notChecked: return .secondary
         case .needsUpdate: return .accentColor
-        case .broken: return .yellow
+        case .broken: return .orange
         }
     }
 }
@@ -3574,6 +3574,144 @@ extension View {
 }
 
 
+/// The measurements and surfaces every screen shares, so the app reads as one piece.
+enum Theme {
+    /// Side padding of a scrolling page.
+    static let page: CGFloat = 16
+    /// Space between the cards on a page.
+    static let gap: CGFloat = 14
+    /// Corner radius of a card.
+    static let card: CGFloat = 20
+    /// Corner radius of a control or small card inside a page.
+    static let control: CGFloat = 14
+    /// Corner radius of a thumbnail.
+    static let thumb: CGFloat = 16
+
+    static var pageFill: Color { Color(uiColor: .systemGroupedBackground) }
+    static var cardFill: Color { Color(uiColor: .secondarySystemGroupedBackground) }
+    static var insetFill: Color { Color(uiColor: .tertiarySystemFill) }
+    static var hairline: Color { Color.primary.opacity(0.055) }
+    static var accentSoft: Color { Color.accentColor.opacity(0.14) }
+
+    static let titleFont = Font.system(size: 30, weight: .bold, design: .rounded)
+    static let subtitleFont = Font.system(size: 14, weight: .medium)
+    static let sectionFont = Font.system(size: 12, weight: .semibold)
+    static let rowFont = Font.system(size: 16)
+    static let detailFont = Font.system(size: 13)
+    static let captionFont = Font.system(size: 12)
+}
+
+/// Grouped background with a rounded outline. No drop shadow: depth comes from the fill.
+struct CardSurface: ViewModifier {
+    var radius: CGFloat = Theme.card
+    var fill: Color = Theme.cardFill
+    func body(content: Content) -> some View {
+        content
+            .background(fill, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .strokeBorder(Theme.hairline, lineWidth: 1)
+            )
+    }
+}
+
+extension View {
+    func cardSurface(radius: CGFloat = Theme.card, fill: Color = Theme.cardFill) -> some View {
+        modifier(CardSurface(radius: radius, fill: fill))
+    }
+
+    /// A chip, a menu label or a small control.
+    func chipSurface(radius: CGFloat = Theme.control, fill: Color = Theme.cardFill) -> some View {
+        self
+            .background(fill, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .strokeBorder(Theme.hairline, lineWidth: 1)
+            )
+    }
+}
+
+/// The heading of a page: a large title with a quiet line under it.
+struct PageTitle: View {
+    let title: String
+    var subtitle: String? = nil
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(Theme.titleFont)
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+            if let subtitle, !subtitle.isEmpty {
+                Text(subtitle)
+                    .font(Theme.subtitleFont)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.top, 8)
+        .padding(.bottom, 2)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isHeader)
+    }
+}
+
+/// The small heading above a shelf or a group of settings.
+struct SectionTitle: View {
+    let text: String
+    var count: Int? = nil
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(text.uppercased())
+                .font(Theme.sectionFont)
+                .kerning(0.6)
+                .foregroundStyle(.secondary)
+            if let count {
+                Text("\(count)")
+                    .font(Theme.sectionFont)
+                    .foregroundStyle(.tertiary)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 6)
+    }
+}
+
+/// One search box, used by the library and the browser.
+struct SearchField: View {
+    let placeholder: String
+    @Binding var text: String
+    var focusOnAppear = false
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.secondary)
+            TextField(placeholder, text: $text)
+                .font(Theme.rowFont)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .focused($focused)
+            if !text.isEmpty {
+                Button { text = "" } label: {
+                    Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Clear search")
+            }
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 40)
+        .chipSurface()
+        .onAppear { if focusOnAppear { focused = true } }
+    }
+}
+
+
 struct AppTabBar: View {
     @Binding var selected: Int
     let style: String          // "pill" (shrinks on scroll), "pillFull", "bar"
@@ -3596,11 +3734,11 @@ struct AppTabBar: View {
         return HStack(spacing: compact ? 2 : 4) {
             ForEach(0..<items.count, id: \.self) { i in pillButton(i, compact: compact) }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, compact ? 5 : 7)
-        .background(Capsule().fill(Color(uiColor: .secondarySystemGroupedBackground)))
-        .overlay(Capsule().stroke(Color.primary.opacity(0.08), lineWidth: 1))
-        .shadow(color: .black.opacity(0.28), radius: 12, y: 4)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 6)
+        .background(Capsule(style: .continuous).fill(Theme.cardFill))
+        .overlay(Capsule(style: .continuous).strokeBorder(Theme.hairline, lineWidth: 1))
+        .shadow(color: .black.opacity(0.16), radius: 18, y: 6)
         .padding(.top, 4)
         .padding(.bottom, 2)
         .frame(maxWidth: .infinity)
@@ -3615,35 +3753,44 @@ struct AppTabBar: View {
             selected = i
         } label: {
             VStack(spacing: compact ? 0 : 3) {
-                icon(i, size: compact ? 22 : 24, compact: compact)
-                if !compact { Text(title(i)).font(.system(size: 12, weight: .semibold)).lineLimit(1) }
+                icon(i, size: compact ? 20 : 21, on: on)
+                if !compact {
+                    Text(title(i))
+                        .font(.system(size: 11, weight: .semibold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                }
             }
-            .foregroundStyle(on ? Color.accentColor : Color.secondary)
-            .frame(width: compact ? 54 : 78, height: compact ? 40 : 54)
-            .background(Capsule().fill(on ? Color.accentColor.opacity(0.16) : Color.clear))
-            .contentShape(Capsule())
+            .foregroundStyle(on ? Color.white : Color.secondary)
+            .frame(width: compact ? 52 : 76, height: compact ? 40 : 52)
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(on ? Color.accentColor : Color.clear)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .animation(.spring(response: 0.3, dampingFraction: 0.8), value: on)
         }
         .buttonStyle(.plain)
         .accessibilityLabel(title(i))
     }
 
-    private func icon(_ i: Int, size: CGFloat, compact: Bool = false) -> some View {
+    private func icon(_ i: Int, size: CGFloat, on: Bool) -> some View {
         ZStack(alignment: .topTrailing) {
             Image(systemName: items[i].1).font(.system(size: size, weight: .semibold))
             if i == 2 && libraryBadge {
                 // Blue update badge; scaled down when the pill is folded.
                 Circle()
-                    .fill(Color.accentColor)
-                    .frame(width: compact ? 7 : 9, height: compact ? 7 : 9)
-                    .overlay(Circle().stroke(Color(uiColor: .secondarySystemGroupedBackground), lineWidth: 1.5))
-                    .offset(x: compact ? 3 : 5, y: compact ? -1 : -2)
+                    .fill(on ? Color.white : Color.accentColor)
+                    .frame(width: 7, height: 7)
+                    .overlay(Circle().stroke(on ? Color.accentColor : Theme.cardFill, lineWidth: 1.5))
+                    .offset(x: 3, y: -1)
                     .accessibilityLabel("Updates available")
             }
         }
     }
 
     private var bar: some View {
-        HStack(spacing: 0) {
+        HStack(spacing: 4) {
             ForEach(0..<items.count, id: \.self) { i in
                 Button {
                     if selected != i { Haptics.select() }
@@ -3651,20 +3798,25 @@ struct AppTabBar: View {
                     selected = i
                 } label: {
                     VStack(spacing: 3) {
-                        icon(i, size: 26)
-                        Text(title(i)).font(.system(size: 12, weight: .semibold))
+                        icon(i, size: 21, on: selected == i)
+                        Text(title(i)).font(.system(size: 11, weight: .semibold)).lineLimit(1)
                     }
                     .foregroundStyle(selected == i ? Color.accentColor : Color.secondary)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 6)
+                    .background(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .fill(selected == i ? Theme.accentSoft : Color.clear)
+                    )
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             }
         }
+        .padding(.horizontal, 8)
         .padding(.top, 4)
-        .background(Color(uiColor: .secondarySystemGroupedBackground).ignoresSafeArea(edges: .bottom))
-        .overlay(alignment: .top) { Rectangle().fill(Color.primary.opacity(0.08)).frame(height: 0.5) }
+        .background(Theme.cardFill.ignoresSafeArea(edges: .bottom))
+        .overlay(alignment: .top) { Rectangle().fill(Theme.hairline).frame(height: 0.5) }
     }
 }
 
@@ -3703,7 +3855,7 @@ struct StatusGlyph: View {
         case .notChecked:
             Image(systemName: "questionmark.circle.fill").font(.system(size: size)).foregroundStyle(shade(.secondary))
         case .broken:
-            Image(systemName: "exclamationmark.triangle.fill").font(.system(size: size)).foregroundStyle(shade(.yellow))
+            Image(systemName: "exclamationmark.triangle.fill").font(.system(size: size)).foregroundStyle(shade(.orange))
         }
     }
 
@@ -4273,7 +4425,7 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
+        .background(Theme.pageFill.ignoresSafeArea())
         .safeAreaInset(edge: .bottom, spacing: 0) {
             AppTabBar(selected: $selectedTab, style: tabStyle, collapsed: tabCollapsed,
                       libraryBadge: updateCount > 0,
@@ -4509,8 +4661,8 @@ struct ContentView: View {
                         Image(systemName: "wrench.and.screwdriver")
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundStyle(.secondary)
-                            .frame(width: 26, height: 26)
-                            .background(Circle().fill(Color.primary.opacity(0.06)))
+                            .frame(width: 28, height: 28)
+                            .background(Circle().fill(Theme.insetFill))
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Developer")
@@ -4591,22 +4743,19 @@ struct ContentView: View {
             }
             .font(.subheadline.weight(.semibold))
             .foregroundStyle(store.isAuthenticated ? Color.accentColor : Color.primary)
-            .padding(.horizontal, 12).padding(.vertical, 7)
-            .background(store.isAuthenticated ? Color.accentColor.opacity(0.14) : Color(uiColor: .secondarySystemGroupedBackground), in: Capsule())
+            .frame(height: 32)
+            .padding(.horizontal, 12)
+            .background(
+                Capsule().fill(store.isAuthenticated ? Theme.accentSoft : Theme.cardFill)
+            )
+            .overlay(Capsule().strokeBorder(Theme.hairline, lineWidth: 1))
         }
         .buttonStyle(.plain)
         .accessibilityLabel(store.isAuthenticated ? "Signed in to Steam" : "Sign in to Steam")
     }
 
     private var fadingLine: some View {
-        LinearGradient(stops: [.init(color: Color.accentColor.opacity(0), location: 0),
-                               .init(color: Color.accentColor, location: 0.3),
-                               .init(color: Color.accentColor, location: 0.7),
-                               .init(color: Color.accentColor.opacity(0), location: 1)],
-                       startPoint: .leading, endPoint: .trailing)
-            .frame(height: 2)
-            .shadow(color: Color.accentColor.opacity(0.55), radius: 4)
-            .padding(.horizontal, 12)
+        Rectangle().fill(Theme.hairline).frame(height: 0.5)
     }
 
     @ViewBuilder private var errorBanner: some View {
@@ -4652,10 +4801,9 @@ struct ContentView: View {
                 }
                 .accessibilityLabel("Dismiss")
             }
-            .padding(12)
-            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .shadow(color: .black.opacity(0.06), radius: 8, y: 3)
-            .padding(.horizontal, 14).padding(.top, 8)
+            .padding(14)
+            .cardSurface(radius: 16)
+            .padding(.horizontal, Theme.page).padding(.top, 8)
             .transition(.move(edge: .top).combined(with: .opacity))
             fadingLine
                 .padding(.top, 8)
@@ -4690,8 +4838,7 @@ struct ContentView: View {
             ZStack(alignment: .leading) {
                 Capsule().fill(Color.primary.opacity(0.08))
                 Capsule()
-                    .fill(LinearGradient(colors: [Color.accentColor.opacity(0.8), Color.accentColor],
-                                         startPoint: .leading, endPoint: .trailing))
+                    .fill(Color.accentColor)
                     .frame(width: clamped > 0 ? max(8, geo.size.width * clamped) : 0)
             }
         }
@@ -4721,9 +4868,9 @@ struct ContentView: View {
                 }
                 progressBar(store.progress)
             }
-            .padding(10)
-            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
-            .padding(.horizontal, 14).padding(.top, 8)
+            .padding(12)
+            .cardSurface(radius: 14)
+            .padding(.horizontal, Theme.page).padding(.top, 8)
         }
     }
 
@@ -4832,7 +4979,7 @@ struct ContentView: View {
             .coordinateSpace(name: "scroll")
             .scrollDisabled(dragRowID != nil)
             .scrollDismissesKeyboard(.interactively)
-            .background(Color(uiColor: .systemGroupedBackground))
+            .background(Theme.pageFill)
             .toolbar(.hidden, for: .navigationBar)
     }
 
@@ -4842,22 +4989,19 @@ struct ContentView: View {
                 ScrollSpy(onChange: handleScroll)
                 downloadCards
             }
-            .padding(.horizontal, 15).padding(.top, 10).padding(.bottom, tabBarReserve)
+            .padding(.horizontal, Theme.page).padding(.top, 10).padding(.bottom, tabBarReserve)
         }
     }
 
     private var downloadCards: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            downloadLookupCards
+        VStack(alignment: .leading, spacing: Theme.gap) {
+            PageTitle(title: "Download",
+                      subtitle: "Paste a Workshop link, or browse the Workshop to find a mod.")
+            lookupCard
             downloadPreviewCards
             downloadControlCards
             downloadQueueCards
         }
-    }
-
-    @ViewBuilder private var downloadLookupCards: some View {
-        if downloadIntro { downloadHeader }
-        lookupCard
     }
 
     @ViewBuilder private var downloadPreviewCards: some View {
@@ -4871,10 +5015,12 @@ struct ContentView: View {
 
     private var downloadLoadingRow: some View {
         HStack(spacing: 10) {
-            ProgressView()
-            Text("Loading Workshop details…").font(.subheadline).foregroundStyle(.secondary)
+            ProgressView().scaleEffect(0.8)
+            Text("Loading Workshop details…").font(Theme.detailFont).foregroundStyle(.secondary)
+            Spacer(minLength: 0)
         }
-        .padding(.vertical, 2)
+        .padding(14)
+        .cardSurface(radius: 16)
     }
 
     @ViewBuilder private var downloadControlCards: some View {
@@ -4900,14 +5046,14 @@ struct ContentView: View {
         Button { Haptics.tap(); action() } label: {
             HStack(spacing: 6) {
                 Image(systemName: symbol)
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(Color.accentColor)
                 Text(title)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(.secondary)
             }
-            .frame(maxWidth: .infinity).frame(height: 38)
-            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .frame(maxWidth: .infinity).frame(height: 40)
+            .chipSurface(radius: 12)
         }
         .buttonStyle(.plain)
     }
@@ -4937,7 +5083,7 @@ struct ContentView: View {
     private var queueCard: some View {
         queueCardBody
             .padding(.bottom, 6)
-            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+            .cardSurface()
             // A drag must never outlive the rows it was moving, or scrolling would stay switched off.
             .onDisappear { endReorder() }
             .onChange(of: store.queueRows.count) { _ in
@@ -4959,12 +5105,12 @@ struct ContentView: View {
     private var queueCardHeader: some View {
         HStack(spacing: 10) {
             ZStack {
-                Circle().fill(Color.primary.opacity(0.08))
+                Circle().fill(Theme.accentSoft)
                 Image(systemName: "arrow.down")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(Color.accentColor)
             }
-            .frame(width: 24, height: 24)
+            .frame(width: 26, height: 26)
             Text(queueHeadline)
                 .font(.system(size: 14, weight: .semibold))
                 .lineLimit(1)
@@ -4972,9 +5118,8 @@ struct ContentView: View {
             Text(percentText(queueOverallProgress))
                 .font(.system(size: 12, weight: .semibold).monospacedDigit())
                 .foregroundStyle(Color.accentColor)
-                .frame(width: 46)
-                .padding(.vertical, 3)
-                .background(Capsule().fill(Color.primary.opacity(0.06)))
+                .frame(width: 48, height: 24)
+                .background(Capsule().fill(Theme.accentSoft))
         }
         .padding(.horizontal, 14).padding(.top, 12).padding(.bottom, 8)
     }
@@ -5008,7 +5153,7 @@ struct ContentView: View {
             }
         }
         .padding(.bottom, 6)
-        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+        .cardSurface()
     }
 
     private var queueFailedHeader: some View {
@@ -5016,7 +5161,7 @@ struct ContentView: View {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.system(size: 11, weight: .semibold)).foregroundStyle(.red)
             Text("Didn't finish")
-                .font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                .font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 14).padding(.top, 10).padding(.bottom, 2)
@@ -5109,14 +5254,14 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 0) {
             Spacer(minLength: 0)
             VStack(alignment: .leading, spacing: 5) {
-                MarqueeText(text: row.title, fontSize: 14, weight: .semibold, height: 18,
+                MarqueeText(text: row.title, fontSize: 15, weight: .semibold, height: 19,
                             speed: MarqueeSpeed.otherSpeed,
                             active: row.state == .downloading && MarqueeSpeed.otherRunning)
                 if let game = row.gameName, !game.isEmpty {
-                    Text(game).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                    Text(game).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
                 }
                 queueStatusText(row)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(queueTint(row))
                     .lineLimit(1)
             }
@@ -5227,7 +5372,7 @@ struct ContentView: View {
         if row.state == .done
             || (row.state == .downloading && !store.isPreparingDownload) {
             Text(percentText(row.progress))
-                .font(.system(size: 11, weight: .semibold).monospacedDigit())
+                .font(.system(size: 12, weight: .semibold).monospacedDigit())
                 .foregroundStyle(queueTint(row))
         } else {
             Color.clear.frame(height: 14)
@@ -5260,21 +5405,29 @@ struct ContentView: View {
     private var inputIsInvalid: Bool { inputWasSubmitted && WorkshopStore.workshopID(from: store.input) == nil }
 
     private var lookupCard: some View {
-        VStack(spacing: 8) {
-            Button { selectedTab = 1 } label: {
-                HStack(spacing: 10) {
-                    Image(systemName: "safari.fill").font(.system(size: 16, weight: .semibold)).foregroundStyle(.secondary)
+        VStack(spacing: 10) {
+            Button { Haptics.tap(); selectedTab = 1 } label: {
+                HStack(spacing: 11) {
+                    Image(systemName: "safari.fill")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(Color.accentColor)
+                        .frame(width: 30, height: 30)
+                        .background(Circle().fill(Theme.accentSoft))
                     Text("Browse the Workshop").font(.system(size: 15, weight: .semibold))
                     Spacer(minLength: 0)
                     Image(systemName: "chevron.right").font(.caption.bold()).foregroundStyle(.tertiary)
                 }
-                .padding(.horizontal, 12).padding(.vertical, 10)
-                .background(Color(uiColor: .tertiarySystemFill), in: RoundedRectangle(cornerRadius: 11))
+                .padding(.horizontal, 12)
+                .frame(height: 46)
+                .background(Theme.insetFill, in: RoundedRectangle(cornerRadius: Theme.control, style: .continuous))
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             HStack(spacing: 10) {
-                Image(systemName: "link").foregroundStyle(.secondary)
-                TextField("URL or ID…", text: $store.input)
+                Image(systemName: "link")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                TextField("Workshop URL or ID", text: $store.input)
                     .accessibilityLabel("Workshop URL or ID")
                     .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL).submitLabel(.go)
                     .onSubmit { submitLookup() }
@@ -5285,69 +5438,94 @@ struct ContentView: View {
                     }.accessibilityLabel("Clear Workshop URL or ID")
                 }
             }
-            .padding(.horizontal, 12).padding(.vertical, 10)
-            .background(Color(uiColor: .tertiarySystemFill), in: RoundedRectangle(cornerRadius: 11))
-            .overlay(RoundedRectangle(cornerRadius: 11).stroke(inputIsInvalid ? Color.red.opacity(0.75) : Color.clear, lineWidth: 1))
+            .padding(.horizontal, 12)
+            .frame(height: 46)
+            .background(Theme.insetFill, in: RoundedRectangle(cornerRadius: Theme.control, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.control, style: .continuous)
+                    .strokeBorder(inputIsInvalid ? Color.red.opacity(0.75) : Color.clear, lineWidth: 1)
+            )
             if inputIsInvalid {
-                Text("Enter a Workshop URL or numeric item ID.").font(.caption).foregroundStyle(.red).frame(maxWidth: .infinity, alignment: .leading).padding(.leading, 4)
+                Text("Enter a Workshop URL or numeric item ID.")
+                    .font(.caption).foregroundStyle(.red)
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(.leading, 4)
             }
         }
-        .padding(10)
-        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+        .padding(12)
+        .cardSurface()
     }
 
     private var downloadIntro: Bool {
         store.preview == nil && !store.isDownloading && store.queueRows.isEmpty
     }
 
-    private var downloadHeader: some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: "arrow.down.circle.dotted")
-                .font(.system(size: 26, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .frame(width: 54, height: 54)
-                .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color.primary.opacity(0.07)))
-            VStack(alignment: .leading, spacing: 3) {
-                Text("Download a Workshop mod").font(.system(size: 19, weight: .bold, design: .rounded))
-                Text("Paste a link into the box below, or browse the Workshop to find one.")
-                    .font(.system(size: 13)).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 0)
-        }
-    }
-
     private var glanceCard: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 10) {
-                glanceStat("\(store.library.count)", "mods")
-                glanceStat("\(gameCount)", gameCount == 1 ? "game" : "games")
-                glanceStat("\(updateCount)", "updates")
-                glanceStat("\(favouriteCount)", "favourites")
+            HStack(spacing: 8) {
+                glanceStat("\(store.library.count)", "mods", symbol: "square.grid.2x2.fill") {
+                    openLibrary(filter: "All")
+                }
+                glanceStat("\(gameCount)", gameCount == 1 ? "game" : "games", symbol: "gamecontroller.fill") {
+                    openLibrary(filter: "All")
+                }
+                glanceStat("\(updateCount)", "updates", symbol: "arrow.down.circle.fill") {
+                    openLibrary(filter: "Updates")
+                }
+                glanceStat("\(favouriteCount)", "favourites", symbol: "star.fill") {
+                    openLibrary(filter: "Favourites")
+                }
             }
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 7) {
                 GeometryReader { geo in
                     ZStack(alignment: .leading) {
                         Capsule().fill(Color.primary.opacity(0.08))
-                        Capsule().fill(Color.accentColor.opacity(0.85))
+                        Capsule().fill(Color.accentColor)
                             .frame(width: max(2, geo.size.width * storageFraction))
                     }
                 }
                 .frame(height: 6)
                 Text("\(Fmt.bytes(store.libraryStorageBytes)) on this device · \(Fmt.bytes(freeSpaceBytes)) free\(problemCount > 0 ? " · \(problemCount) to check" : "")")
-                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                    .font(Theme.captionFont).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(14)
-        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .cardSurface()
     }
 
-    private func glanceStat(_ value: String, _ label: String) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
-            Text(value).font(.system(size: 20, weight: .bold, design: .rounded))
-            Text(label).font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
+    /// A figure on the download screen that also opens the library on the matching filter.
+    private func glanceStat(_ value: String, _ label: String, symbol: String,
+                            action: @escaping () -> Void) -> some View {
+        Button { action() } label: {
+            VStack(alignment: .leading, spacing: 3) {
+                Image(systemName: symbol)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                Text(value)
+                    .font(.system(size: 20, weight: .bold, design: .rounded))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                Text(label)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(10)
+            .background(Theme.insetFill, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .contentShape(Rectangle())
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(value) \(label)")
+    }
+
+    private func openLibrary(filter: String) {
+        Haptics.tap()
+        libraryFilter = filter
+        selectedGame = nil
+        selectedTag = nil
+        showingHistory = false
+        selectedTab = 2
     }
 
     private var freeSpaceBytes: Int64 {
@@ -5383,6 +5561,7 @@ struct ContentView: View {
                 Color.clear
                     .frame(width: 84, height: 84)
                     .overlay(CachedImage(urlString: item.imageURL, fill: false, maxPixel: 320).allowsHitTesting(false))
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.thumb, style: .continuous))
                 VStack(alignment: .leading, spacing: 5) {
                     MarqueeText(text: item.title, fontSize: 15, weight: .semibold, height: 19,
                                 speed: MarqueeSpeed.otherSpeed, active: MarqueeSpeed.otherRunning)
@@ -5403,8 +5582,7 @@ struct ContentView: View {
             .foregroundStyle(.secondary)
         }
         .padding(12)
-        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.05), lineWidth: 1))
+        .cardSurface()
     }
 
     private func downloadButton(_ item: WorkshopMetadata) -> some View {
@@ -5425,9 +5603,8 @@ struct ContentView: View {
                 }
             }
             .foregroundStyle(.white)
-            .frame(maxWidth: .infinity).frame(height: 48)
-            .background(RoundedRectangle(cornerRadius: 14).fill(Color.accentColor))
-            .shadow(color: Color.accentColor.opacity(0.25), radius: 10, y: 4)
+            .frame(maxWidth: .infinity).frame(height: 50)
+            .background(RoundedRectangle(cornerRadius: Theme.control, style: .continuous).fill(Color.accentColor))
         }
         .buttonStyle(.plain)
     }
@@ -5454,7 +5631,7 @@ struct ContentView: View {
             if !item.description.isEmpty { ExpandableDescription(text: item.description, lineLimit: 8) }
             workshopRow(item)
         }
-        .padding(14).background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+        .padding(14).cardSurface()
     }
 
     private func infoRow(_ item: WorkshopMetadata) -> some View {
@@ -5498,7 +5675,7 @@ struct ContentView: View {
                 }
                 .foregroundStyle(Color.accentColor)
                 .padding(.horizontal, 14).frame(height: 48)
-                .background(RoundedRectangle(cornerRadius: 12).fill(Color.accentColor.opacity(0.14)))
+                .background(RoundedRectangle(cornerRadius: Theme.control, style: .continuous).fill(Theme.accentSoft))
             }
             .buttonStyle(.plain)
             if item.updatedAt > 0 {
@@ -5510,7 +5687,7 @@ struct ContentView: View {
                     }
                 }
                 .padding(.horizontal, 12).frame(height: 48)
-                .background(RoundedRectangle(cornerRadius: 12).fill(Color(uiColor: .tertiarySystemFill)))
+                .background(RoundedRectangle(cornerRadius: Theme.control, style: .continuous).fill(Theme.insetFill))
             }
             Spacer(minLength: 0)
         }
@@ -5519,10 +5696,13 @@ struct ContentView: View {
     private var libraryView: some View {
         NavigationStack {
             VStack(spacing: 0) {
+                PageTitle(title: showingHistory ? "History" : "Library", subtitle: librarySubtitle)
+                    .padding(.horizontal, Theme.page)
+                    .padding(.bottom, 8)
                 libraryBar
                 if showingHistory { historyContent } else { libraryBody }
             }
-            .background(Color(uiColor: .systemGroupedBackground))
+            .background(Theme.pageFill)
             .toolbar(.hidden, for: .navigationBar)
         }
     }
@@ -5552,38 +5732,17 @@ struct ContentView: View {
     }
 
     private var libraryBar: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 10) {
             if showingHistory {
-                HStack(spacing: 8) {
-                    HStack(spacing: 9) {
-                        Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                        TextField("Search history", text: $historySearch).textInputAutocapitalization(.never).autocorrectionDisabled()
-                        if !historySearch.isEmpty {
-                            Button { historySearch = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
-                        }
-                    }
-                    .padding(.horizontal, 12).padding(.vertical, 8)
-                    .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                HStack(spacing: 10) {
+                    librarySearchField
                     libraryIconTile("trash") { if confirmDelete { confirmClearHistory = true } else { store.clearHistory() } }
                         .disabled(store.history.isEmpty)
                         .opacity(store.history.isEmpty ? 0.5 : 1)
                     libraryIconTile("xmark") { showingHistory = false }
                 }
             } else {
-                HStack(spacing: 8) {
-                    sortMenu
-                    filterMenu
-                    Spacer(minLength: 0)
-                    Text(librarySubtitle)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
-                        .layoutPriority(2)
-                        .padding(.horizontal, 9).padding(.vertical, 6)
-                        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                }
-                HStack(spacing: 8) {
+                HStack(spacing: 10) {
                     libraryAction("arrow.clockwise", "Updates", spinning: store.isCheckingUpdates) { store.checkAllUpdates() }
                         .disabled(store.isCheckingUpdates)
                     libraryAction("checkmark.shield", "Verify", spinning: store.isVerifyingAll) { store.verifyAllFiles() }
@@ -5591,15 +5750,20 @@ struct ContentView: View {
                     libraryAction("clock.arrow.circlepath", "History") { showingHistory = true }
                     moreMenu
                 }
-                HStack(spacing: 8) {
+                HStack(spacing: 10) {
                     librarySearchField
                     selectPill
+                }
+                HStack(spacing: 10) {
+                    sortMenu
+                    filterMenu
                     if !installedGameOptions.isEmpty { gameFilterMenu }
                     if !installedTagOptions.isEmpty { tagFilterMenu }
+                    Spacer(minLength: 0)
                 }
             }
         }
-        .padding(.horizontal, 15).padding(.top, 6).padding(.bottom, 8)
+        .padding(.horizontal, Theme.page).padding(.top, 2).padding(.bottom, 10)
     }
 
     private func libraryIconTile(_ symbol: String, action: @escaping () -> Void) -> some View {
@@ -5607,8 +5771,8 @@ struct ContentView: View {
             Image(systemName: symbol)
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(Color.accentColor)
-                .frame(width: 38, height: 34)
-                .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .frame(width: 44, height: 40)
+                .chipSurface()
         }
         .buttonStyle(.plain)
     }
@@ -5640,8 +5804,8 @@ struct ContentView: View {
                 .lineLimit(1)
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 8)
-        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+        .frame(height: 56)
+        .chipSurface(radius: 16)
     }
 
     private func filterSymbol(_ filter: String) -> String {
@@ -5682,8 +5846,8 @@ struct ContentView: View {
                 }
             }
             .foregroundStyle(.secondary)
-            .padding(.horizontal, 9).padding(.vertical, 6)
-            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .padding(.horizontal, 10).frame(height: 34)
+            .chipSurface(radius: 12)
         }
     }
 
@@ -5710,8 +5874,8 @@ struct ContentView: View {
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
             }
-            .padding(.horizontal, 9).padding(.vertical, 6)
-            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .padding(.horizontal, 10).frame(height: 34)
+            .chipSurface(radius: 12)
         }
     }
 
@@ -5762,21 +5926,14 @@ struct ContentView: View {
                     .lineLimit(1)
             }
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 8)
-            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+            .frame(height: 56)
+            .chipSurface(radius: 16)
         }
     }
 
     private var librarySearchField: some View {
-        HStack(spacing: 9) {
-            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-            TextField("Search library", text: $searchText).textInputAutocapitalization(.never).autocorrectionDisabled()
-            if !searchText.isEmpty {
-                Button { searchText = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
-            }
-        }
-        .padding(.horizontal, 12).padding(.vertical, 8)
-        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        SearchField(placeholder: showingHistory ? "Search history" : "Search library",
+                    text: showingHistory ? $historySearch : $searchText)
     }
 
     private var libraryBody: some View {
@@ -5827,9 +5984,8 @@ struct ContentView: View {
         Image(systemName: symbol)
             .font(.system(size: 14, weight: .semibold))
             .foregroundStyle(Color.accentColor)
-            .frame(width: 20, height: 18)
-            .padding(.horizontal, 8).padding(.vertical, 8)
-            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .frame(width: 44, height: 34)
+            .chipSurface(radius: 12)
     }
 
     private var selectPill: some View {
@@ -5842,11 +5998,18 @@ struct ContentView: View {
         } label: {
             HStack(spacing: 5) {
                 Image(systemName: selecting ? "checkmark.circle.fill" : "checkmark.circle")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(Color.accentColor)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(selecting ? Color.white : Color.accentColor)
             }
-            .padding(.horizontal, 10).padding(.vertical, 8)
-            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .frame(width: 46, height: 40)
+            .background(
+                RoundedRectangle(cornerRadius: Theme.control, style: .continuous)
+                    .fill(selecting ? Color.accentColor : Theme.cardFill)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.control, style: .continuous)
+                    .strokeBorder(Theme.hairline, lineWidth: 1)
+            )
         }
         .buttonStyle(.plain)
         .accessibilityLabel(selecting ? "Finish selecting" : "Select mods")
@@ -5858,10 +6021,10 @@ struct ContentView: View {
             VStack(spacing: 0) {
                 ScrollSpy(onChange: handleScroll)
                 ScrollToTopSentinel()
-                LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 16) {
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 14) {
                     ForEach(items) { item in gridCard(item) }
                 }
-                .padding(.horizontal, 14).padding(.top, 0).padding(.bottom, tabBarReserve)
+                .padding(.horizontal, Theme.page).padding(.top, 0).padding(.bottom, tabBarReserve)
             }
         }
         .coordinateSpace(name: "scroll")
@@ -5878,8 +6041,9 @@ struct ContentView: View {
                 .listRowInsets(EdgeInsets()).listRowBackground(Color.clear).listRowSeparator(.hidden)
             ForEach(items) { item in
                 listRow(item)
-                    .listRowInsets(EdgeInsets())
-                    .listRowBackground(Color(uiColor: .systemGroupedBackground))
+                    .listRowInsets(EdgeInsets(top: 5, leading: Theme.page, bottom: 5, trailing: Theme.page))
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
             }
             // Keeps the last row clear of the tab bar.
             Color.clear.frame(height: tabBarReserve)
@@ -5888,7 +6052,7 @@ struct ContentView: View {
         .environment(\.defaultMinListRowHeight, 0)
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
-        .background(Color(uiColor: .systemGroupedBackground))
+        .background(Theme.pageFill)
         .scrollDismissesKeyboard(.interactively)
         // Pull the list down to check every mod's Workshop state.
         .refreshable { store.checkAllUpdates() }
@@ -5896,7 +6060,7 @@ struct ContentView: View {
 
     private func dateLine(_ item: WorkshopItem) -> (String, Color) {
         switch item.status {
-        case .broken: return ("Files don't match Steam", Color.yellow)
+        case .broken: return ("Files don't match Steam", Color.orange)
         case .needsUpdate: return ("New update available", Color.accentColor)
         case .notChecked: return (item.checkFailed ? "Couldn't reach Steam" : "Not checked yet", Color.secondary)
         case .upToDate, .moved: break
@@ -5942,7 +6106,7 @@ struct ContentView: View {
         let tap = {
             if selecting { toggleSelection(item) } else { Haptics.tap(); popupItem = item }
         }
-        return VStack(alignment: .leading, spacing: 7) {
+        return VStack(alignment: .leading, spacing: 8) {
             Button(action: tap) {
                 GeometryReader { proxy in
                     CachedImage(urlString: item.imageURL, fill: true, maxPixel: 520)
@@ -5951,9 +6115,10 @@ struct ContentView: View {
                 }
                 .aspectRatio(1, contentMode: .fit)
                 .frame(maxWidth: .infinity)
-                .contentShape(Rectangle())
-                    .overlay(Rectangle()
-                        .stroke(Color.accentColor, lineWidth: picked ? 3 : 0))
+                .clipShape(RoundedRectangle(cornerRadius: Theme.control, style: .continuous))
+                .contentShape(RoundedRectangle(cornerRadius: Theme.control, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: Theme.control, style: .continuous)
+                        .strokeBorder(Color.accentColor, lineWidth: picked ? 3 : 0))
             }
             .buttonStyle(.plain)
             .overlay(alignment: .topLeading) {
@@ -5964,7 +6129,7 @@ struct ContentView: View {
             }
 
             Button(action: tap) {
-                VStack(alignment: .leading, spacing: 1) {
+                VStack(alignment: .leading, spacing: 3) {
                     MarqueeText(text: item.displayTitle, fontSize: 14, weight: .semibold,
                                 height: 17, speed: MarqueeSpeed.librarySpeed,
                                 active: selectedTab == 2 && MarqueeSpeed.libraryRunning,
@@ -5979,7 +6144,7 @@ struct ContentView: View {
                         }
                     }
                     .frame(height: 15, alignment: .leading)
-                    HStack(spacing: 4) {
+                    HStack(spacing: 5) {
                         StatusGlyph(status: item.status, size: 11)
                         Text(line.0).font(.system(size: 11, weight: .medium)).foregroundStyle(line.1).lineLimit(1)
                     }
@@ -5989,14 +6154,18 @@ struct ContentView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .padding(.horizontal, 4)
+            .padding(.bottom, 4)
         }
+        .padding(6)
+        .cardSurface(radius: 18)
     }
 
     private func navCircle(_ symbol: String, _ action: @escaping () -> Void) -> some View {
         Button { Haptics.tap(); action() } label: {
-            Image(systemName: symbol).font(.system(size: 14, weight: .semibold)).foregroundStyle(.secondary)
+            Image(systemName: symbol).font(.system(size: 14, weight: .semibold)).foregroundStyle(Color.accentColor)
                 .frame(width: 34, height: 34)
-                .background(Circle().fill(Color.primary.opacity(0.06)))
+                .background(Circle().fill(Theme.insetFill))
         }
         .buttonStyle(.plain)
     }
@@ -6013,7 +6182,9 @@ struct ContentView: View {
                 HStack(spacing: 12) {
                     Color.clear.frame(width: 84, height: 84)
                         .overlay(CachedImage(urlString: item.imageURL, fill: true, maxPixel: 300).allowsHitTesting(false))
-                        .overlay(Rectangle().stroke(Color.accentColor, lineWidth: picked ? 3 : 0))
+                        .clipShape(RoundedRectangle(cornerRadius: Theme.thumb, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: Theme.thumb, style: .continuous)
+                            .strokeBorder(Color.accentColor, lineWidth: picked ? 3 : 0))
                     VStack(alignment: .leading, spacing: 4) {
                         MarqueeText(text: item.displayTitle, fontSize: 15, weight: .semibold, height: 19,
                                     speed: MarqueeSpeed.librarySpeed, active: MarqueeSpeed.libraryRunning)
@@ -6043,7 +6214,8 @@ struct ContentView: View {
                 }
             }
         }
-        .padding(.horizontal, 15).padding(.vertical, 10)
+        .padding(.horizontal, 12).padding(.vertical, 12)
+        .cardSurface()
     }
 
 
@@ -6060,12 +6232,12 @@ struct ContentView: View {
                             VStack(spacing: 0) {
                                 ScrollSpy(onChange: handleScroll)
                                 ScrollToTopSentinel()
-                                LazyVStack(spacing: 0) {
+                                LazyVStack(spacing: 10) {
                                     ForEach(filteredHistory) { record in
                                         historyRow(record)
-                                        Rectangle().fill(Color.gray.opacity(0.2)).frame(height: 0.5).padding(.leading, 83)
                                     }
                                 }
+                                .padding(.horizontal, Theme.page)
                                 .padding(.bottom, tabBarReserve)
                             }
                         }
@@ -6102,6 +6274,7 @@ struct ContentView: View {
         return HStack(alignment: .center, spacing: 12) {
             Color.clear.frame(width: 84, height: 84)
                 .overlay(CachedImage(urlString: record.imageURL, fill: true, maxPixel: 300))
+                .clipShape(RoundedRectangle(cornerRadius: Theme.thumb, style: .continuous))
             VStack(alignment: .leading, spacing: 4) {
                 MarqueeText(text: record.title, fontSize: 15, weight: .semibold, height: 19,
                             speed: MarqueeSpeed.otherSpeed, active: MarqueeSpeed.otherRunning)
@@ -6132,7 +6305,8 @@ struct ContentView: View {
                 navCircle("ellipsis") { contextHistory = record }
             }
         }
-        .padding(.horizontal, 15).padding(.vertical, 10)
+        .padding(.horizontal, 12).padding(.vertical, 12)
+        .cardSurface()
     }
 
     private func historyStatus(_ record: DownloadRecord) -> ModStatus {
@@ -6145,22 +6319,32 @@ struct ContentView: View {
     }
 
     private func emptyState(_ title: String, detail: String, symbol: String) -> some View {
-        VStack(spacing: 12) {
-            Image(systemName: symbol).font(.system(size: 40, weight: .light)).foregroundStyle(.secondary)
-            Text(title).font(.title3.bold())
-            Text(detail).font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
+        VStack(spacing: 14) {
+            Image(systemName: symbol)
+                .font(.system(size: 26, weight: .semibold))
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 64, height: 64)
+                .background(Circle().fill(Theme.accentSoft))
+            VStack(spacing: 5) {
+                Text(title).font(.system(size: 17, weight: .semibold))
+                Text(detail)
+                    .font(Theme.detailFont)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity).padding(28)
+        .frame(maxWidth: .infinity, maxHeight: .infinity).padding(32)
     }
 
 
     private var optionsView: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: Theme.gap) {
                     ScrollSpy(onChange: handleScroll)
                     ScrollToTopSentinel()
-                    Text("Options").font(.system(size: 27, weight: .bold, design: .rounded)).padding(.top, 10)
+                    PageTitle(title: "Options", subtitle: "Everything ModShelf does, in one place.")
                     appearanceSettings
                     downloadsSettings
                     browserSettings
@@ -6168,11 +6352,11 @@ struct ContentView: View {
                     aboutSettings
                     creditsSettings
                 }
-                .padding(.horizontal, 15)
+                .padding(.horizontal, Theme.page)
                 .padding(.bottom, tabBarReserve)
             }
             .coordinateSpace(name: "scroll")
-            .background(Color(uiColor: .systemGroupedBackground))
+            .background(Theme.pageFill)
             .toolbar(.hidden, for: .navigationBar)
         }
     }
@@ -6273,14 +6457,14 @@ struct ContentView: View {
                     rowContent("Mod folder", symbol: "folder", detail: store.downloadsFolderLabel, chevron: false)
                     Button { Haptics.tap(); store.revealFolder(store.downloadsFolderURL) } label: {
                         Image(systemName: "folder")
-                            .font(.system(size: 15, weight: .semibold)).foregroundStyle(.secondary)
+                            .font(.system(size: 15, weight: .semibold)).foregroundStyle(Color.accentColor)
                             .frame(width: 36, height: 36)
-                            .background(Circle().fill(Color.secondary.opacity(0.12)))
+                            .background(Circle().fill(Theme.accentSoft))
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Open the mod folder")
                 }
-                .padding(.trailing, 12)
+                .padding(.trailing, 14)
                 divider
                 Button { Haptics.tap(); store.clearTemporaryFiles() } label: {
                     rowContent("Clear temporary files", symbol: "trash.slash", detail: nil)
@@ -6294,14 +6478,17 @@ struct ContentView: View {
             settingsGroup("Steam account", isOpen: $steamOpen) {
                 HStack(spacing: 12) {
                     Image(systemName: store.isAuthenticated ? "checkmark.shield.fill" : "exclamationmark.shield")
-                        .font(.system(size: 20)).foregroundStyle(store.isAuthenticated ? Color.green : Color.orange)
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(store.isAuthenticated ? Color.green : Color.orange)
+                        .frame(width: 34, height: 34)
+                        .background(Circle().fill((store.isAuthenticated ? Color.green : Color.orange).opacity(0.14)))
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(store.isAuthenticated ? "Connected to Steam" : "Not signed in").font(.system(size: 16, weight: .semibold))
-                        Text(store.isAuthenticated ? "Your Steam session is active." : "Sign in to download mods.").font(.system(size: 13)).foregroundStyle(.secondary)
+                        Text(store.isAuthenticated ? "Connected to Steam" : "Not signed in").font(Theme.rowFont)
+                        Text(store.isAuthenticated ? "Your Steam session is active." : "Sign in to download mods.").font(Theme.captionFont).foregroundStyle(.secondary)
                     }
                     Spacer()
                 }
-                .padding(.horizontal, 15).padding(.vertical, 12)
+                .padding(.horizontal, 16).padding(.vertical, 12)
                 divider
                 if store.isAuthenticated {
                     Button { Haptics.tap(); store.signOut() } label: { rowContent("Sign out", symbol: "rectangle.portrait.and.arrow.right", detail: nil, tint: .red) }.buttonStyle(.plain)
@@ -6317,12 +6504,11 @@ struct ContentView: View {
             settingsGroup("About", isOpen: $aboutOpen) {
                 Button { Haptics.tap(); store.checkForAppUpdate() } label: {
                     HStack(spacing: 12) {
-                        Image(systemName: "arrow.triangle.2.circlepath")
-                            .font(.system(size: 16)).foregroundStyle(.secondary).frame(width: 24)
+                        settingsIcon("arrow.triangle.2.circlepath")
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Check for app updates").font(.system(size: 16))
+                            Text("Check for app updates").font(Theme.rowFont)
                             if !store.appUpdateMessage.isEmpty {
-                                Text(store.appUpdateMessage).font(.system(size: 12))
+                                Text(store.appUpdateMessage).font(Theme.captionFont)
                                     .foregroundStyle(.secondary).lineLimit(2)
                             }
                         }
@@ -6334,7 +6520,7 @@ struct ContentView: View {
                                 .foregroundStyle(.tertiary)
                         }
                     }
-                    .padding(.horizontal, 15).padding(.vertical, 11).contentShape(Rectangle())
+                    .padding(.horizontal, 16).padding(.vertical, 10).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .disabled(store.isCheckingAppUpdate)
@@ -6377,9 +6563,9 @@ struct ContentView: View {
                 divider
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Steam and the Steam Workshop are trademarks of Valve Corporation. ModShelf is not made by or endorsed by Valve.")
-                        .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        .font(Theme.captionFont).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
-                .padding(.horizontal, 15).padding(.vertical, 12)
+                .padding(.horizontal, 16).padding(.vertical, 12)
             }
         )
     }
@@ -6394,17 +6580,16 @@ struct ContentView: View {
             Text(detail).font(.system(size: 13)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 15).padding(.vertical, 11)
+        .padding(.horizontal, 16).padding(.vertical, 11)
     }
 
-    private var divider: some View { Rectangle().fill(Color.gray.opacity(0.2)).frame(height: 0.5).padding(.leading, 48) }
+    private var divider: some View { Rectangle().fill(Theme.hairline).frame(height: 0.5).padding(.leading, 58) }
 
     private func settingsGroup<Content: View>(_ title: String, isOpen: Binding<Bool>,
                                               @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                Text(title.uppercased()).font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
-                Spacer(minLength: 0)
+                SectionTitle(text: title)
                 Button {
                     Haptics.select()
                     withAnimation(.easeInOut(duration: 0.2)) { isOpen.wrappedValue.toggle() }
@@ -6412,30 +6597,43 @@ struct ContentView: View {
                     Image(systemName: isOpen.wrappedValue ? "chevron.up" : "chevron.down")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.secondary)
-                        .frame(width: 30, height: 22)
+                        .frame(width: 32, height: 26)
+                        .chipSurface(radius: 9)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(isOpen.wrappedValue ? "Collapse \(title)" : "Expand \(title)")
             }
-            .padding(.leading, 6)
             .padding(.trailing, 2)
             if isOpen.wrappedValue {
                 VStack(spacing: 0) { content() }
-                    .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color(uiColor: .secondarySystemGroupedBackground)))
+                    .cardSurface()
                     .transition(.opacity)
             }
         }
+        .padding(.top, 2)
     }
 
     private func row<Trailing: View>(_ title: String, symbol: String, @ViewBuilder trailing: () -> Trailing) -> some View {
         HStack(spacing: 12) {
-            Image(systemName: symbol).font(.system(size: 16)).foregroundStyle(.secondary).frame(width: 24)
-            Text(title).font(.system(size: 16))
+            settingsIcon(symbol)
+            Text(title).font(Theme.rowFont)
             Spacer(minLength: 8)
             trailing()
         }
-        .padding(.horizontal, 15).padding(.vertical, 11)
+        .padding(.horizontal, 16).padding(.vertical, 10)
+    }
+
+    /// A symbol on a soft tile, the same size in every settings row.
+    private func settingsIcon(_ symbol: String, tint: Color = .accentColor) -> some View {
+        Image(systemName: symbol)
+            .font(.system(size: 14, weight: .semibold))
+            .foregroundStyle(tint)
+            .frame(width: 30, height: 30)
+            .background(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(tint == .accentColor ? Theme.accentSoft : tint.opacity(0.14))
+            )
     }
 
     private func toggleRow(_ title: String, symbol: String, isOn: Binding<Bool>) -> some View {
@@ -6457,7 +6655,7 @@ struct ContentView: View {
                 value.wrappedValue = new < 0.25 ? 0 : max(0.25, new)
             }), in: 0...2, step: 0.05)
                 .tint(.accentColor)
-                .padding(.leading, 51).padding(.trailing, 15).padding(.bottom, 12)
+                .padding(.leading, 58).padding(.trailing, 16).padding(.bottom, 12)
         }
     }
 
@@ -6473,15 +6671,15 @@ struct ContentView: View {
 
     private func rowContent(_ title: String, symbol: String, detail: String?, tint: Color = .primary, chevron: Bool = true) -> some View {
         HStack(spacing: 12) {
-            Image(systemName: symbol).font(.system(size: 16)).foregroundStyle(tint == .primary ? Color.secondary : tint).frame(width: 24)
+            settingsIcon(symbol, tint: tint == .primary ? .accentColor : tint)
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.system(size: 16)).foregroundStyle(tint)
-                if let detail { Text(detail).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(2) }
+                Text(title).font(Theme.rowFont).foregroundStyle(tint)
+                if let detail { Text(detail).font(Theme.captionFont).foregroundStyle(.secondary).lineLimit(2) }
             }
             Spacer(minLength: 0)
             if tint == .primary && chevron { Image(systemName: "chevron.right").font(.caption.bold()).foregroundStyle(.tertiary) }
         }
-        .padding(.horizontal, 15).padding(.vertical, 11).contentShape(Rectangle())
+        .padding(.horizontal, 16).padding(.vertical, 10).contentShape(Rectangle())
     }
 
 
@@ -6528,8 +6726,8 @@ struct ContentView: View {
                     } else {
                         Button { store.showLogin = false } label: {
                             Text("Done").font(.headline).foregroundStyle(.white)
-                                .frame(maxWidth: .infinity).frame(height: 48)
-                                .background(RoundedRectangle(cornerRadius: 13).fill(Color.accentColor))
+                                .frame(maxWidth: .infinity).frame(height: 50)
+                                .background(RoundedRectangle(cornerRadius: Theme.control, style: .continuous).fill(Color.accentColor))
                         }.buttonStyle(.plain)
                     }
                     if !store.loginError.isEmpty {
@@ -6538,7 +6736,7 @@ struct ContentView: View {
                 }
                 .padding(20)
             }
-            .background(Color(uiColor: .systemGroupedBackground))
+            .background(Theme.pageFill)
             .onDisappear { store.loginError = "" }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Close") { store.showLogin = false } }
@@ -6551,8 +6749,11 @@ struct ContentView: View {
             if secure { SecureField(title, text: text) } else { TextField(title, text: text) }
         }
         .textInputAutocapitalization(.never).autocorrectionDisabled()
-        .padding(.horizontal, 13).frame(height: 46)
-        .background(RoundedRectangle(cornerRadius: 11).fill(Color(uiColor: .secondarySystemGroupedBackground)))
+        .padding(.horizontal, 14).frame(height: 48)
+        .background(RoundedRectangle(cornerRadius: Theme.control, style: .continuous).fill(Theme.cardFill))
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.control, style: .continuous).strokeBorder(Theme.hairline, lineWidth: 1)
+        )
     }
 }
 
@@ -6571,7 +6772,8 @@ struct ItemDetailPopup: View {
             HStack(alignment: .top, spacing: 14) {
                 // Artwork with the text block matched to its height.
                 CachedImage(urlString: item.imageURL, fill: true, maxPixel: 400)
-                    .frame(width: 108, height: 108).clipShape(Rectangle())
+                    .frame(width: 108, height: 108)
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.thumb, style: .continuous))
                 VStack(alignment: .leading, spacing: 3) {
                     Text(item.displayTitle).font(.headline).lineLimit(2)
                     RatingLine(rating: item.rating, count: item.ratingCount, size: 13)
@@ -6611,36 +6813,37 @@ struct ItemDetailPopup: View {
             HStack(spacing: 10) {
                 Button { Haptics.tap(); onOpenWorkshop() } label: {
                     Label("Workshop", systemImage: "safari").font(.system(size: 14, weight: .semibold))
-                        .frame(maxWidth: .infinity).frame(height: 42)
-                        .background(RoundedRectangle(cornerRadius: 11).fill(Color.accentColor.opacity(0.14)))
+                        .frame(maxWidth: .infinity).frame(height: 46)
+                        .background(RoundedRectangle(cornerRadius: Theme.control, style: .continuous).fill(Theme.accentSoft))
                 }.buttonStyle(.plain)
                 if item.updateAvailable {
                     Button { Haptics.medium(); onUpdate() } label: {
                         Label("Update", systemImage: "arrow.down.circle.fill").font(.system(size: 14, weight: .semibold)).foregroundStyle(.white)
-                            .frame(maxWidth: .infinity).frame(height: 42)
-                            .background(RoundedRectangle(cornerRadius: 11).fill(Color.orange))
+                            .frame(maxWidth: .infinity).frame(height: 46)
+                            .background(RoundedRectangle(cornerRadius: Theme.control, style: .continuous).fill(Color.orange))
                     }.buttonStyle(.plain)
                 } else if item.filesBroken {
                     // A mod whose files no longer match Steam can only be put right by fetching it again.
                     Button { Haptics.medium(); onUpdate() } label: {
                         Label("Reinstall", systemImage: "arrow.down.circle.fill").font(.system(size: 14, weight: .semibold)).foregroundStyle(.white)
-                            .frame(maxWidth: .infinity).frame(height: 42)
-                            .background(RoundedRectangle(cornerRadius: 11).fill(Color.orange))
+                            .frame(maxWidth: .infinity).frame(height: 46)
+                            .background(RoundedRectangle(cornerRadius: Theme.control, style: .continuous).fill(Color.orange))
                     }.buttonStyle(.plain)
                 }
                 Button { Haptics.tap(); store.revealInFiles(item) } label: {
                     Image(systemName: "folder").font(.system(size: 15, weight: .semibold)).foregroundStyle(Color.accentColor)
-                        .frame(width: 42, height: 42).background(RoundedRectangle(cornerRadius: 11).fill(Color.accentColor.opacity(0.12)))
+                        .frame(width: 46, height: 46).background(RoundedRectangle(cornerRadius: Theme.control, style: .continuous).fill(Theme.accentSoft))
                 }.buttonStyle(.plain).accessibilityLabel("Reveal in Files")
                 Button(role: .destructive, action: onDelete) {
                     Image(systemName: "trash").font(.system(size: 15, weight: .semibold)).foregroundStyle(.red)
-                        .frame(width: 42, height: 42).background(RoundedRectangle(cornerRadius: 11).fill(Color.red.opacity(0.12)))
+                        .frame(width: 46, height: 46).background(RoundedRectangle(cornerRadius: Theme.control, style: .continuous).fill(Color.red.opacity(0.12)))
                 }.buttonStyle(.plain).accessibilityLabel("Delete download")
             }
         }
         .padding(16)
-        .background(RoundedRectangle(cornerRadius: 20, style: .continuous).fill(Color(uiColor: .secondarySystemGroupedBackground)))
-        .shadow(color: .black.opacity(0.3), radius: 20, y: 8)
+        .background(RoundedRectangle(cornerRadius: 24, style: .continuous).fill(Color(uiColor: .secondarySystemGroupedBackground)))
+        .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).strokeBorder(Theme.hairline, lineWidth: 1))
+        .shadow(color: .black.opacity(0.25), radius: 28, y: 10)
     }
 
     private var installedLine: String {
@@ -6699,8 +6902,9 @@ struct ItemActionPopup: View {
         }
         .padding(.bottom, 8)
         .frame(maxWidth: 360)
-        .background(RoundedRectangle(cornerRadius: 20, style: .continuous).fill(Color(uiColor: .secondarySystemGroupedBackground)))
-        .shadow(color: .black.opacity(0.3), radius: 20, y: 8)
+        .background(RoundedRectangle(cornerRadius: 24, style: .continuous).fill(Color(uiColor: .secondarySystemGroupedBackground)))
+        .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).strokeBorder(Theme.hairline, lineWidth: 1))
+        .shadow(color: .black.opacity(0.25), radius: 28, y: 10)
     }
 
     private func action(_ title: String, _ symbol: String, favourite: Bool, tint: Color = .primary, action: @escaping () -> Void) -> some View {
@@ -6732,8 +6936,9 @@ struct HistoryActionPopup: View {
             row("Close", "xmark", action: close)
         }
         .padding(.bottom, 8).frame(maxWidth: 360)
-        .background(RoundedRectangle(cornerRadius: 20, style: .continuous).fill(Color(uiColor: .secondarySystemGroupedBackground)))
-        .shadow(color: .black.opacity(0.3), radius: 20, y: 8)
+        .background(RoundedRectangle(cornerRadius: 24, style: .continuous).fill(Color(uiColor: .secondarySystemGroupedBackground)))
+        .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).strokeBorder(Theme.hairline, lineWidth: 1))
+        .shadow(color: .black.opacity(0.25), radius: 28, y: 10)
     }
     private func row(_ title: String, _ symbol: String, action: @escaping () -> Void) -> some View {
         Button { Haptics.tap(); action() } label: {
@@ -6774,8 +6979,9 @@ struct ConfirmPopup: View {
             }
         }
         .padding(20).frame(maxWidth: 320)
-        .background(RoundedRectangle(cornerRadius: 20, style: .continuous).fill(Color(uiColor: .secondarySystemGroupedBackground)))
-        .shadow(color: .black.opacity(0.3), radius: 20, y: 8)
+        .background(RoundedRectangle(cornerRadius: 24, style: .continuous).fill(Color(uiColor: .secondarySystemGroupedBackground)))
+        .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).strokeBorder(Theme.hairline, lineWidth: 1))
+        .shadow(color: .black.opacity(0.25), radius: 28, y: 10)
     }
 }
 
@@ -6801,8 +7007,9 @@ struct DeleteConfirmationPopup: View {
             }
         }
         .padding(20).frame(maxWidth: 320)
-        .background(RoundedRectangle(cornerRadius: 20, style: .continuous).fill(Color(uiColor: .secondarySystemGroupedBackground)))
-        .shadow(color: .black.opacity(0.3), radius: 20, y: 8)
+        .background(RoundedRectangle(cornerRadius: 24, style: .continuous).fill(Color(uiColor: .secondarySystemGroupedBackground)))
+        .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).strokeBorder(Theme.hairline, lineWidth: 1))
+        .shadow(color: .black.opacity(0.25), radius: 28, y: 10)
     }
 }
 
@@ -6822,6 +7029,7 @@ struct ExpandableDescription: View {
             Text(attributed)
                 .font(.system(size: 15))
                 .foregroundStyle(.primary)
+                .lineSpacing(2)
                 .lineLimit(expanded ? nil : lineLimit)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -7682,7 +7890,6 @@ struct BrowserHome: View {
     @State private var query = ""
     @State private var results: [GameHit] = []
     @State private var searching = false
-    @FocusState private var searchFocused: Bool
     @AppStorage("browser.recentGames") private var recentJSON = "[]"
     @AppStorage("browser.favGames") private var favJSON = "[]"
     @AppStorage("browser.recentMods") private var viewedJSON = "[]"
@@ -7695,8 +7902,9 @@ struct BrowserHome: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: Theme.gap) {
                 ScrollSpy(onChange: onScroll)
+                PageTitle(title: "Workshop", subtitle: "Find a game, then browse its Workshop.")
                 if let lastPage { continueCard(lastPage) }
                 searchField
                 if !query.trimmingCharacters(in: .whitespaces).isEmpty {
@@ -7708,13 +7916,12 @@ struct BrowserHome: View {
                     if isFirstRun { firstRunCard }
                 }
             }
-            .padding(.horizontal, 15)
-            .padding(.top, 4)
+            .padding(.horizontal, Theme.page)
+            .padding(.top, 10)
             .padding(.bottom, 110)
         }
-        .background(Color(uiColor: .systemGroupedBackground))
+        .background(Theme.pageFill)
         .task(id: query) { await runSearch() }
-        .onAppear { if isFirstRun { searchFocused = true } }
     }
 
     private func runSearch() async {
@@ -7730,31 +7937,7 @@ struct BrowserHome: View {
     }
 
     private var searchField: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 14, weight: .bold))
-                .foregroundStyle(.white)
-                .frame(width: 28, height: 28)
-                .background(Circle().fill(Color.accentColor))
-            TextField("Search for a game", text: $query)
-                .font(.system(size: 16))
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .submitLabel(.search)
-                .focused($searchFocused)
-            if !query.isEmpty {
-                Button { query = "" } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 16)).foregroundStyle(.secondary)
-                        .padding(8).contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Clear search")
-            }
-        }
-        .padding(.leading, 10).padding(.trailing, 6).padding(.vertical, 9)
-        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .shadow(color: .black.opacity(0.05), radius: 8, y: 3)
+        SearchField(placeholder: "Search for a game", text: $query, focusOnAppear: isFirstRun)
     }
 
     private var resultsSection: some View {
@@ -7762,9 +7945,11 @@ struct BrowserHome: View {
             if searching {
                 HStack(spacing: 10) {
                     ProgressView().scaleEffect(0.8)
-                    Text("Searching…").font(.system(size: 13)).foregroundStyle(.secondary)
+                    Text("Searching…").font(Theme.detailFont).foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
                 }
-                .padding(.vertical, 4)
+                .padding(14)
+                .cardSurface(radius: 16)
             } else if results.isEmpty {
                 Text("No games found for \"\(query)\".")
                     .font(.subheadline).foregroundStyle(.secondary)
@@ -7807,12 +7992,13 @@ struct BrowserHome: View {
                 Color.clear
                     .frame(width: 78, height: 78)
                     .overlay(CachedImage(urlString: hit.tiny_image, fill: false, maxPixel: 220).allowsHitTesting(false))
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 MarqueeText(text: hit.name, fontSize: 11, weight: .medium, height: 15,
                             speed: MarqueeSpeed.otherSpeed, active: MarqueeSpeed.otherRunning)
                     .frame(width: 78, alignment: .leading)
             }
-            .padding(6)
-            .background(Color(uiColor: .secondarySystemGroupedBackground), in: UnevenRoundedRectangle(topLeadingRadius: 0, bottomLeadingRadius: 12, bottomTrailingRadius: 12, topTrailingRadius: 0))
+            .padding(7)
+            .chipSurface(radius: 14)
         }
         .buttonStyle(.plain)
     }
@@ -7866,7 +8052,8 @@ struct BrowserHome: View {
                 gameRow(hit)
             }
         }
-        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .background(Theme.cardFill, in: RoundedRectangle(cornerRadius: Theme.card, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: Theme.card, style: .continuous).strokeBorder(Theme.hairline, lineWidth: 1))
     }
 
     private func favouriteTile(_ hit: GameHit) -> some View {
@@ -7877,15 +8064,14 @@ struct BrowserHome: View {
                         .frame(maxWidth: .infinity)
                         .frame(height: 66)
                         .overlay(CachedImage(urlString: hit.tiny_image, fill: true, maxPixel: 300))
-                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                     MarqueeText(text: hit.name, fontSize: 12, weight: .semibold, height: 15,
                                 speed: MarqueeSpeed.otherSpeed, active: MarqueeSpeed.otherRunning)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .padding(8)
+                .padding(9)
                 .frame(maxWidth: .infinity)
-                .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color(uiColor: .secondarySystemGroupedBackground)))
-                .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(Color.primary.opacity(0.06), lineWidth: 1))
+                .chipSurface(radius: 16)
             }
             .buttonStyle(.plain)
             starButton(hit).padding(2)
@@ -7898,14 +8084,14 @@ struct BrowserHome: View {
                 HStack(spacing: 12) {
                     CachedImage(urlString: hit.tiny_image, fill: true, maxPixel: 160)
                         .frame(width: 56, height: 56)
-                        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                     Text(hit.name)
                         .font(.system(size: 15, weight: .semibold)).lineLimit(2)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     Image(systemName: "chevron.right")
                         .font(.system(size: 12, weight: .semibold)).foregroundStyle(.tertiary)
                 }
-                .padding(.leading, 12).padding(.vertical, 10)
+                .padding(.leading, 14).padding(.vertical, 12)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -7943,18 +8129,7 @@ struct BrowserHome: View {
     }
 
     private func sectionHeader(_ title: String, count: Int? = nil) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Text(title.uppercased())
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .kerning(0.4)
-            if let count {
-                Text("\(count)").font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.tertiary)
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 4)
+        SectionTitle(text: title, count: count)
     }
 
     /// What the page is for on a fresh install, in place of one lonely line of grey text.
@@ -7974,27 +8149,27 @@ struct BrowserHome: View {
             Spacer(minLength: 0)
         }
         .padding(14)
-        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .cardSurface()
     }
 
     private func continueCard(_ url: URL) -> some View {
         Button { Haptics.tap(); onOpenURL(url) } label: {
             HStack(spacing: 12) {
                 Image(systemName: "arrow.uturn.forward")
-                    .font(.system(size: 16, weight: .semibold)).foregroundStyle(.secondary)
+                    .font(.system(size: 15, weight: .semibold)).foregroundStyle(Color.accentColor)
                     .frame(width: 36, height: 36)
-                    .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color(uiColor: .tertiarySystemFill)))
+                    .background(Circle().fill(Theme.accentSoft))
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Continue where you left off").font(.system(size: 15, weight: .semibold))
                     Text(url.absoluteString.replacingOccurrences(of: "https://", with: ""))
-                        .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+                        .font(Theme.captionFont).foregroundStyle(.secondary).lineLimit(1)
                 }
                 Spacer(minLength: 0)
                 Image(systemName: "chevron.right")
                     .font(.system(size: 13, weight: .semibold)).foregroundStyle(.tertiary)
             }
-            .padding(18)
-            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .padding(14)
+            .cardSurface()
         }
         .buttonStyle(.plain)
     }
@@ -8075,8 +8250,8 @@ struct WorkshopBrowserView: View {
             addressField
             navButton("house.fill", "Browse home", enabled: true) { showHome = true }
         }
-        .padding(.horizontal, 12).padding(.vertical, 8)
-        .background(Color(uiColor: .systemGroupedBackground))
+        .padding(.horizontal, Theme.page).padding(.vertical, 8)
+        .background(Theme.pageFill)
     }
 
     private var addressText: String {
@@ -8096,9 +8271,9 @@ struct WorkshopBrowserView: View {
                 if isLoading && !copied { ProgressView().scaleEffect(0.7) }
             }
             .frame(maxWidth: .infinity)
-            .frame(height: 36)
+            .frame(height: 38)
             .padding(.horizontal, 10)
-            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color(uiColor: .secondarySystemGroupedBackground)))
+            .chipSurface(radius: 12)
         }
         .buttonStyle(.plain)
         .disabled(showHome || currentURL == nil)
@@ -8118,8 +8293,8 @@ struct WorkshopBrowserView: View {
             Image(systemName: symbol)
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(enabled ? Color.accentColor : Color.secondary.opacity(0.4))
-                .frame(width: 36, height: 36)
-                .background(Circle().fill(Color(uiColor: .secondarySystemGroupedBackground)))
+                .frame(width: 38, height: 38)
+                .chipSurface(radius: 12)
         }
         .buttonStyle(.plain)
         .disabled(!enabled)
