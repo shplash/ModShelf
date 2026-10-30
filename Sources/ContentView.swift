@@ -3760,7 +3760,7 @@ struct AppTabBar: View {
     private var pill: some View {
         let shape = RoundedRectangle(cornerRadius: compact ? 16 : 20, style: .continuous)
         return HStack(spacing: 0) {
-            ForEach(0..<items.count, id: \.self) { i in item(i, compact: compact, wide: true) }
+            ForEach(0..<items.count, id: \.self) { i in item(i, compact: compact, wide: !compact) }
         }
         .frame(height: compact ? 50 : 68)
         .background(shape.fill(Theme.cardFill))
@@ -3774,8 +3774,10 @@ struct AppTabBar: View {
         .animation(.spring(response: 0.32, dampingFraction: 0.85), value: compact)
     }
 
-    private func item(_ i: Int, compact: Bool, wide: Bool) -> some View {
+    private func item(_ i: Int, compact: Bool, wide: Bool,
+                      flushLeft: Bool = false, flushRight: Bool = false) -> some View {
         let on = selected == i
+        let shape = tabItemShape(compact: compact, wide: wide, flushLeft: flushLeft, flushRight: flushRight)
         return Button {
             if selected != i { Haptics.select() }
             onTap(i)
@@ -3791,16 +3793,23 @@ struct AppTabBar: View {
                     .frame(height: compact ? 0 : 12)
             }
             .foregroundStyle(on ? Color.accentColor : Color.secondary)
-            .frame(width: wide ? nil : (compact ? 52 : 64))
+            .frame(width: wide ? nil : (compact ? 70 : 64))
             .frame(maxWidth: wide ? .infinity : nil, maxHeight: .infinity)
-            .background(
-                RoundedRectangle(cornerRadius: wide ? 14 : (compact ? 13 : 16), style: .continuous)
-                    .fill(on ? Theme.accentSoft : Color.clear)
-            )
-            .contentShape(RoundedRectangle(cornerRadius: wide ? 14 : (compact ? 13 : 16), style: .continuous))
+            .background(shape.fill(on ? Theme.accentSoft : Color.clear))
+            .contentShape(shape)
         }
         .buttonStyle(.plain)
         .accessibilityLabel(title(i))
+    }
+
+    /// A tab's highlight: square at the bar's outer edges so it reaches them, rounded in between.
+    private func tabItemShape(compact: Bool, wide: Bool, flushLeft: Bool, flushRight: Bool) -> UnevenRoundedRectangle {
+        let radius: CGFloat = wide ? 14 : 16
+        return UnevenRoundedRectangle(topLeadingRadius: flushLeft ? 0 : radius,
+                                      bottomLeadingRadius: flushLeft ? 0 : radius,
+                                      bottomTrailingRadius: flushRight ? 0 : radius,
+                                      topTrailingRadius: flushRight ? 0 : radius,
+                                      style: .continuous)
     }
 
     private func icon(_ i: Int, size: CGFloat, on: Bool) -> some View {
@@ -3820,7 +3829,10 @@ struct AppTabBar: View {
 
     private var bar: some View {
         HStack(spacing: 0) {
-            ForEach(0..<items.count, id: \.self) { i in item(i, compact: false, wide: true) }
+            ForEach(0..<items.count, id: \.self) { i in
+                item(i, compact: false, wide: true,
+                     flushLeft: i == 0, flushRight: i == items.count - 1)
+            }
         }
         .frame(height: 60)
         .background(Theme.cardFill.ignoresSafeArea(edges: .bottom))
@@ -4160,6 +4172,8 @@ struct ContentView: View {
     @State private var dragOffsetY: CGFloat = 0
     @State private var dragTarget: Int?
     @State private var confirmReorder: ReorderRequest?
+    @State private var moreMenuOpen = false
+    @State private var bannerClearTask: Task<Void, Never>?
 
     /// Space reserved under every tab for the tab bar, so content can always scroll clear of it.
     private var tabBarReserve: CGFloat { tabStyle == "bar" ? 64 : 82 }
@@ -4355,20 +4369,10 @@ struct ContentView: View {
                     if store.operationMessage == message, !store.isExporting { withAnimation { store.operationMessage = "" } }
                 }
             }
-            .onChange(of: store.updateCheckStatus) { message in
-                guard !message.isEmpty else { return }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 6) {
-                    if store.updateCheckStatus == message, !store.isCheckingUpdates {
-                        withAnimation { store.updateCheckStatus = "" }
-                    }
-                }
-            }
-            .onChange(of: store.verifyStatus) { message in
-                guard !message.isEmpty else { return }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 6) {
-                    if store.verifyStatus == message, !store.isVerifyingAll { withAnimation { store.verifyStatus = "" } }
-                }
-            }
+            .onChange(of: store.updateCheckStatus) { _ in scheduleBannerClear() }
+            .onChange(of: store.verifyStatus) { _ in scheduleBannerClear() }
+            .onChange(of: store.isCheckingUpdates) { _ in scheduleBannerClear() }
+            .onChange(of: store.isVerifyingAll) { _ in scheduleBannerClear() }
             .onChange(of: store.library.count) { count in
                 if let g = selectedGame, !installedGameOptions.contains(where: { $0.id == g }) { selectedGame = nil }
                 if let t = selectedTag, !installedTagOptions.contains(t) { selectedTag = nil }
@@ -4397,14 +4401,31 @@ struct ContentView: View {
     }
 
     /// Rebuilds everything the library screen derives from the collection, in one pass.
-    private func rebuildLibraryOptions() {
-        visibleItems = filteredLibrary
+    private func rebuildLibraryOptions() {        visibleItems = filteredLibrary
         installedGameOptions = installedGames
         installedTagOptions = installedTags
         gameCount = Set(store.library.compactMap { $0.appID }).count
         updateCount = store.library.filter { $0.updateAvailable }.count
         favouriteCount = store.library.filter { $0.isFavourite }.count
         problemCount = store.library.filter { $0.status.needsAttention }.count
+    }
+
+    /// The check and validation lines leave together, seven seconds after both have finished.
+    private func scheduleBannerClear() {
+        bannerClearTask?.cancel()
+        guard !store.updateCheckStatus.isEmpty || !store.verifyStatus.isEmpty else { return }
+        bannerClearTask = Task { @MainActor in
+            while !Task.isCancelled && (store.isCheckingUpdates || store.isVerifyingAll) {
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
+            guard !Task.isCancelled else { return }
+            try? await Task.sleep(nanoseconds: 7_000_000_000)
+            guard !Task.isCancelled, !store.isCheckingUpdates, !store.isVerifyingAll else { return }
+            withAnimation {
+                store.updateCheckStatus = ""
+                store.verifyStatus = ""
+            }
+        }
     }
 
     private var mainStack: some View {
@@ -4769,11 +4790,11 @@ struct ContentView: View {
                     if isError {
                         bannerLine("That didn't finish", friendlyError(store.errorMessage), tint: .orange)
                     }
-                    if !verifyLine.isEmpty {
-                        bannerLine("Validating files", verifyLine, tint: .accentColor)
-                    }
                     if !updateLine.isEmpty {
                         bannerLine("Checking for updates", updateLine, tint: .accentColor)
+                    }
+                    if !verifyLine.isEmpty {
+                        bannerLine("Validating files", verifyLine, tint: .accentColor)
                     }
                     if !note.isEmpty {
                         bannerLine("Status", note, tint: .accentColor)
@@ -5726,18 +5747,11 @@ struct ContentView: View {
                     .minimumScaleFactor(0.8)
                 Spacer(minLength: 4)
                 if showingHistory {
-                    circleControl("trash", tint: store.history.isEmpty ? nil : .red) {
-                        requestClearHistory()
-                    }
-                    .disabled(store.history.isEmpty)
-                    Button("Library") { Haptics.tap(); showingHistory = false }
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(Color.accentColor)
+                    circleControl("chevron.backward", active: true) { showingHistory = false }
+                    circleControl("trash", active: true) { requestClearHistory() }
+                        .disabled(store.history.isEmpty)
                 } else {
-                    circleControl("arrow.triangle.2.circlepath", busy: store.isCheckingUpdates || store.isVerifyingAll) {
-                        store.refreshAndVerify()
-                    }
-                    .disabled(store.isCheckingUpdates || store.isVerifyingAll || store.library.isEmpty)
+                    refreshCircle
                     filterCircle
                     moreMenu
                 }
@@ -5755,25 +5769,41 @@ struct ContentView: View {
 
     /// A round, quiet button: grey on grey until it has something to say.
     private func circleControl(_ symbol: String, tint: Color? = nil, active: Bool = false,
-                               busy: Bool = false, action: @escaping () -> Void) -> some View {
+                               action: @escaping () -> Void) -> some View {
         Button {
             Haptics.tap()
             action()
         } label: {
-            ZStack {
-                if busy {
-                    ProgressView().scaleEffect(0.7)
-                } else {
-                    Image(systemName: symbol)
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(active ? Color.accentColor : (tint ?? Color.secondary))
-                }
-            }
-            .frame(width: 40, height: 40)
-            .background(Circle().fill(Theme.insetFill))
-            .contentShape(Circle())
+            Image(systemName: symbol)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(active ? Color.accentColor : (tint ?? Color.secondary))
+                .frame(width: 40, height: 40)
+                .background(Circle().fill(Theme.insetFill))
+                .contentShape(Circle())
         }
         .buttonStyle(.plain)
+    }
+
+    /// Check for updates, then verify the files: the arrow spins while either runs.
+    private var refreshCircle: some View {
+        let busy = store.isCheckingUpdates || store.isVerifyingAll
+        return Button {
+            Haptics.tap()
+            store.refreshAndVerify()
+        } label: {
+            Image(systemName: "arrow.triangle.2.circlepath")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(busy ? Color.accentColor : Color.secondary)
+                .rotationEffect(.degrees(busy ? 360 : 0))
+                .animation(busy ? .linear(duration: 1).repeatForever(autoreverses: false) : .default,
+                           value: busy)
+                .frame(width: 40, height: 40)
+                .background(Circle().fill(Theme.insetFill))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .disabled(busy || store.library.isEmpty)
+        .accessibilityLabel(busy ? "Checking and validating" : "Check for updates and validate files")
     }
 
     private var selectionCircle: some View {
@@ -5797,28 +5827,6 @@ struct ContentView: View {
 
     private var filterCircle: some View {
         Menu {
-            Section("Show") {
-                ForEach(["All", "Updates", "Favourites", "Problems"], id: \.self) { name in
-                    Button {
-                        Haptics.select()
-                        libraryFilter = name
-                    } label: {
-                        if libraryFilter == name { Label(name, systemImage: "checkmark") } else { Text(name) }
-                    }
-                }
-            }
-            Section("Sort by") {
-                ForEach(Array(sortGroups.enumerated()), id: \.offset) { _, group in
-                    ForEach(group, id: \.self) { order in
-                        Button {
-                            Haptics.select()
-                            sortOrder = order
-                        } label: {
-                            if sortOrder == order { Label(order, systemImage: "checkmark") } else { Text(order) }
-                        }
-                    }
-                }
-            }
             if !installedGameOptions.isEmpty {
                 Menu {
                     Button {
@@ -5859,6 +5867,28 @@ struct ContentView: View {
                     }
                 } label: {
                     Label(selectedTag ?? "Tag", systemImage: "tag")
+                }
+            }
+            Section("Show") {
+                ForEach(["All", "Updates", "Favourites", "Problems"], id: \.self) { name in
+                    Button {
+                        Haptics.select()
+                        libraryFilter = name
+                    } label: {
+                        if libraryFilter == name { Label(name, systemImage: "checkmark") } else { Text(name) }
+                    }
+                }
+            }
+            Section("Sort by") {
+                ForEach(Array(sortGroups.enumerated()), id: \.offset) { _, group in
+                    ForEach(group, id: \.self) { order in
+                        Button {
+                            Haptics.select()
+                            sortOrder = order
+                        } label: {
+                            if sortOrder == order { Label(order, systemImage: "checkmark") } else { Text(order) }
+                        }
+                    }
                 }
             }
             if activeFilterCount > 0 {
@@ -5923,7 +5953,6 @@ struct ContentView: View {
                 }
                 .disabled(selection.isEmpty)
             } else {
-                Button { beginSelecting() } label: { Label("Select mods", systemImage: "checkmark.circle") }
                 Button { Haptics.tap(); showingHistory = true } label: {
                     Label("Download history", systemImage: "clock.arrow.circlepath")
                 }
@@ -5947,17 +5976,21 @@ struct ContentView: View {
         } label: {
             Image(systemName: "ellipsis")
                 .font(.system(size: 16, weight: .bold))
-                .foregroundStyle(Color.secondary)
+                .foregroundStyle(moreMenuOpen ? Color.accentColor : Color.secondary)
                 .frame(width: 40, height: 40)
                 .background(Circle().fill(Theme.insetFill))
                 .contentShape(Circle())
+                .simultaneousGesture(TapGesture().onEnded { flashMoreMenu() })
         }
         .accessibilityLabel("More")
     }
 
-    private func beginSelecting() {
-        Haptics.select()
-        withAnimation(.easeOut(duration: 0.18)) { selecting = true }
+    /// The menu has no "is open" callback, so light the icon as it is tapped and fade it back.
+    private func flashMoreMenu() {
+        moreMenuOpen = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) {
+            if moreMenuOpen { withAnimation(.easeOut(duration: 0.2)) { moreMenuOpen = false } }
+        }
     }
 
     private func resetLibraryFilters() {
@@ -6044,9 +6077,10 @@ struct ContentView: View {
     private func favouriteStar(_ item: WorkshopItem, size: CGFloat) -> some View {
         Button { store.toggleFavourite(item) } label: {
             Image(systemName: item.isFavourite ? "star.fill" : "star")
-                .font(.system(size: 13, weight: .bold)).foregroundStyle(.white)
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(item.isFavourite ? Color.accentColor : Color.primary)
                 .frame(width: 29, height: 29)
-                .background(Circle().fill(Color.black.opacity(0.55)))
+                .background(Circle().fill(.ultraThinMaterial))
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
@@ -6055,9 +6089,11 @@ struct ContentView: View {
 
     private func dotsButton(_ item: WorkshopItem, circle: CGFloat) -> some View {
         Button { Haptics.tap(); contextItem = item } label: {
-            Image(systemName: "ellipsis").font(.system(size: 13, weight: .heavy)).foregroundStyle(.white)
+            Image(systemName: "ellipsis")
+                .font(.system(size: 13, weight: .heavy))
+                .foregroundStyle(Color.primary)
                 .frame(width: 29, height: 29)
-                .background(Circle().fill(Color.black.opacity(0.55)))
+                .background(Circle().fill(.ultraThinMaterial))
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
@@ -6093,10 +6129,10 @@ struct ContentView: View {
                         .strokeBorder(Color.accentColor, lineWidth: picked ? 3 : 0))
             }
             .buttonStyle(.plain)
-            .overlay(alignment: .topLeading) {
+            .overlay(alignment: .bottomLeading) {
                 if selecting { selectionBadge(picked).padding(8) } else { favouriteStar(item, size: 15).padding(8) }
             }
-            .overlay(alignment: .topTrailing) {
+            .overlay(alignment: .bottomTrailing) {
                 if !selecting { dotsButton(item, circle: 29).padding(8) }
             }
 
@@ -6133,9 +6169,11 @@ struct ContentView: View {
         .cardSurface(radius: 18)
     }
 
-    private func navCircle(_ symbol: String, _ action: @escaping () -> Void) -> some View {
+    private func navCircle(_ symbol: String, active: Bool = false, action: @escaping () -> Void) -> some View {
         Button { Haptics.tap(); action() } label: {
-            Image(systemName: symbol).font(.system(size: 14, weight: .semibold)).foregroundStyle(Color.accentColor)
+            Image(systemName: symbol)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(active ? Color.accentColor : Color.secondary)
                 .frame(width: 34, height: 34)
                 .background(Circle().fill(Theme.insetFill))
         }
@@ -6181,7 +6219,7 @@ struct ContentView: View {
             .buttonStyle(.plain)
             if !selecting {
                 VStack(spacing: 8) {
-                    navCircle(item.isFavourite ? "star.fill" : "star") { store.toggleFavourite(item) }
+                    navCircle(item.isFavourite ? "star.fill" : "star", active: item.isFavourite) { store.toggleFavourite(item) }
                     navCircle("ellipsis") { contextItem = item }
                 }
             }
