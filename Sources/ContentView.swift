@@ -1042,6 +1042,35 @@ final class WorkshopStore: ObservableObject {
     }
 
     /// Fills in missing game names from Steam and renames the "App <id>" folders that stand for them.
+    /// Mods installed while Steam had no details have no real name and no picture. One quiet pass at
+    /// launch asks again for those, one at a time, and keeps whatever comes back.
+    func fillInMissingDetails() {
+        let waiting = library.filter { ($0.title ?? "").isEmpty || ($0.imageURL ?? "").isEmpty }
+        guard !waiting.isEmpty else { return }
+        Task { @MainActor in
+            for item in waiting {
+                try? await Task.sleep(nanoseconds: 400_000_000)
+                guard let fresh = await SteamMeta.fetch(id: item.id, includePage: false) else { continue }
+                guard let index = library.firstIndex(where: { $0.id == item.id }) else { continue }
+                if let realTitle = WorkshopItem.realTitle(fresh.title, id: item.id) {
+                    library[index].title = realTitle
+                }
+                if !fresh.imageURL.isEmpty { library[index].imageURL = fresh.imageURL }
+                if !fresh.description.isEmpty, (library[index].description ?? "").isEmpty {
+                    library[index].description = fresh.description
+                }
+                if !fresh.tags.isEmpty { library[index].tags = fresh.tags }
+                if fresh.rating != nil { library[index].rating = fresh.rating; library[index].ratingCount = fresh.ratingCount }
+                if let game = fresh.gameName { library[index].gameName = game }
+                if let app = fresh.appID { library[index].appID = app }
+                if fresh.updatedAt > 0, library[index].publishedUpdatedAt == nil {
+                    library[index].publishedUpdatedAt = fresh.updatedAt
+                }
+                saveLibrary()
+            }
+        }
+    }
+
     func resolveGameNames() {
         var apps = Set(library.compactMap { $0.appID })
         for folder in (try? FileManager.default.contentsOfDirectory(atPath: downloadsRoot.path)) ?? [] {
@@ -2823,12 +2852,12 @@ final class WorkshopStore: ObservableObject {
 
     /// An update starts from the stored metadata, so the new version's date is only known once
     /// Workshop is asked. This fills it in and refreshes the info file.
-    private func refreshInstalledMetadata(id: String) {
-        Task { @MainActor in
+    private func refreshInstalledMetadata(id: String) {        Task { @MainActor in
             guard let fresh = await SteamMeta.fetch(id: id, includePage: false) else { return }
             guard let index = library.firstIndex(where: { $0.id == id }) else { return }
             if fresh.updatedAt > 0 { library[index].publishedUpdatedAt = fresh.updatedAt }
             if let realTitle = WorkshopItem.realTitle(fresh.title, id: id) { library[index].title = realTitle }
+            if !fresh.imageURL.isEmpty { library[index].imageURL = fresh.imageURL }
             if !fresh.tags.isEmpty { library[index].tags = fresh.tags }
             if fresh.rating != nil { library[index].rating = fresh.rating; library[index].ratingCount = fresh.ratingCount }
             if let game = fresh.gameName { library[index].gameName = game }
@@ -3335,6 +3364,8 @@ final class WorkshopStore: ObservableObject {
             if UserDefaults.standard.object(forKey: "options.autoCheck") as? Bool ?? true {
                 self.checkAllUpdates(silent: true)
             }
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            self.fillInMissingDetails()
         }
     }
 
