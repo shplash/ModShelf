@@ -3601,47 +3601,16 @@ enum Theme {
     static let captionFont = Font.system(size: 12)
 }
 
-/// Whether the app draws its cards and bars as frosted glass. Set once at the root.
-private struct GlassSurfacesKey: EnvironmentKey {
-    static let defaultValue = false
-}
-
-extension EnvironmentValues {
-    var glassSurfaces: Bool {
-        get { self[GlassSurfacesKey.self] }
-        set { self[GlassSurfacesKey.self] = newValue }
-    }
-}
-
-extension View {
-    func glassSurfaces(_ on: Bool) -> some View { environment(\.glassSurfaces, on) }
-
-    /// Fills behind a shape: solid normally, a frosted tint when glass is switched on.
-    func surfaceFill<S: Shape>(_ shape: S, fill: Color, glass: Bool) -> some View {
-        background {
-            if glass {
-                ZStack {
-                    shape.fill(.ultraThinMaterial)
-                    shape.fill(fill.opacity(0.62))
-                }
-            } else {
-                shape.fill(fill)
-            }
-        }
-    }
-}
-
 /// Grouped background with a rounded outline. No drop shadow: depth comes from the fill.
 struct CardSurface: ViewModifier {
-    @Environment(\.glassSurfaces) private var glass
     var radius: CGFloat = Theme.card
     var fill: Color = Theme.cardFill
     func body(content: Content) -> some View {
-        let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
-        return content
-            .surfaceFill(shape, fill: fill, glass: glass)
+        content
+            .background(fill, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
             .overlay(
-                shape.strokeBorder(glass ? Color.white.opacity(0.16) : Theme.hairline, lineWidth: 1)
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .strokeBorder(Theme.hairline, lineWidth: 1)
             )
     }
 }
@@ -3724,30 +3693,6 @@ struct SectionTitle: View {
     }
 }
 
-/// A fixed-width control in the library's filter strip: a symbol over a value, so the row keeps
-/// its shape when the value under it changes.
-struct LibraryChip: View {
-    let symbol: String
-    let value: String
-    var active = false
-
-    var body: some View {
-        VStack(spacing: 3) {
-            Image(systemName: symbol)
-                .font(.system(size: 12, weight: .semibold))
-            Text(value)
-                .font(.system(size: 10, weight: .medium))
-                .lineLimit(1)
-                .minimumScaleFactor(0.6)
-        }
-        .foregroundStyle(active ? Color.accentColor : Color.secondary)
-        .frame(maxWidth: .infinity)
-        .frame(height: 40)
-        .chipSurface(radius: 12)
-        .accessibilityLabel(value)
-    }
-}
-
 /// One search box, used by the library and the browser.
 struct SearchField: View {
     let placeholder: String
@@ -3789,33 +3734,34 @@ struct AppTabBar: View {
     /// The first tab says "Queue" while a batch is running.
     var firstTitle: String = "Download"
     var onTap: (Int) -> Void = { _ in }
-    @Environment(\.glassSurfaces) private var glass
     private let items: [(String, String)] = [("Download", "arrow.down.circle.fill"), ("Workshop", "safari.fill"),
                                              ("Library", "square.grid.2x2.fill"), ("Options", "gearshape.fill")]
 
     private func title(_ i: Int) -> String { i == 0 ? firstTitle : items[i].0 }
+    private var compact: Bool { collapsed && style == "pill" }
 
     var body: some View {
         if style == "bar" { bar } else { pill }
     }
 
     private var pill: some View {
-        let compact = collapsed && style == "pill"
-        return HStack(spacing: compact ? 2 : 4) {
-            ForEach(0..<items.count, id: \.self) { i in pillButton(i, compact: compact) }
+        let shape = RoundedRectangle(cornerRadius: compact ? 16 : 20, style: .continuous)
+        return HStack(spacing: 4) {
+            ForEach(0..<items.count, id: \.self) { i in item(i, compact: compact) }
         }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 6)
-        .surfaceFill(Capsule(style: .continuous), fill: Theme.cardFill, glass: glass)
-        .overlay(Capsule(style: .continuous).strokeBorder(glass ? Color.white.opacity(0.16) : Theme.hairline, lineWidth: 1))
-        .shadow(color: .black.opacity(0.16), radius: 18, y: 6)
-        .padding(.top, 4)
+        .padding(.horizontal, 4)
+        .frame(height: compact ? 46 : 64)
+        .background(shape.fill(Theme.cardFill))
+        .clipShape(shape)
+        .overlay(shape.strokeBorder(Theme.hairline, lineWidth: 1))
+        .shadow(color: .black.opacity(0.12), radius: 14, y: 5)
+        .padding(.top, 6)
         .padding(.bottom, 2)
         .frame(maxWidth: .infinity)
         .animation(.spring(response: 0.32, dampingFraction: 0.85), value: compact)
     }
 
-    private func pillButton(_ i: Int, compact: Bool) -> some View {
+    private func item(_ i: Int, compact: Bool) -> some View {
         let on = selected == i
         return Button {
             if selected != i { Haptics.select() }
@@ -3823,22 +3769,21 @@ struct AppTabBar: View {
             selected = i
         } label: {
             VStack(spacing: compact ? 0 : 3) {
-                icon(i, size: compact ? 20 : 21, on: on)
+                icon(i, size: compact ? 21 : 20, on: on)
                 Text(title(i))
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(size: 10, weight: .semibold))
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
                     .opacity(compact ? 0 : 1)
-                    .frame(height: compact ? 0 : 13)
+                    .frame(height: compact ? 0 : 12)
             }
-            .foregroundStyle(on ? Color.white : Color.secondary)
-            .frame(width: compact ? 52 : 76, height: compact ? 40 : 52)
+            .foregroundStyle(on ? Color.accentColor : Color.secondary)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(on ? Color.accentColor : Color.clear)
+                RoundedRectangle(cornerRadius: compact ? 13 : 16, style: .continuous)
+                    .fill(on ? Theme.accentSoft : Color.clear)
             )
-            .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .animation(.spring(response: 0.3, dampingFraction: 0.8), value: on)
+            .contentShape(RoundedRectangle(cornerRadius: compact ? 13 : 16, style: .continuous))
         }
         .buttonStyle(.plain)
         .accessibilityLabel(title(i))
@@ -3846,13 +3791,13 @@ struct AppTabBar: View {
 
     private func icon(_ i: Int, size: CGFloat, on: Bool) -> some View {
         ZStack(alignment: .topTrailing) {
-            Image(systemName: items[i].1).font(.system(size: size, weight: .semibold))
+            Image(systemName: items[i].1)
+                .font(.system(size: size, weight: on ? .bold : .semibold))
             if i == 2 && libraryBadge {
-                // Blue update badge; scaled down when the pill is folded.
                 Circle()
-                    .fill(on ? Color.white : Color.accentColor)
-                    .frame(width: 7, height: 7)
-                    .overlay(Circle().stroke(on ? Color.accentColor : Theme.cardFill, lineWidth: 1.5))
+                    .fill(Color.accentColor)
+                    .frame(width: 6, height: 6)
+                    .overlay(Circle().stroke(Theme.cardFill, lineWidth: 1.5))
                     .offset(x: 3, y: -1)
                     .accessibilityLabel("Updates available")
             }
@@ -3861,41 +3806,11 @@ struct AppTabBar: View {
 
     private var bar: some View {
         HStack(spacing: 4) {
-            ForEach(0..<items.count, id: \.self) { i in
-                Button {
-                    if selected != i { Haptics.select() }
-                    onTap(i)
-                    selected = i
-                } label: {
-                    VStack(spacing: 3) {
-                        icon(i, size: 21, on: selected == i)
-                        Text(title(i)).font(.system(size: 11, weight: .semibold)).lineLimit(1)
-                    }
-                    .foregroundStyle(selected == i ? Color.accentColor : Color.secondary)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 6)
-                    .background(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .fill(selected == i ? Theme.accentSoft : Color.clear)
-                    )
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-            }
+            ForEach(0..<items.count, id: \.self) { i in item(i, compact: false) }
         }
-        .padding(.horizontal, 8)
-        .padding(.top, 4)
-        .background {
-            if glass {
-                ZStack {
-                    Rectangle().fill(.ultraThinMaterial)
-                    Rectangle().fill(Theme.cardFill.opacity(0.62))
-                }
-                .ignoresSafeArea(edges: .bottom)
-            } else {
-                Theme.cardFill.ignoresSafeArea(edges: .bottom)
-            }
-        }
+        .padding(.horizontal, 6)
+        .frame(height: 64)
+        .background(Theme.cardFill.ignoresSafeArea(edges: .bottom))
         .overlay(alignment: .top) { Rectangle().fill(Theme.hairline).frame(height: 0.5) }
     }
 }
@@ -4087,25 +4002,6 @@ final class MarqueeUIView: UIView {
     }
 }
 
-/// Three dots that ripple while mods are selected, so the actions button waves instead of sitting still.
-struct SelectionWaveDots: View {
-    var body: some View {
-        TimelineView(.animation(minimumInterval: 0.08, paused: false)) { timeline in
-            let t = timeline.date.timeIntervalSinceReferenceDate
-            HStack(spacing: 3) {
-                ForEach(0..<3, id: \.self) { index in
-                    Circle()
-                        .fill(Color.accentColor)
-                        .frame(width: 4, height: 4)
-                        .offset(y: sin(t * 5 - Double(index) * 0.8) * 2.2)
-                }
-            }
-            .frame(width: 36, height: 36)
-        }
-        .accessibilityLabel("Selection actions")
-    }
-}
-
 /// A word followed by an ellipsis that grows and resets, so "Downloading" reads as active.
 struct DottedLabel: View {
     let text: String
@@ -4251,10 +4147,10 @@ struct ContentView: View {
     @State private var dragOffsetY: CGFloat = 0
     @State private var dragTarget: Int?
     @State private var confirmReorder: ReorderRequest?
-    @AppStorage("options.glass") private var glassSurfacesOn = false
+    @State private var showingFilters = false
 
     /// Space reserved under every tab for the tab bar, so content can always scroll clear of it.
-    private var tabBarReserve: CGFloat { tabStyle == "bar" ? 84 : 100 }
+    private var tabBarReserve: CGFloat { tabStyle == "bar" ? 78 : 86 }
 
     private let sortGroups: [[String]] = [
         ["Recently added", "Recently updated", "Oldest added"],
@@ -4401,7 +4297,6 @@ struct ContentView: View {
             overlayDialogs
             overlayMedia
         }
-        .glassSurfaces(glassSurfacesOn)
         .sheet(isPresented: $store.showLogin) { loginSheet.presentationDetents([.medium, .large]) }
         .sheet(isPresented: $showDeveloperMenu) { DeveloperMenuView(store: store) }
         .sheet(isPresented: $showShare, onDismiss: {
@@ -5788,101 +5683,156 @@ struct ContentView: View {
     private var libraryView: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                PageTitle(title: showingHistory ? "History" : "Library", subtitle: librarySubtitle)
-                    .padding(.horizontal, Theme.page)
-                    .padding(.bottom, 8)
-                libraryBar
+                libraryHeaderBar
+                libraryToolbar
                 if showingHistory { historyContent } else { libraryBody }
             }
             .background(Theme.pageFill)
             .toolbar(.hidden, for: .navigationBar)
+            .sheet(isPresented: $showingFilters) {
+                LibraryFiltersSheet(sortOrder: $sortOrder,
+                                    filter: $libraryFilter,
+                                    selectedGame: $selectedGame,
+                                    selectedTag: $selectedTag,
+                                    games: installedGameOptions,
+                                    tags: installedTagOptions,
+                                    sortGroups: sortGroups)
+            }
         }
+    }
+
+    /// Title, a line that says what is showing, and the one contextual button on the right.
+    private var libraryHeaderBar: some View {
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(showingHistory ? "History" : "Library")
+                    .font(Theme.titleFont)
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                Text(librarySubtitle)
+                    .font(Theme.subtitleFont)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+            libraryHeaderAction
+        }
+        .padding(.horizontal, Theme.page)
+        .padding(.top, 8)
+        .padding(.bottom, 10)
+        .accessibilityElement(children: .contain)
+    }
+
+    @ViewBuilder private var libraryHeaderAction: some View {
+        if showingHistory {
+            Button { Haptics.tap(); showingHistory = false } label: {
+                libraryHeaderLabel("Close", symbol: "xmark")
+            }
+            .buttonStyle(.plain)
+        } else if selecting {
+            Button {
+                Haptics.tap()
+                withAnimation(.easeOut(duration: 0.18)) {
+                    selecting = false
+                    selection.removeAll()
+                }
+            } label: {
+                libraryHeaderLabel("Done", symbol: "checkmark")
+            }
+            .buttonStyle(.plain)
+        } else {
+            Button { Haptics.tap(); showingHistory = true } label: {
+                libraryHeaderLabel("History", symbol: "clock.arrow.circlepath")
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private func libraryHeaderLabel(_ title: String, symbol: String) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: symbol).font(.system(size: 12, weight: .semibold))
+            Text(title).font(.system(size: 13, weight: .semibold))
+        }
+        .foregroundStyle(Color.accentColor)
+        .padding(.horizontal, 12)
+        .frame(height: 34)
+        .background(Capsule().fill(Theme.accentSoft))
+        .contentShape(Capsule())
+        .accessibilityLabel(title)
     }
 
     private var librarySubtitle: String {
         if selecting { return "\(selection.count) selected" }
         if showingHistory {
             let failed = store.history.filter { $0.result == "Failed" }.count
-            return "\(store.history.count) attempts · \(failed) failed"
+            return "\(store.history.count) attempt\(store.history.count == 1 ? "" : "s") · \(failed) failed"
         }
-        let n = store.library.count
-        return "\(n) mod\(n == 1 ? "" : "s") · \(Fmt.bytes(store.libraryStorageBytes))"
+        let total = store.library.count
+        let shown = visibleItems.count
+        var parts: [String] = []
+        if shown == total {
+            parts.append("\(total) mod\(total == 1 ? "" : "s")")
+        } else {
+            parts.append("\(shown) of \(total)")
+        }
+        parts.append(Fmt.bytes(store.libraryStorageBytes))
+        if libraryFilter != "All" { parts.append(libraryFilter) }
+        if let game = selectedGameName { parts.append(game) }
+        if let tag = selectedTag { parts.append(tag) }
+        return parts.joined(separator: " · ")
     }
 
-    private func iconLabel(_ symbol: String, spinning: Bool = false, waving: Bool = false) -> some View {
-        Group {
-            if spinning {
-                ProgressView()
-            } else if waving {
-                SelectionWaveDots()
-            } else {
-                Image(systemName: symbol).font(.system(size: 16, weight: .semibold)).foregroundStyle(Color.accentColor)
-            }
-        }
-        .frame(width: 36, height: 36)
-        .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(Color.accentColor.opacity(0.14)))
+    /// How many of the library's filters are narrowing the list right now.
+    private var activeFilterCount: Int {
+        var count = 0
+        if libraryFilter != "All" { count += 1 }
+        if selectedGame != nil { count += 1 }
+        if selectedTag != nil { count += 1 }
+        return count
     }
 
-    private var libraryBar: some View {
-        VStack(spacing: 8) {
+    private var libraryToolbar: some View {
+        HStack(spacing: 8) {
+            librarySearchField
             if showingHistory {
-                HStack(spacing: 8) {
-                    librarySearchField
-                    libraryIconTile("trash") { if confirmDelete { confirmClearHistory = true } else { store.clearHistory() } }
-                        .disabled(store.history.isEmpty)
-                        .opacity(store.history.isEmpty ? 0.5 : 1)
-                    libraryIconTile("xmark") { showingHistory = false }
-                }
+                libraryIconButton("trash") { if confirmDelete { confirmClearHistory = true } else { store.clearHistory() } }
+                    .disabled(store.history.isEmpty)
+                    .opacity(store.history.isEmpty ? 0.45 : 1)
             } else {
-                librarySearchField
-                HStack(spacing: 8) {
-                    libraryAction("arrow.clockwise", "Updates", spinning: store.isCheckingUpdates) { store.checkAllUpdates() }
-                        .disabled(store.isCheckingUpdates)
-                    libraryAction("checkmark.shield", "Verify", spinning: store.isVerifyingAll) { store.verifyAllFiles() }
-                        .disabled(store.isVerifyingAll)
-                    selectionAction
-                    libraryAction("clock.arrow.circlepath", "History") { showingHistory = true }
-                    moreMenu
-                }
-                HStack(spacing: 8) {
-                    sortMenu.frame(maxWidth: .infinity)
-                    filterMenu.frame(maxWidth: .infinity)
-                    if !installedGameOptions.isEmpty { gameFilterMenu.frame(maxWidth: .infinity) }
-                    if !installedTagOptions.isEmpty { tagFilterMenu.frame(maxWidth: .infinity) }
-                }
+                libraryFilterButton
+                moreMenu
             }
         }
-        .padding(.horizontal, Theme.page).padding(.top, 2).padding(.bottom, 10)
+        .padding(.horizontal, Theme.page)
+        .padding(.bottom, 12)
     }
 
-    /// Turns selection on and off; the same tile reads "Done" while mods can be picked.
-    private var selectionAction: some View {
+    private var libraryFilterButton: some View {
         Button {
-            Haptics.select()
-            withAnimation(.easeOut(duration: 0.18)) {
-                selecting.toggle()
-                if !selecting { selection.removeAll() }
-            }
+            Haptics.tap()
+            showingFilters = true
         } label: {
-            VStack(spacing: 3) {
-                Image(systemName: selecting ? "checkmark.circle.fill" : "checkmark.circle")
+            ZStack(alignment: .topTrailing) {
+                Image(systemName: "line.3.horizontal.decrease")
                     .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(selecting ? Color.white : Color.accentColor)
-                    .frame(height: 17)
-                Text(selecting ? "Done" : "Select")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(selecting ? Color.white : Color.secondary)
-                    .lineLimit(1)
+                    .foregroundStyle(activeFilterCount > 0 ? Color.accentColor : Color.secondary)
+                    .frame(width: 44, height: 40)
+                    .chipSurface()
+                if activeFilterCount > 0 {
+                    Circle()
+                        .fill(Color.accentColor)
+                        .frame(width: 7, height: 7)
+                        .overlay(Circle().stroke(Theme.cardFill, lineWidth: 1.5))
+                        .offset(x: -6, y: 6)
+                }
             }
-            .frame(maxWidth: .infinity)
-            .frame(height: 52)
-            .chipSurface(radius: 16, fill: selecting ? Color.accentColor : Theme.cardFill)
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(selecting ? "Finish selecting" : "Select mods")
+        .accessibilityLabel(activeFilterCount > 0 ? "Filters, \(activeFilterCount) active" : "Filters")
     }
 
-    private func libraryIconTile(_ symbol: String, action: @escaping () -> Void) -> some View {
+    private func libraryIconButton(_ symbol: String, action: @escaping () -> Void) -> some View {
         Button { Haptics.tap(); action() } label: {
             Image(systemName: symbol)
                 .font(.system(size: 14, weight: .semibold))
@@ -5891,77 +5841,6 @@ struct ContentView: View {
                 .chipSurface()
         }
         .buttonStyle(.plain)
-    }
-
-    private func libraryAction(_ symbol: String, _ label: String, spinning: Bool = false, action: @escaping () -> Void) -> some View {
-        Button {
-            Haptics.tap(); action()
-        } label: {
-            libraryActionLabel(symbol, label, spinning: spinning)
-        }
-        .buttonStyle(.plain)
-    }
-
-    private func libraryActionLabel(_ symbol: String, _ label: String, spinning: Bool = false) -> some View {
-        VStack(spacing: 3) {
-            Group {
-                if spinning {
-                    ProgressView().scaleEffect(0.75)
-                } else {
-                    Image(systemName: symbol)
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(Color.accentColor)
-                }
-            }
-            .frame(height: 17)
-            Text(label)
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-        }
-        .frame(maxWidth: .infinity)
-        .frame(height: 52)
-        .chipSurface(radius: 16)
-    }
-
-    private func filterSymbol(_ filter: String) -> String {
-        switch filter {
-        case "Updates": return "arrow.down.circle"
-        case "Favourites": return "star.fill"
-        case "Problems": return "exclamationmark.triangle"
-        default: return "line.3.horizontal.decrease.circle"
-        }
-    }
-
-    private var filterMenu: some View {
-        Menu {
-            ForEach(["All", "Updates", "Favourites", "Problems"], id: \.self) { name in
-                Button {
-                    Haptics.select(); libraryFilter = name
-                } label: {
-                    if libraryFilter == name { Label(name, systemImage: "checkmark") } else { Text(name) }
-                }
-            }
-        } label: {
-            LibraryChip(symbol: filterSymbol(libraryFilter), value: libraryFilter, active: libraryFilter != "All")
-        }
-    }
-
-    private var sortMenu: some View {
-        Menu {
-            ForEach(Array(sortGroups.enumerated()), id: \.offset) { index, group in
-                if index > 0 { Divider() }
-                ForEach(group, id: \.self) { order in
-                    Button {
-                        Haptics.select(); sortOrder = order
-                    } label: {
-                        if order == sortOrder { Label(order, systemImage: "checkmark") } else { Text(order) }
-                    }
-                }
-            }
-        } label: {
-            LibraryChip(symbol: "arrow.up.arrow.down", value: sortOrder, active: sortOrder != "Recently added")
-        }
     }
 
     private var moreMenu: some View {
@@ -5979,6 +5858,12 @@ struct ContentView: View {
                 }
                 .disabled(selection.isEmpty)
             } else {
+                Button { store.checkAllUpdates() } label: { Label("Check for updates", systemImage: "arrow.clockwise") }
+                    .disabled(store.isCheckingUpdates)
+                Button { store.verifyAllFiles() } label: { Label("Verify files", systemImage: "checkmark.shield") }
+                    .disabled(store.isVerifyingAll)
+                Button { beginSelecting() } label: { Label("Select mods", systemImage: "checkmark.circle") }
+                Divider()
                 let pending = store.library.filter { $0.updateAvailable }.count
                 Button { store.updateAll(); selectedTab = 0 } label: { Label("Update all (\(pending))", systemImage: "arrow.down.circle") }
                     .disabled(pending == 0 || store.isBusy)
@@ -5996,8 +5881,17 @@ struct ContentView: View {
                 .disabled(store.library.isEmpty)
             }
         } label: {
-            libraryActionLabel("ellipsis", "More")
+            Image(systemName: "ellipsis")
+                .font(.system(size: 16, weight: .bold))
+                .foregroundStyle(Color.secondary)
+                .frame(width: 44, height: 40)
+                .chipSurface()
         }
+    }
+
+    private func beginSelecting() {
+        Haptics.select()
+        withAnimation(.easeOut(duration: 0.18)) { selecting = true }
     }
 
     private var librarySearchField: some View {
@@ -6018,40 +5912,6 @@ struct ContentView: View {
             } else {
                 listContent(items)
             }
-        }
-    }
-
-    private var gameFilterMenu: some View {
-        Menu {
-            Button { Haptics.select(); selectedGame = nil; selectedTag = nil } label: {
-                if selectedGame == nil { Label("All games", systemImage: "checkmark") } else { Text("All games") }
-            }
-            Divider()
-            ForEach(installedGameOptions, id: \.id) { game in
-                Button { Haptics.select(); selectedGame = game.id; selectedTag = nil } label: {
-                    if selectedGame == game.id { Label(game.name, systemImage: "checkmark") } else { Text(game.name) }
-                }
-            }
-        } label: {
-            LibraryChip(symbol: "gamecontroller.fill",
-                        value: selectedGameName ?? "All",
-                        active: selectedGame != nil)
-        }
-    }
-
-    private var tagFilterMenu: some View {
-        Menu {
-            Button { Haptics.select(); selectedTag = nil } label: {
-                if selectedTag == nil { Label("All tags", systemImage: "checkmark") } else { Text("All tags") }
-            }
-            Divider()
-            ForEach(installedTagOptions, id: \.self) { tag in
-                Button { Haptics.select(); selectedTag = tag } label: {
-                    if selectedTag == tag { Label(tag, systemImage: "checkmark") } else { Text(tag) }
-                }
-            }
-        } label: {
-            LibraryChip(symbol: "tag.fill", value: selectedTag ?? "All", active: selectedTag != nil)
         }
     }
 
@@ -6449,8 +6309,6 @@ struct ContentView: View {
                 toggleRow("Compact library grid", symbol: "square.grid.2x2", isOn: $compactLibrary)
                 divider
                 toggleRow("Show Workshop IDs", symbol: "number", isOn: $showIDs)
-                divider
-                toggleRow("Glass surfaces", symbol: "rectangle.on.rectangle", isOn: $glassSurfacesOn)
                 divider
                 toggleRow("Haptic feedback", symbol: "hand.tap", isOn: $haptics)
                 divider
@@ -8726,5 +8584,95 @@ struct DevLogView: View {
                 .disabled(store.runtimeLog.isEmpty)
             }
         }
+    }
+}
+/// Every way of narrowing the library in one sheet, instead of a strip of chips on the page.
+struct LibraryFiltersSheet: View {
+    @Binding var sortOrder: String
+    @Binding var filter: String
+    @Binding var selectedGame: String?
+    @Binding var selectedTag: String?
+    let games: [(id: String, name: String)]
+    let tags: [String]
+    let sortGroups: [[String]]
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("Show") {
+                    choice("All", on: filter == "All") { filter = "All" }
+                    choice("Updates", on: filter == "Updates") { filter = "Updates" }
+                    choice("Favourites", on: filter == "Favourites") { filter = "Favourites" }
+                    choice("Problems", on: filter == "Problems") { filter = "Problems" }
+                }
+
+                Section("Sort by") {
+                    ForEach(Array(sortGroups.enumerated()), id: \.offset) { _, group in
+                        ForEach(group, id: \.self) { order in
+                            choice(order, on: sortOrder == order) { sortOrder = order }
+                        }
+                    }
+                }
+
+                if !games.isEmpty {
+                    Section("Game") {
+                        choice("All games", on: selectedGame == nil) {
+                            selectedGame = nil
+                            selectedTag = nil
+                        }
+                        ForEach(games, id: \.id) { game in
+                            choice(game.name, on: selectedGame == game.id) {
+                                selectedGame = game.id
+                                selectedTag = nil
+                            }
+                        }
+                    }
+                }
+
+                if !tags.isEmpty {
+                    Section("Tag") {
+                        choice("All tags", on: selectedTag == nil) { selectedTag = nil }
+                        ForEach(tags, id: \.self) { tag in
+                            choice(tag, on: selectedTag == tag) { selectedTag = tag }
+                        }
+                    }
+                }
+
+                Section {
+                    Button("Reset filters", role: .destructive) {
+                        Haptics.tap()
+                        filter = "All"
+                        selectedGame = nil
+                        selectedTag = nil
+                        sortOrder = "Recently added"
+                    }
+                }
+            }
+            .navigationTitle("Filters")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+            }
+        }
+    }
+
+    private func choice(_ title: String, on: Bool, action: @escaping () -> Void) -> some View {
+        Button {
+            Haptics.select()
+            action()
+        } label: {
+            HStack {
+                Text(title)
+                Spacer(minLength: 8)
+                if on {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(Color.accentColor)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
