@@ -3702,6 +3702,11 @@ enum Theme {
     static let rowFont = Font.system(size: 16)
     static let detailFont = Font.system(size: 13)
     static let captionFont = Font.system(size: 12)
+
+    /// A picture's corner radius, keeping the compact grid's proportions at any size.
+    static func imageRadius(_ side: CGFloat) -> CGFloat {
+        max(5, (side * 0.08).rounded())
+    }
 }
 
 /// Grouped background with a rounded outline. No drop shadow: depth comes from the fill.
@@ -4299,6 +4304,7 @@ struct ContentView: View {
     @State private var dragOffsetY: CGFloat = 0
     @State private var dragTarget: Int?
     @State private var confirmReorder: ReorderRequest?
+    @State private var keyboardDragSeen = false
     @State private var showingFilterPopover = false
     @AppStorage("options.appUpdateNotice") private var appUpdateNoticeOn = true
     @State private var bannerClearTask: Task<Void, Never>?
@@ -4554,6 +4560,16 @@ struct ContentView: View {
             if !store.showLogin { errorBanner }
             tabContent
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                // A downward drag anywhere on the tab puts the keyboard away, not only inside a list.
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 12)
+                        .onChanged { _ in
+                            guard !keyboardDragSeen else { return }
+                            keyboardDragSeen = true
+                            dismissKeyboard()
+                        }
+                        .onEnded { _ in keyboardDragSeen = false }
+                )
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Theme.pageFill.ignoresSafeArea())
@@ -6362,8 +6378,8 @@ struct ContentView: View {
                 HStack(spacing: 12) {
                     Color.clear.frame(width: 84, height: 84)
                         .overlay(CachedImage(urlString: item.imageURL, fill: true, maxPixel: 300).allowsHitTesting(false))
-                        .clipShape(RoundedRectangle(cornerRadius: Theme.control, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: Theme.control, style: .continuous)
+                        .clipShape(RoundedRectangle(cornerRadius: Theme.imageRadius(84), style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: Theme.imageRadius(84), style: .continuous)
                             .strokeBorder(Color.accentColor, lineWidth: picked ? 3 : 0))
                     VStack(alignment: .leading, spacing: 4) {
                         MarqueeText(text: item.displayTitle, fontSize: 15, weight: .semibold, height: 19,
@@ -6454,7 +6470,7 @@ struct ContentView: View {
         return HStack(alignment: .center, spacing: 12) {
             Color.clear.frame(width: 84, height: 84)
                 .overlay(CachedImage(urlString: record.imageURL, fill: true, maxPixel: 300))
-                .clipShape(RoundedRectangle(cornerRadius: Theme.control, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: Theme.imageRadius(84), style: .continuous))
             VStack(alignment: .leading, spacing: 4) {
                 MarqueeText(text: record.title, fontSize: 15, weight: .semibold, height: 19,
                             speed: MarqueeSpeed.otherSpeed, active: MarqueeSpeed.otherRunning)
@@ -6538,6 +6554,7 @@ struct ContentView: View {
             .coordinateSpace(name: "scroll")
             .background(Theme.pageFill)
             .toolbar(.hidden, for: .navigationBar)
+            .scrollDismissesKeyboard(.interactively)
         }
     }
 
@@ -6930,6 +6947,7 @@ struct ContentView: View {
             }
             .background(Theme.pageFill)
             .onDisappear { store.loginError = "" }
+            .scrollDismissesKeyboard(.interactively)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Close") { store.showLogin = false } }
             }
@@ -6965,7 +6983,7 @@ struct ItemDetailPopup: View {
                 // Artwork with the text block matched to its height.
                 CachedImage(urlString: item.imageURL, fill: true, maxPixel: 400)
                     .frame(width: 108, height: 108)
-                    .clipShape(RoundedRectangle(cornerRadius: Theme.control, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.imageRadius(108), style: .continuous))
                 VStack(alignment: .leading, spacing: 3) {
                     Text(item.displayTitle).font(.headline).lineLimit(2)
                     RatingLine(rating: item.rating, count: item.ratingCount, size: 13)
@@ -8112,6 +8130,7 @@ struct BrowserHome: View {
         }
         .background(Theme.pageFill)
         .task(id: query) { await runSearch() }
+        .scrollDismissesKeyboard(.interactively)
     }
 
     private func runSearch() async {
@@ -8182,7 +8201,7 @@ struct BrowserHome: View {
                 Color.clear
                     .frame(width: 78, height: 78)
                     .overlay(CachedImage(urlString: hit.tiny_image, fill: false, maxPixel: 220).allowsHitTesting(false))
-                    .clipShape(RoundedRectangle(cornerRadius: Theme.control, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.imageRadius(78), style: .continuous))
                 MarqueeText(text: hit.name, fontSize: 11, weight: .medium, height: 15,
                             speed: MarqueeSpeed.otherSpeed, active: MarqueeSpeed.otherRunning)
                     .frame(width: 78, alignment: .leading)
@@ -8218,7 +8237,7 @@ struct BrowserHome: View {
                     .padding(8)
             }
             .frame(maxWidth: .infinity)
-            .clipShape(RoundedRectangle(cornerRadius: Theme.control, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: Theme.imageRadius(88), style: .continuous))
             .overlay(alignment: .topTrailing) { starButton(hit).padding(1) }
         }
         .buttonStyle(.plain)
@@ -8254,7 +8273,7 @@ struct BrowserHome: View {
                         .frame(maxWidth: .infinity)
                         .frame(height: 66)
                         .overlay(CachedImage(urlString: hit.tiny_image, fill: true, maxPixel: 300))
-                        .clipShape(RoundedRectangle(cornerRadius: Theme.control, style: .continuous))
+                        .clipShape(RoundedRectangle(cornerRadius: Theme.imageRadius(66), style: .continuous))
                     MarqueeText(text: hit.name, fontSize: 12, weight: .semibold, height: 15,
                                 speed: MarqueeSpeed.otherSpeed, active: MarqueeSpeed.otherRunning)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -8274,7 +8293,7 @@ struct BrowserHome: View {
                 HStack(spacing: 12) {
                     CachedImage(urlString: hit.tiny_image, fill: true, maxPixel: 160)
                         .frame(width: 56, height: 56)
-                        .clipShape(RoundedRectangle(cornerRadius: Theme.control, style: .continuous))
+                        .clipShape(RoundedRectangle(cornerRadius: Theme.imageRadius(56), style: .continuous))
                     Text(hit.name)
                         .font(.system(size: 15, weight: .semibold)).lineLimit(2)
                         .frame(maxWidth: .infinity, alignment: .leading)
