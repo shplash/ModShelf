@@ -3775,8 +3775,8 @@ struct TabHeader: View {
                 Text(subtitle)
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 0)
         }
@@ -5958,9 +5958,9 @@ struct ContentView: View {
             }
             .frame(maxHeight: 340)
         }
-        .frame(width: 250)
-        .cardSurface(radius: 13)
-        .shadow(color: .black.opacity(0.18), radius: 16, y: 6)
+        .frame(width: 240)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+        .shadow(color: .black.opacity(0.2), radius: 24, y: 10)
     }
 
     private func gameMenuRow(_ title: String, id: String?) -> some View {
