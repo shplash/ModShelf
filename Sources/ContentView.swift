@@ -3601,23 +3601,68 @@ enum Theme {
     static let captionFont = Font.system(size: 12)
 }
 
+/// Whether the app draws its cards and bars as frosted glass. Set once at the root.
+private struct GlassSurfacesKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    var glassSurfaces: Bool {
+        get { self[GlassSurfacesKey.self] }
+        set { self[GlassSurfacesKey.self] = newValue }
+    }
+}
+
+extension View {
+    func glassSurfaces(_ on: Bool) -> some View { environment(\.glassSurfaces, on) }
+
+    /// Fills behind a shape: solid normally, a frosted tint when glass is switched on.
+    func surfaceFill<S: Shape>(_ shape: S, fill: Color, glass: Bool) -> some View {
+        background {
+            if glass {
+                ZStack {
+                    shape.fill(.ultraThinMaterial)
+                    shape.fill(fill.opacity(0.62))
+                }
+            } else {
+                shape.fill(fill)
+            }
+        }
+    }
+}
+
 /// Grouped background with a rounded outline. No drop shadow: depth comes from the fill.
 struct CardSurface: ViewModifier {
+    @Environment(\.glassSurfaces) private var glass
     var radius: CGFloat = Theme.card
     var fill: Color = Theme.cardFill
     func body(content: Content) -> some View {
-        content
-            .background(fill, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
+        let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
+        return content
+            .surfaceFill(shape, fill: fill, glass: glass)
             .overlay(
-                RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .strokeBorder(Theme.hairline, lineWidth: 1)
+                shape.strokeBorder(glass ? Color.white.opacity(0.16) : Theme.hairline, lineWidth: 1)
             )
+    }
+}
+
+/// A card that floats over the page: a popup or a dialog.
+struct PopupSurface: ViewModifier {
+    var radius: CGFloat = 24
+    func body(content: Content) -> some View {
+        content
+            .cardSurface(radius: radius)
+            .shadow(color: .black.opacity(0.25), radius: 28, y: 10)
     }
 }
 
 extension View {
     func cardSurface(radius: CGFloat = Theme.card, fill: Color = Theme.cardFill) -> some View {
         modifier(CardSurface(radius: radius, fill: fill))
+    }
+
+    func popupSurface(radius: CGFloat = 24) -> some View {
+        modifier(PopupSurface(radius: radius))
     }
 
     /// A chip, a menu label or a small control.
@@ -3679,6 +3724,30 @@ struct SectionTitle: View {
     }
 }
 
+/// A fixed-width control in the library's filter strip: a symbol over a value, so the row keeps
+/// its shape when the value under it changes.
+struct LibraryChip: View {
+    let symbol: String
+    let value: String
+    var active = false
+
+    var body: some View {
+        VStack(spacing: 3) {
+            Image(systemName: symbol)
+                .font(.system(size: 12, weight: .semibold))
+            Text(value)
+                .font(.system(size: 10, weight: .medium))
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+        }
+        .foregroundStyle(active ? Color.accentColor : Color.secondary)
+        .frame(maxWidth: .infinity)
+        .frame(height: 40)
+        .chipSurface(radius: 12)
+        .accessibilityLabel(value)
+    }
+}
+
 /// One search box, used by the library and the browser.
 struct SearchField: View {
     let placeholder: String
@@ -3720,6 +3789,7 @@ struct AppTabBar: View {
     /// The first tab says "Queue" while a batch is running.
     var firstTitle: String = "Download"
     var onTap: (Int) -> Void = { _ in }
+    @Environment(\.glassSurfaces) private var glass
     private let items: [(String, String)] = [("Download", "arrow.down.circle.fill"), ("Workshop", "safari.fill"),
                                              ("Library", "square.grid.2x2.fill"), ("Options", "gearshape.fill")]
 
@@ -3736,8 +3806,8 @@ struct AppTabBar: View {
         }
         .padding(.horizontal, 6)
         .padding(.vertical, 6)
-        .background(Capsule(style: .continuous).fill(Theme.cardFill))
-        .overlay(Capsule(style: .continuous).strokeBorder(Theme.hairline, lineWidth: 1))
+        .surfaceFill(Capsule(style: .continuous), fill: Theme.cardFill, glass: glass)
+        .overlay(Capsule(style: .continuous).strokeBorder(glass ? Color.white.opacity(0.16) : Theme.hairline, lineWidth: 1))
         .shadow(color: .black.opacity(0.16), radius: 18, y: 6)
         .padding(.top, 4)
         .padding(.bottom, 2)
@@ -3754,12 +3824,12 @@ struct AppTabBar: View {
         } label: {
             VStack(spacing: compact ? 0 : 3) {
                 icon(i, size: compact ? 20 : 21, on: on)
-                if !compact {
-                    Text(title(i))
-                        .font(.system(size: 11, weight: .semibold))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.8)
-                }
+                Text(title(i))
+                    .font(.system(size: 11, weight: .semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                    .opacity(compact ? 0 : 1)
+                    .frame(height: compact ? 0 : 13)
             }
             .foregroundStyle(on ? Color.white : Color.secondary)
             .frame(width: compact ? 52 : 76, height: compact ? 40 : 52)
@@ -3815,7 +3885,17 @@ struct AppTabBar: View {
         }
         .padding(.horizontal, 8)
         .padding(.top, 4)
-        .background(Theme.cardFill.ignoresSafeArea(edges: .bottom))
+        .background {
+            if glass {
+                ZStack {
+                    Rectangle().fill(.ultraThinMaterial)
+                    Rectangle().fill(Theme.cardFill.opacity(0.62))
+                }
+                .ignoresSafeArea(edges: .bottom)
+            } else {
+                Theme.cardFill.ignoresSafeArea(edges: .bottom)
+            }
+        }
         .overlay(alignment: .top) { Rectangle().fill(Theme.hairline).frame(height: 0.5) }
     }
 }
@@ -4171,6 +4251,7 @@ struct ContentView: View {
     @State private var dragOffsetY: CGFloat = 0
     @State private var dragTarget: Int?
     @State private var confirmReorder: ReorderRequest?
+    @AppStorage("options.glass") private var glassSurfacesOn = false
 
     /// Space reserved under every tab for the tab bar, so content can always scroll clear of it.
     private var tabBarReserve: CGFloat { tabStyle == "bar" ? 84 : 100 }
@@ -4320,6 +4401,7 @@ struct ContentView: View {
             overlayDialogs
             overlayMedia
         }
+        .glassSurfaces(glassSurfacesOn)
         .sheet(isPresented: $store.showLogin) { loginSheet.presentationDetents([.medium, .large]) }
         .sheet(isPresented: $showDeveloperMenu) { DeveloperMenuView(store: store) }
         .sheet(isPresented: $showShare, onDismiss: {
@@ -5460,14 +5542,16 @@ struct ContentView: View {
     }
 
     private var glanceCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 glanceStat("\(store.library.count)", "mods", symbol: "square.grid.2x2.fill") {
                     openLibrary(filter: "All")
                 }
                 glanceStat("\(gameCount)", gameCount == 1 ? "game" : "games", symbol: "gamecontroller.fill") {
-                    openLibrary(filter: "All")
+                    openLibrary(sortedByGame: true)
                 }
+            }
+            HStack(spacing: 8) {
                 glanceStat("\(updateCount)", "updates", symbol: "arrow.down.circle.fill") {
                     openLibrary(filter: "Updates")
                 }
@@ -5488,30 +5572,36 @@ struct ContentView: View {
                     .font(Theme.captionFont).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            .padding(.top, 2)
         }
         .padding(14)
         .cardSurface()
     }
 
-    /// A figure on the download screen that also opens the library on the matching filter.
+    /// A figure on the download screen; each one opens a different view of the library.
     private func glanceStat(_ value: String, _ label: String, symbol: String,
                             action: @escaping () -> Void) -> some View {
         Button { action() } label: {
-            VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 10) {
                 Image(systemName: symbol)
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(Color.accentColor)
-                Text(value)
-                    .font(.system(size: 20, weight: .bold, design: .rounded))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
-                Text(label)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                    .frame(width: 30, height: 30)
+                    .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.accentSoft))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(value)
+                        .font(.system(size: 19, weight: .bold, design: .rounded))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                    Text(label)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
             }
+            .padding(.horizontal, 10).padding(.vertical, 9)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(10)
             .background(Theme.insetFill, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             .contentShape(Rectangle())
         }
@@ -5519,9 +5609,11 @@ struct ContentView: View {
         .accessibilityLabel("\(value) \(label)")
     }
 
-    private func openLibrary(filter: String) {
+    /// Opens the library on a filter, or grouped by game for the game count.
+    private func openLibrary(filter: String = "All", sortedByGame: Bool = false) {
         Haptics.tap()
         libraryFilter = filter
+        if sortedByGame { sortOrder = "Game" }
         selectedGame = nil
         selectedTag = nil
         showingHistory = false
@@ -5732,9 +5824,9 @@ struct ContentView: View {
     }
 
     private var libraryBar: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 8) {
             if showingHistory {
-                HStack(spacing: 10) {
+                HStack(spacing: 8) {
                     librarySearchField
                     libraryIconTile("trash") { if confirmDelete { confirmClearHistory = true } else { store.clearHistory() } }
                         .disabled(store.history.isEmpty)
@@ -5742,28 +5834,52 @@ struct ContentView: View {
                     libraryIconTile("xmark") { showingHistory = false }
                 }
             } else {
-                HStack(spacing: 10) {
+                librarySearchField
+                HStack(spacing: 8) {
                     libraryAction("arrow.clockwise", "Updates", spinning: store.isCheckingUpdates) { store.checkAllUpdates() }
                         .disabled(store.isCheckingUpdates)
                     libraryAction("checkmark.shield", "Verify", spinning: store.isVerifyingAll) { store.verifyAllFiles() }
                         .disabled(store.isVerifyingAll)
+                    selectionAction
                     libraryAction("clock.arrow.circlepath", "History") { showingHistory = true }
                     moreMenu
                 }
-                HStack(spacing: 10) {
-                    librarySearchField
-                    selectPill
-                }
-                HStack(spacing: 10) {
-                    sortMenu
-                    filterMenu
-                    if !installedGameOptions.isEmpty { gameFilterMenu }
-                    if !installedTagOptions.isEmpty { tagFilterMenu }
-                    Spacer(minLength: 0)
+                HStack(spacing: 8) {
+                    sortMenu.frame(maxWidth: .infinity)
+                    filterMenu.frame(maxWidth: .infinity)
+                    if !installedGameOptions.isEmpty { gameFilterMenu.frame(maxWidth: .infinity) }
+                    if !installedTagOptions.isEmpty { tagFilterMenu.frame(maxWidth: .infinity) }
                 }
             }
         }
         .padding(.horizontal, Theme.page).padding(.top, 2).padding(.bottom, 10)
+    }
+
+    /// Turns selection on and off; the same tile reads "Done" while mods can be picked.
+    private var selectionAction: some View {
+        Button {
+            Haptics.select()
+            withAnimation(.easeOut(duration: 0.18)) {
+                selecting.toggle()
+                if !selecting { selection.removeAll() }
+            }
+        } label: {
+            VStack(spacing: 3) {
+                Image(systemName: selecting ? "checkmark.circle.fill" : "checkmark.circle")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(selecting ? Color.white : Color.accentColor)
+                    .frame(height: 17)
+                Text(selecting ? "Done" : "Select")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(selecting ? Color.white : Color.secondary)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 52)
+            .chipSurface(radius: 16, fill: selecting ? Color.accentColor : Theme.cardFill)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(selecting ? "Finish selecting" : "Select mods")
     }
 
     private func libraryIconTile(_ symbol: String, action: @escaping () -> Void) -> some View {
@@ -5804,7 +5920,7 @@ struct ContentView: View {
                 .lineLimit(1)
         }
         .frame(maxWidth: .infinity)
-        .frame(height: 56)
+        .frame(height: 52)
         .chipSurface(radius: 16)
     }
 
@@ -5817,10 +5933,6 @@ struct ContentView: View {
         }
     }
 
-    private func filterTint(_ filter: String) -> Color {
-        .secondary
-    }
-
     private var filterMenu: some View {
         Menu {
             ForEach(["All", "Updates", "Favourites", "Problems"], id: \.self) { name in
@@ -5831,23 +5943,7 @@ struct ContentView: View {
                 }
             }
         } label: {
-            HStack(spacing: 4) {
-                Image(systemName: "line.3.horizontal.decrease.circle")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(Color.accentColor)
-                // Only when a filter is on, so the chip is narrow for "All" and grows for a real filter.
-                if libraryFilter != "All" {
-                    Text("•").font(.system(size: 12, weight: .medium))
-                        .foregroundColor(Color(uiColor: .secondaryLabel))
-                    Image(systemName: filterSymbol(libraryFilter))
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(filterTint(libraryFilter))
-                        .frame(width: 16)
-                }
-            }
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 10).frame(height: 34)
-            .chipSurface(radius: 12)
+            LibraryChip(symbol: filterSymbol(libraryFilter), value: libraryFilter, active: libraryFilter != "All")
         }
     }
 
@@ -5864,18 +5960,7 @@ struct ContentView: View {
                 }
             }
         } label: {
-            HStack(spacing: 5) {
-                Image(systemName: "arrow.up.arrow.down")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(Color.accentColor)
-                Text(sortOrder)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(Color(uiColor: .secondaryLabel))
-                    .lineLimit(1)
-                    .fixedSize(horizontal: true, vertical: false)
-            }
-            .padding(.horizontal, 10).frame(height: 34)
-            .chipSurface(radius: 12)
+            LibraryChip(symbol: "arrow.up.arrow.down", value: sortOrder, active: sortOrder != "Recently added")
         }
     }
 
@@ -5911,23 +5996,7 @@ struct ContentView: View {
                 .disabled(store.library.isEmpty)
             }
         } label: {
-            VStack(spacing: 3) {
-                Group {
-                    if selecting { SelectionWaveDots() } else {
-                        Image(systemName: "ellipsis")
-                            .font(.system(size: 15, weight: .bold))
-                            .foregroundStyle(Color.accentColor)
-                    }
-                }
-                .frame(height: 17)
-                Text(selecting ? "Done" : "More")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundColor(Color(uiColor: .secondaryLabel))
-                    .lineLimit(1)
-            }
-            .frame(maxWidth: .infinity)
-            .frame(height: 56)
-            .chipSurface(radius: 16)
+            libraryActionLabel("ellipsis", "More")
         }
     }
 
@@ -5963,7 +6032,11 @@ struct ContentView: View {
                     if selectedGame == game.id { Label(game.name, systemImage: "checkmark") } else { Text(game.name) }
                 }
             }
-        } label: { filterIconLabel("gamecontroller.fill") }
+        } label: {
+            LibraryChip(symbol: "gamecontroller.fill",
+                        value: selectedGameName ?? "All",
+                        active: selectedGame != nil)
+        }
     }
 
     private var tagFilterMenu: some View {
@@ -5977,44 +6050,10 @@ struct ContentView: View {
                     if selectedTag == tag { Label(tag, systemImage: "checkmark") } else { Text(tag) }
                 }
             }
-        } label: { filterIconLabel("tag.fill") }
-    }
-
-    private func filterIconLabel(_ symbol: String) -> some View {
-        Image(systemName: symbol)
-            .font(.system(size: 14, weight: .semibold))
-            .foregroundStyle(Color.accentColor)
-            .frame(width: 44, height: 34)
-            .chipSurface(radius: 12)
-    }
-
-    private var selectPill: some View {
-        Button {
-            Haptics.select()
-            withAnimation(.easeOut(duration: 0.18)) {
-                selecting.toggle()
-                if !selecting { selection.removeAll() }
-            }
         } label: {
-            HStack(spacing: 5) {
-                Image(systemName: selecting ? "checkmark.circle.fill" : "checkmark.circle")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(selecting ? Color.white : Color.accentColor)
-            }
-            .frame(width: 46, height: 40)
-            .background(
-                RoundedRectangle(cornerRadius: Theme.control, style: .continuous)
-                    .fill(selecting ? Color.accentColor : Theme.cardFill)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: Theme.control, style: .continuous)
-                    .strokeBorder(Theme.hairline, lineWidth: 1)
-            )
+            LibraryChip(symbol: "tag.fill", value: selectedTag ?? "All", active: selectedTag != nil)
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel(selecting ? "Finish selecting" : "Select mods")
     }
-
 
     private func gridContent(_ items: [WorkshopItem]) -> some View {
         ScrollView {
@@ -6411,6 +6450,8 @@ struct ContentView: View {
                 divider
                 toggleRow("Show Workshop IDs", symbol: "number", isOn: $showIDs)
                 divider
+                toggleRow("Glass surfaces", symbol: "rectangle.on.rectangle", isOn: $glassSurfacesOn)
+                divider
                 toggleRow("Haptic feedback", symbol: "hand.tap", isOn: $haptics)
                 divider
                 toggleRow("One speed for all scrolling text", symbol: "textformat", isOn: $marqueeGlobal)
@@ -6563,7 +6604,10 @@ struct ContentView: View {
                 divider
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Steam and the Steam Workshop are trademarks of Valve Corporation. ModShelf is not made by or endorsed by Valve.")
-                        .font(Theme.captionFont).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        .font(Theme.captionFont).foregroundStyle(.secondary)
+                        .multilineTextAlignment(.leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 .padding(.horizontal, 16).padding(.vertical, 12)
             }
@@ -6841,9 +6885,7 @@ struct ItemDetailPopup: View {
             }
         }
         .padding(16)
-        .background(RoundedRectangle(cornerRadius: 24, style: .continuous).fill(Color(uiColor: .secondarySystemGroupedBackground)))
-        .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).strokeBorder(Theme.hairline, lineWidth: 1))
-        .shadow(color: .black.opacity(0.25), radius: 28, y: 10)
+        .popupSurface()
     }
 
     private var installedLine: String {
@@ -6902,9 +6944,7 @@ struct ItemActionPopup: View {
         }
         .padding(.bottom, 8)
         .frame(maxWidth: 360)
-        .background(RoundedRectangle(cornerRadius: 24, style: .continuous).fill(Color(uiColor: .secondarySystemGroupedBackground)))
-        .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).strokeBorder(Theme.hairline, lineWidth: 1))
-        .shadow(color: .black.opacity(0.25), radius: 28, y: 10)
+        .popupSurface()
     }
 
     private func action(_ title: String, _ symbol: String, favourite: Bool, tint: Color = .primary, action: @escaping () -> Void) -> some View {
@@ -6936,9 +6976,7 @@ struct HistoryActionPopup: View {
             row("Close", "xmark", action: close)
         }
         .padding(.bottom, 8).frame(maxWidth: 360)
-        .background(RoundedRectangle(cornerRadius: 24, style: .continuous).fill(Color(uiColor: .secondarySystemGroupedBackground)))
-        .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).strokeBorder(Theme.hairline, lineWidth: 1))
-        .shadow(color: .black.opacity(0.25), radius: 28, y: 10)
+        .popupSurface()
     }
     private func row(_ title: String, _ symbol: String, action: @escaping () -> Void) -> some View {
         Button { Haptics.tap(); action() } label: {
@@ -6979,9 +7017,7 @@ struct ConfirmPopup: View {
             }
         }
         .padding(20).frame(maxWidth: 320)
-        .background(RoundedRectangle(cornerRadius: 24, style: .continuous).fill(Color(uiColor: .secondarySystemGroupedBackground)))
-        .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).strokeBorder(Theme.hairline, lineWidth: 1))
-        .shadow(color: .black.opacity(0.25), radius: 28, y: 10)
+        .popupSurface()
     }
 }
 
@@ -7007,9 +7043,7 @@ struct DeleteConfirmationPopup: View {
             }
         }
         .padding(20).frame(maxWidth: 320)
-        .background(RoundedRectangle(cornerRadius: 24, style: .continuous).fill(Color(uiColor: .secondarySystemGroupedBackground)))
-        .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).strokeBorder(Theme.hairline, lineWidth: 1))
-        .shadow(color: .black.opacity(0.25), radius: 28, y: 10)
+        .popupSurface()
     }
 }
 
