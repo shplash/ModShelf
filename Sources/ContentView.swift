@@ -5913,15 +5913,19 @@ struct ContentView: View {
                 Text(showingHistory ? "History" : "Library")
                     .font(.system(size: 26, weight: .bold, design: .rounded))
                     .lineLimit(1)
-                Text(librarySubtitle)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                    .lineSpacing(-1)
-                    .multilineTextAlignment(.leading)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxHeight: 30, alignment: .center)
-                    .layoutPriority(1)
+                VStack(alignment: .leading, spacing: -1) {
+                    ForEach(Array(librarySubtitleLines.enumerated()), id: \.offset) { _, line in
+                        Text(line)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
+                    }
+                }
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxHeight: 30, alignment: .center)
+                .layoutPriority(1)
+                .accessibilityElement(children: .combine)
                 Spacer(minLength: 4)
                 if showingHistory {
                     circleControl("chevron.backward", active: true) { showingHistory = false }
@@ -6081,24 +6085,20 @@ struct ContentView: View {
         .accessibilityLabel(activeFilterCount > 0 ? "Filters, \(activeFilterCount) active" : "Filters")
     }
 
-    private var librarySubtitle: String {
-        if selecting { return "\(selection.count) selected" }
+    /// The two little lines beside the library's title: what it takes up, then what it holds.
+    private var librarySubtitleLines: [String] {
+        if selecting { return ["\(selection.count) selected"] }
         if showingHistory {
             let failed = store.history.filter { $0.result == "Failed" }.count
-            return "\(store.history.count) attempt\(store.history.count == 1 ? "" : "s") · \(failed) failed"
+            let attempts = store.history.count
+            return ["\(attempts) attempt\(attempts == 1 ? "" : "s")", "\(failed) failed"]
         }
         let total = store.library.count
         let shown = visibleItems.count
-        var parts: [String] = []
-        if shown == total {
-            parts.append("\(total) mod\(total == 1 ? "" : "s")")
-        } else {
-            parts.append("\(shown) of \(total)")
-        }
-        parts.append(Fmt.bytes(store.libraryStorageBytes))
-        if let game = selectedGameName { parts.append(game) }
-        if let tag = selectedTag { parts.append(tag) }
-        return parts.joined(separator: " · ")
+        let count = shown == total
+            ? "\(total) mod\(total == 1 ? "" : "s")"
+            : "\(shown) of \(total)"
+        return [Fmt.bytes(store.libraryStorageBytes), count]
     }
 
     /// How many of the library's filters are narrowing the list right now.
