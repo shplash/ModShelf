@@ -797,6 +797,8 @@ final class WorkshopStore: ObservableObject {
     @Published var verifyStatus = ""
     @Published var isCheckingUpdates = false
     @Published var isVerifyingAll = false
+    /// True while the one automatic retry for a failed mod is under way, so the screen can say so.
+    @Published var isRetrying = false
     @Published var libraryStorageBytes: Int64 = 0
     @Published var activeTitle = ""
     @Published var phases: [String] = []
@@ -1911,7 +1913,6 @@ final class WorkshopStore: ObservableObject {
                 let staged = visibleChildren(staging).count
                 log("install failed \(activeID): \(failure.domain) \(failure.code) - \(failure.localizedDescription) · \(staged) items, \(Fmt.bytes(Self.directoryBytes(staging)))")
                 failureText = failure.code == 1 ? "Steam sent no files for this mod." : "Couldn't finish the download."
-                errorMessage = failureText
                 // What was downloaded is kept for a retry; only an empty folder has nothing to keep.
                 if staged == 0 {
                     try? FileManager.default.removeItem(at: staging)
@@ -1948,6 +1949,7 @@ final class WorkshopStore: ObservableObject {
             // A later attempt at this mod gets its retry back.
             autoRetries = 0
             autoRetryItem = ""
+            isRetrying = false
             progress = 1
             ringFinished()
             lastOutcome = "Download completed"
@@ -1962,15 +1964,18 @@ final class WorkshopStore: ObservableObject {
                 : ErrorText.friendly(!error.isEmpty ? error : (!failureText.isEmpty ? failureText : "The download didn't finish."),
                                       game: meta.gameName)
             updateHistory(id: activeID, result: cancelled ? "Cancelled" : "Failed", error: reason)
-            if !cancelled { errorMessage = reason }
+            // A transfer the system stopped while the app was away, and the one automatic retry, are
+            // not failures yet: the banner only speaks once both have had their chance.
+            let interrupted = suspendedDownloadID == activeID
+            let willRetry = !cancelled && (interrupted || autoRetries < 1)
+            if !cancelled && !willRetry { errorMessage = reason }
             lastOutcome = cancelled ? "Download cancelled" : "Download failed"
-            if !cancelled { ringStopped() }
+            if !cancelled && !willRetry { ringStopped() }
             log("failed \(activeID): \(reason)")
             if !error.isEmpty { log("engine said: \(error)") }
-            // A transfer the system stopped while the app was away is not a failure: pick it up again.
-            let interrupted = suspendedDownloadID == activeID
             if interrupted { suspendedDownloadID = nil }
             if cancelled {
+                isRetrying = false
                 if keepQueueOnCancel {
                     keepQueueOnCancel = false
                     // This one is out of the batch; the rest of the queue carries on.
@@ -1999,6 +2004,7 @@ final class WorkshopStore: ObservableObject {
             } else if autoRetries < 1 {
                 // One more go in the same slot before it is set aside as failed, from the staged files.
                 autoRetries += 1
+                isRetrying = true
                 updateRow(activeID, progress: 0, state: .downloading)
                 history.removeAll { $0.workshopID == activeID && $0.result == "Downloading" }
                 saveHistory()
@@ -2009,6 +2015,7 @@ final class WorkshopStore: ObservableObject {
                 }
                 return
             } else {
+                isRetrying = false
                 queueFailed += 1
                 updateRow(activeID, state: .failed)
             }
@@ -3761,7 +3768,7 @@ struct PageTitle: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.top, 8)
+        .padding(.top, 2)
         .padding(.bottom, 2)
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isHeader)
@@ -4283,8 +4290,7 @@ struct ContentView: View {
     @State private var dragOffsetY: CGFloat = 0
     @State private var dragTarget: Int?
     @State private var confirmReorder: ReorderRequest?
-    @State private var showingGamePicker = false
-    @State private var showingMoreMenu = false
+    @State private var showingFilterSheet = false
     @AppStorage("options.appUpdateNotice") private var appUpdateNoticeOn = true
     @State private var bannerClearTask: Task<Void, Never>?
 
@@ -4988,7 +4994,7 @@ struct ContentView: View {
                         .font(.footnote.weight(.semibold)).lineLimit(1)
                     Spacer(minLength: 6)
                     Text(store.isPreparingDownload
-                         ? "Initialising…"
+                         ? (store.isRetrying ? "Retrying…" : "Initialising…")
                          : (store.isInstalling ? "Installing…" : percentText(store.progress)))
                         .font(.footnote.monospacedDigit().weight(.semibold))
                         .foregroundStyle(Color.accentColor)
@@ -5120,7 +5126,7 @@ struct ContentView: View {
                 ScrollSpy(onChange: handleScroll)
                 downloadCards
             }
-            .padding(.horizontal, Theme.page).padding(.top, 10).padding(.bottom, tabBarReserve)
+            .padding(.horizontal, Theme.page).padding(.top, 2).padding(.bottom, tabBarReserve)
         }
     }
 
@@ -5527,7 +5533,7 @@ struct ContentView: View {
         if row.state == .failed { Text("Failed") }
         else if row.state == .done { Text("Done") }
         else if row.state == .waiting { Text("Waiting") }
-        else if store.isPreparingDownload { Text("Initialising…") }
+        else if store.isPreparingDownload { Text(store.isRetrying ? "Retrying…" : "Initialising…") }
         else if store.isInstalling { Text("Installing…") }
         else if store.isDownloadStalled { Text("Waiting") }
         else { Text("Downloading") }
@@ -5599,8 +5605,8 @@ struct ContentView: View {
                 glanceStat("\(gameCount)", gameCount == 1 ? "game" : "games", symbol: "gamecontroller.fill",
                            enabled: gameCount > 1) {
                     openLibrary(filter: "All")
-                    // The library's picker lives on that tab, so let it appear before asking.
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showingGamePicker = true }
+                    // The full filter, opened on the game list, wherever the library's menu lives.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showingFilterSheet = true }
                 }
             }
             HStack(spacing: 8) {
@@ -5778,8 +5784,7 @@ struct ContentView: View {
             Text(item.title).font(.title3.bold()).fixedSize(horizontal: false, vertical: true)
             infoRow(item)
             if !item.description.isEmpty { ExpandableDescription(text: item.description, lineLimit: 8) }
-            workshopRow(item)
-        }
+            workshopRow(item)        }
         .padding(14).cardSurface()
     }
 
@@ -5850,19 +5855,14 @@ struct ContentView: View {
             }
             .background(Theme.pageFill)
             .toolbar(.hidden, for: .navigationBar)
-            .confirmationDialog("Choose a game", isPresented: $showingGamePicker, titleVisibility: .visible) {
-                Button("All games") {
-                    selectedGame = nil
-                    selectedTag = nil
-                }
-                ForEach(installedGameOptions, id: \.id) { game in
-                    Button(game.name) {
-                        Haptics.select()
-                        selectedGame = game.id
-                        selectedTag = nil
-                    }
-                }
-                Button("Cancel", role: .cancel) { }
+            .sheet(isPresented: $showingFilterSheet) {
+                LibraryFilterSheet(filter: $libraryFilter,
+                                   sortOrder: $sortOrder,
+                                   selectedGame: $selectedGame,
+                                   selectedTag: $selectedTag,
+                                   games: installedGameOptions,
+                                   tags: installedTagOptions,
+                                   sortOrders: sortOrders)
             }
         }
     }
@@ -6075,45 +6075,43 @@ struct ContentView: View {
     }
 
     private var moreMenu: some View {
-        Button {
-            Haptics.tap()
-            showingMoreMenu = true
+        Menu {
+            if selecting {
+                Button { selectAllVisible() } label: { Label("Select all", systemImage: "checkmark.circle") }
+                Button { selection.removeAll() } label: { Label("Deselect all", systemImage: "circle.dashed") }
+                Divider()
+                Button { exportSelection() } label: {
+                    Label(selection.isEmpty ? "Export as ZIP" : "Export selected (\(selection.count)) as ZIP", systemImage: "square.and.arrow.up")
+                }
+                .disabled(selection.isEmpty || store.isExporting)
+                Button(role: .destructive) { requestDeleteSelected() } label: {
+                    Label("Delete selected (\(selection.count))", systemImage: "trash")
+                }
+                .disabled(selection.isEmpty)
+            } else {
+                Button { Haptics.tap(); showingHistory = true } label: {
+                    Label("Download history", systemImage: "clock.arrow.circlepath")
+                }
+                Divider()
+                let pending = store.library.filter { $0.updateAvailable }.count
+                Button { store.updateAll(); selectedTab = 0 } label: { Label("Update all (\(pending))", systemImage: "arrow.down.circle") }
+                    .disabled(pending == 0 || store.isBusy)
+                Button { startExportSelection() } label: { Label("Select and export as ZIP", systemImage: "square.and.arrow.up.on.square") }
+                    .disabled(store.library.isEmpty || store.isExporting)
+                Button { beginExport(all: true) } label: { Label(store.isExporting ? "Exporting…" : "Export all as ZIP", systemImage: "square.and.arrow.up") }
+                    .disabled(store.library.isEmpty || store.isExporting)
+                Button { copyAllWorkshopIDs() } label: { Label("Copy all Workshop IDs", systemImage: "doc.on.doc") }
+                    .disabled(store.library.isEmpty)
+            }
         } label: {
             Image(systemName: "ellipsis")
                 .font(.system(size: 16, weight: .bold))
-                .foregroundStyle(showingMoreMenu ? Color.accentColor : Color.secondary)
+                .foregroundStyle(Color.secondary)
                 .frame(width: 40, height: 40)
                 .background(Circle().fill(Theme.insetFill))
                 .contentShape(Circle())
         }
-        .buttonStyle(.plain)
-        .confirmationDialog("More", isPresented: $showingMoreMenu, titleVisibility: .hidden) {
-            moreMenuActions
-        }
         .accessibilityLabel("More")
-    }
-
-    @ViewBuilder private var moreMenuActions: some View {
-        if selecting {
-            Button("Select all") { selectAllVisible() }
-            Button("Deselect all") { selection.removeAll() }
-            Button(selection.isEmpty ? "Export as ZIP" : "Export selected (\(selection.count)) as ZIP") { exportSelection() }
-                .disabled(selection.isEmpty || store.isExporting)
-            Button("Delete selected (\(selection.count))", role: .destructive) { requestDeleteSelected() }
-                .disabled(selection.isEmpty)
-        } else {
-            Button("Download history") { Haptics.tap(); showingHistory = true }
-            let pending = store.library.filter { $0.updateAvailable }.count
-            Button("Update all (\(pending))") { store.updateAll(); selectedTab = 0 }
-                .disabled(pending == 0 || store.isBusy)
-            Button("Select and export as ZIP") { startExportSelection() }
-                .disabled(store.library.isEmpty || store.isExporting)
-            Button(store.isExporting ? "Exporting…" : "Export all as ZIP") { beginExport(all: true) }
-                .disabled(store.library.isEmpty || store.isExporting)
-            Button("Copy all Workshop IDs") { copyAllWorkshopIDs() }
-                .disabled(store.library.isEmpty)
-        }
-        Button("Cancel", role: .cancel) { }
     }
 
     private func copyAllWorkshopIDs() {
@@ -6321,8 +6319,8 @@ struct ContentView: View {
                 HStack(spacing: 12) {
                     Color.clear.frame(width: 84, height: 84)
                         .overlay(CachedImage(urlString: item.imageURL, fill: true, maxPixel: 300).allowsHitTesting(false))
-                        .clipShape(RoundedRectangle(cornerRadius: Theme.thumb, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: Theme.thumb, style: .continuous)
+                        .clipShape(RoundedRectangle(cornerRadius: Theme.control, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: Theme.control, style: .continuous)
                             .strokeBorder(Color.accentColor, lineWidth: picked ? 3 : 0))
                     VStack(alignment: .leading, spacing: 4) {
                         MarqueeText(text: item.displayTitle, fontSize: 15, weight: .semibold, height: 19,
@@ -6413,7 +6411,7 @@ struct ContentView: View {
         return HStack(alignment: .center, spacing: 12) {
             Color.clear.frame(width: 84, height: 84)
                 .overlay(CachedImage(urlString: record.imageURL, fill: true, maxPixel: 300))
-                .clipShape(RoundedRectangle(cornerRadius: Theme.thumb, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: Theme.control, style: .continuous))
             VStack(alignment: .leading, spacing: 4) {
                 MarqueeText(text: record.title, fontSize: 15, weight: .semibold, height: 19,
                             speed: MarqueeSpeed.otherSpeed, active: MarqueeSpeed.otherRunning)
@@ -6574,7 +6572,8 @@ struct ContentView: View {
                 toggleRow("Confirm auto download", symbol: "checkmark.circle", isOn: $confirmAutoDownload)
                 divider
                 Button { Haptics.tap(); confirmClearViewed = true } label: {
-                    rowContent("Clear recently viewed mods", symbol: "trash", detail: "and games in the browser")
+                    rowContent("Clear recently viewed mods", symbol: "trash",
+                               detail: "and games in the browser", detailProminent: true)
                 }
                 .buttonStyle(.plain)
             }
@@ -6813,12 +6812,18 @@ struct ContentView: View {
         .background(Capsule().fill(Color.accentColor.opacity(0.14)))
     }
 
-    private func rowContent(_ title: String, symbol: String, detail: String?, tint: Color = .primary, chevron: Bool = true) -> some View {
+    private func rowContent(_ title: String, symbol: String, detail: String?, tint: Color = .primary,
+                            chevron: Bool = true, detailProminent: Bool = false) -> some View {
         HStack(spacing: 12) {
             settingsIcon(symbol, tint: tint == .primary ? .accentColor : tint)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).font(Theme.rowFont).foregroundStyle(tint)
-                if let detail { Text(detail).font(Theme.captionFont).foregroundStyle(.secondary).lineLimit(2) }
+                if let detail {
+                    Text(detail)
+                        .font(detailProminent ? Theme.rowFont : Theme.captionFont)
+                        .foregroundStyle(detailProminent ? tint : .secondary)
+                        .lineLimit(2)
+                }
             }
             Spacer(minLength: 0)
             if tint == .primary && chevron { Image(systemName: "chevron.right").font(.caption.bold()).foregroundStyle(.tertiary) }
@@ -6917,7 +6922,7 @@ struct ItemDetailPopup: View {
                 // Artwork with the text block matched to its height.
                 CachedImage(urlString: item.imageURL, fill: true, maxPixel: 400)
                     .frame(width: 108, height: 108)
-                    .clipShape(RoundedRectangle(cornerRadius: Theme.thumb, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.control, style: .continuous))
                 VStack(alignment: .leading, spacing: 3) {
                     Text(item.displayTitle).font(.headline).lineLimit(2)
                     RatingLine(rating: item.rating, count: item.ratingCount, size: 13)
@@ -6939,7 +6944,7 @@ struct ItemDetailPopup: View {
                     .accessibilityLabel("Close")
             }
             if let d = item.description, !d.isEmpty {
-                ScrollView { ExpandableDescription(text: d, lineLimit: 18) }.frame(maxHeight: 360)
+                ScrollView { ExpandableDescription(text: d, lineLimit: 18, startExpanded: true) }.frame(maxHeight: 360)
             }
             if !item.tags.isEmpty {
                 Text("Tags: " + item.tags.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary).lineLimit(2)
@@ -7151,7 +7156,15 @@ struct DeleteConfirmationPopup: View {
 struct ExpandableDescription: View {
     let text: String
     let lineLimit: Int
+    var startExpanded = false
     @State private var expanded = false
+
+    init(text: String, lineLimit: Int, startExpanded: Bool = false) {
+        self.text = text
+        self.lineLimit = lineLimit
+        self.startExpanded = startExpanded
+        _expanded = State(initialValue: startExpanded)
+    }
 
     private var attributed: AttributedString {
         (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
@@ -7202,10 +7215,10 @@ struct MediaCarousel: View {
                                 Haptics.tap()
                                 onExpand(item, i)
                             })
-                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            .clipShape(RoundedRectangle(cornerRadius: Theme.control, style: .continuous))
                         case .video(let id):
                             YouTubePlayerView(videoID: id)
-                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                .clipShape(RoundedRectangle(cornerRadius: Theme.control, style: .continuous))
                         }
                     }
                     .padding(.horizontal, 2)
@@ -8051,7 +8064,7 @@ struct BrowserHome: View {
                 }
             }
             .padding(.horizontal, Theme.page)
-            .padding(.top, 10)
+            .padding(.top, 2)
             .padding(.bottom, 110)
         }
         .background(Theme.pageFill)
@@ -8126,7 +8139,7 @@ struct BrowserHome: View {
                 Color.clear
                     .frame(width: 78, height: 78)
                     .overlay(CachedImage(urlString: hit.tiny_image, fill: false, maxPixel: 220).allowsHitTesting(false))
-                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.control, style: .continuous))
                 MarqueeText(text: hit.name, fontSize: 11, weight: .medium, height: 15,
                             speed: MarqueeSpeed.otherSpeed, active: MarqueeSpeed.otherRunning)
                     .frame(width: 78, alignment: .leading)
@@ -8162,7 +8175,7 @@ struct BrowserHome: View {
                     .padding(8)
             }
             .frame(maxWidth: .infinity)
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: Theme.control, style: .continuous))
             .overlay(alignment: .topTrailing) { starButton(hit).padding(1) }
         }
         .buttonStyle(.plain)
@@ -8198,7 +8211,7 @@ struct BrowserHome: View {
                         .frame(maxWidth: .infinity)
                         .frame(height: 66)
                         .overlay(CachedImage(urlString: hit.tiny_image, fill: true, maxPixel: 300))
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .clipShape(RoundedRectangle(cornerRadius: Theme.control, style: .continuous))
                     MarqueeText(text: hit.name, fontSize: 12, weight: .semibold, height: 15,
                                 speed: MarqueeSpeed.otherSpeed, active: MarqueeSpeed.otherRunning)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -8218,7 +8231,7 @@ struct BrowserHome: View {
                 HStack(spacing: 12) {
                     CachedImage(urlString: hit.tiny_image, fill: true, maxPixel: 160)
                         .frame(width: 56, height: 56)
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .clipShape(RoundedRectangle(cornerRadius: Theme.control, style: .continuous))
                     Text(hit.name)
                         .font(.system(size: 15, weight: .semibold)).lineLimit(2)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -8826,5 +8839,90 @@ struct DevLogView: View {
                 .disabled(store.runtimeLog.isEmpty)
             }
         }
+    }
+}
+
+
+
+/// The library's filter menu, in sheet form, so the download screen's game tile can open it.
+struct LibraryFilterSheet: View {
+    @Binding var filter: String
+    @Binding var sortOrder: String
+    @Binding var selectedGame: String?
+    @Binding var selectedTag: String?
+    let games: [(id: String, name: String)]
+    let tags: [String]
+    let sortOrders: [String]
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("Game") {
+                    choice("All games", on: selectedGame == nil) {
+                        selectedGame = nil
+                        selectedTag = nil
+                    }
+                    ForEach(games, id: \.id) { game in
+                        choice(game.name, on: selectedGame == game.id) {
+                            selectedGame = game.id
+                            selectedTag = nil
+                        }
+                    }
+                }
+                if !tags.isEmpty {
+                    Section("Tag") {
+                        choice("All tags", on: selectedTag == nil) { selectedTag = nil }
+                        ForEach(tags, id: \.self) { tag in
+                            choice(tag, on: selectedTag == tag) { selectedTag = tag }
+                        }
+                    }
+                }
+                Section("Show") {
+                    choice("All", on: filter == "All") { filter = "All" }
+                    choice("Updates", on: filter == "Updates") { filter = "Updates" }
+                    choice("Favourites", on: filter == "Favourites") { filter = "Favourites" }
+                    choice("Problems", on: filter == "Problems") { filter = "Problems" }
+                }
+                Section("Sort by") {
+                    ForEach(sortOrders, id: \.self) { order in
+                        choice(order, on: sortOrder == order) { sortOrder = order }
+                    }
+                }
+                Section {
+                    Button("Reset filters", role: .destructive) {
+                        Haptics.tap()
+                        filter = "All"
+                        selectedGame = nil
+                        selectedTag = nil
+                        sortOrder = "Recently added"
+                    }
+                }
+            }
+            .navigationTitle("Filters")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+            }
+        }
+    }
+
+    private func choice(_ title: String, on: Bool, action: @escaping () -> Void) -> some View {
+        Button {
+            Haptics.select()
+            action()
+        } label: {
+            HStack {
+                Text(title)
+                Spacer(minLength: 8)
+                if on {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(Color.accentColor)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
