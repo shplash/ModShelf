@@ -3742,14 +3742,6 @@ extension View {
         modifier(PopupSurface(radius: radius))
     }
 
-    /// Keeps a popover a popover on iPhone wherever the system allows it.
-    @ViewBuilder func compactPopover() -> some View {
-        if #available(iOS 16.4, *) {
-            presentationCompactAdaptation(.popover)
-        } else {
-            self
-        }
-    }
     /// A chip, a menu label or a small control.
     func chipSurface(radius: CGFloat = Theme.control, fill: Color = Theme.cardFill) -> some View {
         self
@@ -3767,7 +3759,7 @@ struct TabHeader: View {
     var subtitle: String? = nil
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
+        HStack(alignment: .center, spacing: 8) {
             Text(title)
                 .font(.system(size: 26, weight: .bold, design: .rounded))
                 .lineLimit(1)
@@ -3776,40 +3768,15 @@ struct TabHeader: View {
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
+                    .lineSpacing(-2)
                     .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxHeight: 34, alignment: .center)
             }
             Spacer(minLength: 0)
         }
         .padding(.horizontal, Theme.page)
         .padding(.top, 2)
-        .padding(.bottom, 8)
-    }
-}
-
-/// The heading of a page: a large title with a quiet line under it.
-struct PageTitle: View {
-    let title: String
-    var subtitle: String? = nil
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(title)
-                .font(Theme.titleFont)
-                .foregroundStyle(.primary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.75)
-            if let subtitle, !subtitle.isEmpty {
-                Text(subtitle)
-                    .font(Theme.subtitleFont)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.top, 2)
-        .padding(.bottom, 2)
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(.isHeader)
+        .padding(.bottom, 6)
     }
 }
 
@@ -4329,7 +4296,6 @@ struct ContentView: View {
     @State private var dragTarget: Int?
     @State private var confirmReorder: ReorderRequest?
     @State private var keyboardDragSeen = false
-    @State private var showingGameMenu = false
     @AppStorage("options.appUpdateNotice") private var appUpdateNoticeOn = true
     @State private var bannerClearTask: Task<Void, Never>?
 
@@ -5668,11 +5634,7 @@ struct ContentView: View {
                 glanceStat("\(store.library.count)", "mods", symbol: "square.grid.2x2.fill") {
                     openLibrary(filter: "All")
                 }
-                glanceStat("\(gameCount)", gameCount == 1 ? "game" : "games", symbol: "gamecontroller.fill",
-                           enabled: gameCount > 1) {
-                    openLibrary(filter: "All")
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showingGameMenu = true }
-                }
+                glanceStat("\(gameCount)", gameCount == 1 ? "game" : "games", symbol: "gamecontroller.fill")
             }
             HStack(spacing: 8) {
                 glanceStat("\(updateCount)", "updates", symbol: "arrow.down.circle.fill",
@@ -5703,37 +5665,43 @@ struct ContentView: View {
         .cardSurface()
     }
 
-    /// A figure on the download screen; each one opens a different view of the library.
+    /// A figure on the download screen; the ones with an action open a view of the library.
     private func glanceStat(_ value: String, _ label: String, symbol: String,
                             enabled: Bool = true,
-                            action: @escaping () -> Void) -> some View {
-        Button { action() } label: {
-            HStack(spacing: 10) {
-                Image(systemName: symbol)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(Color.accentColor)
-                    .frame(width: 30, height: 30)
-                    .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.accentSoft))
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(value)
-                        .font(.system(size: 19, weight: .bold, design: .rounded))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.7)
-                    Text(label)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 0)
+                            action: (() -> Void)? = nil) -> some View {
+        let content = HStack(spacing: 10) {
+            Image(systemName: symbol)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 30, height: 30)
+                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.accentSoft))
+            VStack(alignment: .leading, spacing: 1) {
+                Text(value)
+                    .font(.system(size: 19, weight: .bold, design: .rounded))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                Text(label)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
-            .padding(.horizontal, 10).padding(.vertical, 9)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Theme.insetFill, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .contentShape(Rectangle())
-            .opacity(enabled ? 1 : 0.55)
+            Spacer(minLength: 0)
         }
-        .buttonStyle(.plain)
-        .disabled(!enabled)
+        .padding(.horizontal, 10).padding(.vertical, 9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.insetFill, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .contentShape(Rectangle())
+
+        return Group {
+            if let action {
+                Button { action() } label: { content }
+                    .buttonStyle(.plain)
+                    .disabled(!enabled)
+                    .opacity(enabled ? 1 : 0.55)
+            } else {
+                content
+            }
+        }
         .accessibilityLabel("\(value) \(label)")
     }
 
@@ -5928,65 +5896,7 @@ struct ContentView: View {
             }
             .background(Theme.pageFill)
             .toolbar(.hidden, for: .navigationBar)
-            .overlay(alignment: .topTrailing) {
-                if showingGameMenu {
-                    ZStack(alignment: .topTrailing) {
-                        Color.black.opacity(0.06).ignoresSafeArea()
-                            .onTapGesture { showingGameMenu = false }
-                        gameMenuCard
-                            .padding(.top, 50)
-                            .padding(.trailing, 64)
-                            .transition(.opacity)
-                    }
-                }
-            }
         }
-    }
-
-    /// The game list, drawn as a menu card under the filter button, for the overview's Games tile.
-    private var gameMenuCard: some View {
-        VStack(spacing: 0) {
-            ScrollView {
-                VStack(spacing: 0) {
-                    gameMenuRow("All games", id: nil)
-                    Divider().padding(.leading, 16)
-                    ForEach(Array(installedGameOptions.enumerated()), id: \.element.id) { index, game in
-                        if index > 0 { Divider().padding(.leading, 16) }
-                        gameMenuRow(game.name, id: game.id)
-                    }
-                }
-            }
-            .frame(maxHeight: 340)
-        }
-        .frame(width: 240)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
-        .shadow(color: .black.opacity(0.2), radius: 24, y: 10)
-    }
-
-    private func gameMenuRow(_ title: String, id: String?) -> some View {
-        Button {
-            Haptics.select()
-            selectedGame = id
-            selectedTag = nil
-            showingGameMenu = false
-        } label: {
-            HStack(spacing: 8) {
-                Text(title)
-                    .font(.system(size: 17))
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-                Spacer(minLength: 8)
-                if selectedGame == id {
-                    Image(systemName: "checkmark")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(Color.accentColor)
-                }
-            }
-            .padding(.horizontal, 16)
-            .frame(height: 44)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
     }
 
     private var librarySearch: Binding<String> {
@@ -6159,7 +6069,6 @@ struct ContentView: View {
                   : "line.3.horizontal.decrease.circle")
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(activeFilterCount > 0 ? Color.accentColor : Color.secondary)
-                .opacity(showingGameMenu ? 0.7 : 1)
                 .frame(width: 40, height: 40)
                 .background(Circle().fill(Theme.insetFill))
                 .contentShape(Circle())
@@ -8974,85 +8883,4 @@ struct DevLogView: View {
 
 
 
-/// The library's filter menu, in sheet form, so the download screen's game tile can open it.
-struct LibraryFilterSheet: View {
-    @Binding var filter: String
-    @Binding var sortOrder: String
-    @Binding var selectedGame: String?
-    @Binding var selectedTag: String?
-    let games: [(id: String, name: String)]
-    let tags: [String]
-    let sortOrders: [String]
-    @Environment(\.dismiss) private var dismiss
 
-    var body: some View {
-        NavigationStack {
-            List {
-                Section("Game") {
-                    choice("All games", on: selectedGame == nil) {
-                        selectedGame = nil
-                        selectedTag = nil
-                    }
-                    ForEach(games, id: \.id) { game in
-                        choice(game.name, on: selectedGame == game.id) {
-                            selectedGame = game.id
-                            selectedTag = nil
-                        }
-                    }
-                }
-                if !tags.isEmpty {
-                    Section("Tag") {
-                        choice("All tags", on: selectedTag == nil) { selectedTag = nil }
-                        ForEach(tags, id: \.self) { tag in
-                            choice(tag, on: selectedTag == tag) { selectedTag = tag }
-                        }
-                    }
-                }
-                Section("Show") {
-                    choice("All", on: filter == "All") { filter = "All" }
-                    choice("Updates", on: filter == "Updates") { filter = "Updates" }
-                    choice("Favourites", on: filter == "Favourites") { filter = "Favourites" }
-                    choice("Problems", on: filter == "Problems") { filter = "Problems" }
-                }
-                Section("Sort by") {
-                    ForEach(sortOrders, id: \.self) { order in
-                        choice(order, on: sortOrder == order) { sortOrder = order }
-                    }
-                }
-                Section {
-                    Button("Reset filters", role: .destructive) {
-                        Haptics.tap()
-                        filter = "All"
-                        selectedGame = nil
-                        selectedTag = nil
-                        sortOrder = "Recently added"
-                    }
-                }
-            }
-            .navigationTitle("Filters")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
-            }
-        }
-    }
-
-    private func choice(_ title: String, on: Bool, action: @escaping () -> Void) -> some View {
-        Button {
-            Haptics.select()
-            action()
-        } label: {
-            HStack {
-                Text(title)
-                Spacer(minLength: 8)
-                if on {
-                    Image(systemName: "checkmark")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(Color.accentColor)
-                }
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
-}
