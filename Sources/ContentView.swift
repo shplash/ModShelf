@@ -3746,8 +3746,8 @@ struct AppTabBar: View {
 
     private var pill: some View {
         let shape = RoundedRectangle(cornerRadius: compact ? 16 : 20, style: .continuous)
-        return HStack(spacing: 4) {
-            ForEach(0..<items.count, id: \.self) { i in item(i, compact: compact) }
+        return HStack(spacing: 2) {
+            ForEach(0..<items.count, id: \.self) { i in item(i, compact: compact, wide: false) }
         }
         .padding(.horizontal, 4)
         .frame(height: compact ? 46 : 64)
@@ -3761,7 +3761,7 @@ struct AppTabBar: View {
         .animation(.spring(response: 0.32, dampingFraction: 0.85), value: compact)
     }
 
-    private func item(_ i: Int, compact: Bool) -> some View {
+    private func item(_ i: Int, compact: Bool, wide: Bool) -> some View {
         let on = selected == i
         return Button {
             if selected != i { Haptics.select() }
@@ -3778,7 +3778,8 @@ struct AppTabBar: View {
                     .frame(height: compact ? 0 : 12)
             }
             .foregroundStyle(on ? Color.accentColor : Color.secondary)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .frame(width: wide ? nil : (compact ? 52 : 64))
+            .frame(maxWidth: wide ? .infinity : nil, maxHeight: .infinity)
             .background(
                 RoundedRectangle(cornerRadius: compact ? 13 : 16, style: .continuous)
                     .fill(on ? Theme.accentSoft : Color.clear)
@@ -3806,7 +3807,7 @@ struct AppTabBar: View {
 
     private var bar: some View {
         HStack(spacing: 4) {
-            ForEach(0..<items.count, id: \.self) { i in item(i, compact: false) }
+            ForEach(0..<items.count, id: \.self) { i in item(i, compact: false, wide: true) }
         }
         .padding(.horizontal, 6)
         .frame(height: 64)
@@ -4147,7 +4148,6 @@ struct ContentView: View {
     @State private var dragOffsetY: CGFloat = 0
     @State private var dragTarget: Int?
     @State private var confirmReorder: ReorderRequest?
-    @State private var showingFilters = false
 
     /// Space reserved under every tab for the tab bar, so content can always scroll clear of it.
     private var tabBarReserve: CGFloat { tabStyle == "bar" ? 78 : 86 }
@@ -4408,6 +4408,7 @@ struct ContentView: View {
                       libraryBadge: updateCount > 0,
                       firstTitle: store.queueRows.count > 1 ? "Queue" : "Download",
                       onTap: { tabTapped($0) })
+                .frame(maxWidth: .infinity)
                 .frame(height: tabBarReserve, alignment: .bottom)
         }
         .tint(Color.accentColor)
@@ -5682,84 +5683,128 @@ struct ContentView: View {
 
     private var libraryView: some View {
         NavigationStack {
-            VStack(spacing: 0) {
-                libraryHeaderBar
-                libraryToolbar
+            Group {
                 if showingHistory { historyContent } else { libraryBody }
             }
             .background(Theme.pageFill)
-            .toolbar(.hidden, for: .navigationBar)
-            .sheet(isPresented: $showingFilters) {
-                LibraryFiltersSheet(sortOrder: $sortOrder,
-                                    filter: $libraryFilter,
-                                    selectedGame: $selectedGame,
-                                    selectedTag: $selectedTag,
-                                    games: installedGameOptions,
-                                    tags: installedTagOptions,
-                                    sortGroups: sortGroups)
-            }
+            .navigationTitle(showingHistory ? "History" : "Library")
+            .navigationBarTitleDisplayMode(.large)
+            .searchable(text: librarySearchText,
+                        placement: .navigationBarDrawer(displayMode: .always),
+                        prompt: showingHistory ? "Search history" : "Search mods")
+            .toolbar { libraryToolbarItems }
+            .toolbarBackground(Theme.pageFill, for: .navigationBar)
+            .toolbarBackground(.visible, for: .navigationBar)
         }
     }
 
-    /// Title, a line that says what is showing, and the one contextual button on the right.
-    private var libraryHeaderBar: some View {
-        HStack(alignment: .center, spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(showingHistory ? "History" : "Library")
-                    .font(Theme.titleFont)
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
-                Text(librarySubtitle)
-                    .font(Theme.subtitleFont)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            Spacer(minLength: 0)
-            libraryHeaderAction
-        }
-        .padding(.horizontal, Theme.page)
-        .padding(.top, 8)
-        .padding(.bottom, 10)
-        .accessibilityElement(children: .contain)
+    private var librarySearchText: Binding<String> {
+        Binding(get: { showingHistory ? historySearch : searchText },
+                set: { value in
+                    if showingHistory { historySearch = value } else { searchText = value }
+                })
     }
 
-    @ViewBuilder private var libraryHeaderAction: some View {
-        if showingHistory {
-            Button { Haptics.tap(); showingHistory = false } label: {
-                libraryHeaderLabel("Close", symbol: "xmark")
+    @ToolbarContentBuilder private var libraryToolbarItems: some ToolbarContent {
+        if selecting {
+            ToolbarItem(placement: .navigationBarLeading) {
+                Button("Done") { finishSelecting() }
+                    .fontWeight(.semibold)
             }
-            .buttonStyle(.plain)
-        } else if selecting {
-            Button {
-                Haptics.tap()
-                withAnimation(.easeOut(duration: 0.18)) {
-                    selecting = false
-                    selection.removeAll()
+        } else if showingHistory {
+            ToolbarItem(placement: .navigationBarLeading) {
+                Button {
+                    Haptics.tap()
+                    showingHistory = false
+                } label: {
+                    Label("Library", systemImage: "chevron.left")
                 }
-            } label: {
-                libraryHeaderLabel("Done", symbol: "checkmark")
+                .labelStyle(.titleAndIcon)
             }
-            .buttonStyle(.plain)
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button("Clear", role: .destructive) { requestClearHistory() }
+                    .disabled(store.history.isEmpty)
+            }
         } else {
-            Button { Haptics.tap(); showingHistory = true } label: {
-                libraryHeaderLabel("History", symbol: "clock.arrow.circlepath")
+            ToolbarItemGroup(placement: .navigationBarTrailing) {
+                Menu {
+                    Section("Show") {
+                        ForEach(["All", "Updates", "Favourites", "Problems"], id: \.self) { name in
+                            Button {
+                                Haptics.select()
+                                libraryFilter = name
+                            } label: {
+                                if libraryFilter == name { Label(name, systemImage: "checkmark") } else { Text(name) }
+                            }
+                        }
+                    }
+                    Section("Sort by") {
+                        ForEach(Array(sortGroups.enumerated()), id: \.offset) { _, group in
+                            ForEach(group, id: \.self) { order in
+                                Button {
+                                    Haptics.select()
+                                    sortOrder = order
+                                } label: {
+                                    if sortOrder == order { Label(order, systemImage: "checkmark") } else { Text(order) }
+                                }
+                            }
+                        }
+                    }
+                    if !installedGameOptions.isEmpty {
+                        Menu {
+                            Button {
+                                Haptics.select()
+                                selectedGame = nil
+                                selectedTag = nil
+                            } label: {
+                                if selectedGame == nil { Label("All games", systemImage: "checkmark") } else { Text("All games") }
+                            }
+                            ForEach(installedGameOptions, id: \.id) { game in
+                                Button {
+                                    Haptics.select()
+                                    selectedGame = game.id
+                                    selectedTag = nil
+                                } label: {
+                                    if selectedGame == game.id { Label(game.name, systemImage: "checkmark") } else { Text(game.name) }
+                                }
+                            }
+                        } label: {
+                            Label(selectedGameName ?? "Game", systemImage: "gamecontroller")
+                        }
+                    }
+                    if !installedTagOptions.isEmpty {
+                        Menu {
+                            Button {
+                                Haptics.select()
+                                selectedTag = nil
+                            } label: {
+                                if selectedTag == nil { Label("All tags", systemImage: "checkmark") } else { Text("All tags") }
+                            }
+                            ForEach(installedTagOptions, id: \.self) { tag in
+                                Button {
+                                    Haptics.select()
+                                    selectedTag = tag
+                                } label: {
+                                    if selectedTag == tag { Label(tag, systemImage: "checkmark") } else { Text(tag) }
+                                }
+                            }
+                        } label: {
+                            Label(selectedTag ?? "Tag", systemImage: "tag")
+                        }
+                    }
+                    if activeFilterCount > 0 {
+                        Divider()
+                        Button("Reset filters", role: .destructive) { resetLibraryFilters() }
+                    }
+                } label: {
+                    Image(systemName: activeFilterCount > 0
+                          ? "line.3.horizontal.decrease.circle.fill"
+                          : "line.3.horizontal.decrease.circle")
+                }
+                .accessibilityLabel(activeFilterCount > 0 ? "Filters, \(activeFilterCount) active" : "Filters")
+                moreMenu
             }
-            .buttonStyle(.plain)
         }
-    }
-
-    private func libraryHeaderLabel(_ title: String, symbol: String) -> some View {
-        HStack(spacing: 5) {
-            Image(systemName: symbol).font(.system(size: 12, weight: .semibold))
-            Text(title).font(.system(size: 13, weight: .semibold))
-        }
-        .foregroundStyle(Color.accentColor)
-        .padding(.horizontal, 12)
-        .frame(height: 34)
-        .background(Capsule().fill(Theme.accentSoft))
-        .contentShape(Capsule())
-        .accessibilityLabel(title)
     }
 
     private var librarySubtitle: String {
@@ -5792,57 +5837,6 @@ struct ContentView: View {
         return count
     }
 
-    private var libraryToolbar: some View {
-        HStack(spacing: 8) {
-            librarySearchField
-            if showingHistory {
-                libraryIconButton("trash") { if confirmDelete { confirmClearHistory = true } else { store.clearHistory() } }
-                    .disabled(store.history.isEmpty)
-                    .opacity(store.history.isEmpty ? 0.45 : 1)
-            } else {
-                libraryFilterButton
-                moreMenu
-            }
-        }
-        .padding(.horizontal, Theme.page)
-        .padding(.bottom, 12)
-    }
-
-    private var libraryFilterButton: some View {
-        Button {
-            Haptics.tap()
-            showingFilters = true
-        } label: {
-            ZStack(alignment: .topTrailing) {
-                Image(systemName: "line.3.horizontal.decrease")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(activeFilterCount > 0 ? Color.accentColor : Color.secondary)
-                    .frame(width: 44, height: 40)
-                    .chipSurface()
-                if activeFilterCount > 0 {
-                    Circle()
-                        .fill(Color.accentColor)
-                        .frame(width: 7, height: 7)
-                        .overlay(Circle().stroke(Theme.cardFill, lineWidth: 1.5))
-                        .offset(x: -6, y: 6)
-                }
-            }
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(activeFilterCount > 0 ? "Filters, \(activeFilterCount) active" : "Filters")
-    }
-
-    private func libraryIconButton(_ symbol: String, action: @escaping () -> Void) -> some View {
-        Button { Haptics.tap(); action() } label: {
-            Image(systemName: symbol)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(Color.accentColor)
-                .frame(width: 44, height: 40)
-                .chipSurface()
-        }
-        .buttonStyle(.plain)
-    }
-
     private var moreMenu: some View {
         Menu {
             if selecting {
@@ -5863,6 +5857,9 @@ struct ContentView: View {
                 Button { store.verifyAllFiles() } label: { Label("Verify files", systemImage: "checkmark.shield") }
                     .disabled(store.isVerifyingAll)
                 Button { beginSelecting() } label: { Label("Select mods", systemImage: "checkmark.circle") }
+                Button { Haptics.tap(); showingHistory = true } label: {
+                    Label("Download history", systemImage: "clock.arrow.circlepath")
+                }
                 Divider()
                 let pending = store.library.filter { $0.updateAvailable }.count
                 Button { store.updateAll(); selectedTab = 0 } label: { Label("Update all (\(pending))", systemImage: "arrow.down.circle") }
@@ -5881,12 +5878,9 @@ struct ContentView: View {
                 .disabled(store.library.isEmpty)
             }
         } label: {
-            Image(systemName: "ellipsis")
-                .font(.system(size: 16, weight: .bold))
-                .foregroundStyle(Color.secondary)
-                .frame(width: 44, height: 40)
-                .chipSurface()
+            Image(systemName: "ellipsis.circle")
         }
+        .accessibilityLabel("More")
     }
 
     private func beginSelecting() {
@@ -5894,9 +5888,24 @@ struct ContentView: View {
         withAnimation(.easeOut(duration: 0.18)) { selecting = true }
     }
 
-    private var librarySearchField: some View {
-        SearchField(placeholder: showingHistory ? "Search history" : "Search library",
-                    text: showingHistory ? $historySearch : $searchText)
+    private func finishSelecting() {
+        Haptics.tap()
+        withAnimation(.easeOut(duration: 0.18)) {
+            selecting = false
+            selection.removeAll()
+        }
+    }
+
+    private func resetLibraryFilters() {
+        Haptics.tap()
+        libraryFilter = "All"
+        selectedGame = nil
+        selectedTag = nil
+        sortOrder = "Recently added"
+    }
+
+    private func requestClearHistory() {
+        if confirmDelete { confirmClearHistory = true } else { store.clearHistory() }
     }
 
     private var libraryBody: some View {
@@ -5915,11 +5924,26 @@ struct ContentView: View {
         }
     }
 
+    /// A quiet line of figures under the search field, part of the scrolling content rather than chrome.
+    private var librarySummaryRow: some View {
+        HStack(spacing: 0) {
+            Text(librarySubtitle)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+        }
+    }
+
     private func gridContent(_ items: [WorkshopItem]) -> some View {
         ScrollView {
             VStack(spacing: 0) {
                 ScrollSpy(onChange: handleScroll)
                 ScrollToTopSentinel()
+                librarySummaryRow
+                    .padding(.horizontal, Theme.page)
+                    .padding(.top, 4)
+                    .padding(.bottom, 2)
                 LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 14) {
                     ForEach(items) { item in gridCard(item) }
                 }
@@ -5938,6 +5962,10 @@ struct ContentView: View {
                 .listRowInsets(EdgeInsets()).listRowBackground(Color.clear).listRowSeparator(.hidden)
             ScrollToTopSentinel()
                 .listRowInsets(EdgeInsets()).listRowBackground(Color.clear).listRowSeparator(.hidden)
+            librarySummaryRow
+                .listRowInsets(EdgeInsets(top: 2, leading: Theme.page, bottom: 2, trailing: Theme.page))
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
             ForEach(items) { item in
                 listRow(item)
                     .listRowInsets(EdgeInsets(top: 5, leading: Theme.page, bottom: 5, trailing: Theme.page))
@@ -6131,6 +6159,9 @@ struct ContentView: View {
                             VStack(spacing: 0) {
                                 ScrollSpy(onChange: handleScroll)
                                 ScrollToTopSentinel()
+                                librarySummaryRow
+                                    .padding(.horizontal, Theme.page)
+                                    .padding(.bottom, 2)
                                 LazyVStack(spacing: 10) {
                                     ForEach(filteredHistory) { record in
                                         historyRow(record)
@@ -8584,95 +8615,5 @@ struct DevLogView: View {
                 .disabled(store.runtimeLog.isEmpty)
             }
         }
-    }
-}
-/// Every way of narrowing the library in one sheet, instead of a strip of chips on the page.
-struct LibraryFiltersSheet: View {
-    @Binding var sortOrder: String
-    @Binding var filter: String
-    @Binding var selectedGame: String?
-    @Binding var selectedTag: String?
-    let games: [(id: String, name: String)]
-    let tags: [String]
-    let sortGroups: [[String]]
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        NavigationStack {
-            List {
-                Section("Show") {
-                    choice("All", on: filter == "All") { filter = "All" }
-                    choice("Updates", on: filter == "Updates") { filter = "Updates" }
-                    choice("Favourites", on: filter == "Favourites") { filter = "Favourites" }
-                    choice("Problems", on: filter == "Problems") { filter = "Problems" }
-                }
-
-                Section("Sort by") {
-                    ForEach(Array(sortGroups.enumerated()), id: \.offset) { _, group in
-                        ForEach(group, id: \.self) { order in
-                            choice(order, on: sortOrder == order) { sortOrder = order }
-                        }
-                    }
-                }
-
-                if !games.isEmpty {
-                    Section("Game") {
-                        choice("All games", on: selectedGame == nil) {
-                            selectedGame = nil
-                            selectedTag = nil
-                        }
-                        ForEach(games, id: \.id) { game in
-                            choice(game.name, on: selectedGame == game.id) {
-                                selectedGame = game.id
-                                selectedTag = nil
-                            }
-                        }
-                    }
-                }
-
-                if !tags.isEmpty {
-                    Section("Tag") {
-                        choice("All tags", on: selectedTag == nil) { selectedTag = nil }
-                        ForEach(tags, id: \.self) { tag in
-                            choice(tag, on: selectedTag == tag) { selectedTag = tag }
-                        }
-                    }
-                }
-
-                Section {
-                    Button("Reset filters", role: .destructive) {
-                        Haptics.tap()
-                        filter = "All"
-                        selectedGame = nil
-                        selectedTag = nil
-                        sortOrder = "Recently added"
-                    }
-                }
-            }
-            .navigationTitle("Filters")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
-            }
-        }
-    }
-
-    private func choice(_ title: String, on: Bool, action: @escaping () -> Void) -> some View {
-        Button {
-            Haptics.select()
-            action()
-        } label: {
-            HStack {
-                Text(title)
-                Spacer(minLength: 8)
-                if on {
-                    Image(systemName: "checkmark")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(Color.accentColor)
-                }
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
     }
 }
