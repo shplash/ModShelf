@@ -114,7 +114,29 @@ struct WorkshopItem: Identifiable, Codable, Equatable {
         lastVerifiedFiles = try c.decodeIfPresent(Int.self, forKey: .lastVerifiedFiles)
     }
 
-    var displayTitle: String { title ?? "Workshop item \(id)" }
+    var displayTitle: String {
+        if let title, !title.isEmpty, title != Self.placeholderTitle(id) { return title }
+        if let folderName = folder.split(separator: "/").last.map(String.init),
+           !folderName.isEmpty, folderName != id {
+            return folderName
+        }
+        return Self.placeholderTitle(id)
+    }
+
+    /// The title Steam never gave us, which must never be stored as a real one.
+    static func placeholderTitle(_ id: String) -> String { "Workshop item \(id)" }
+
+    /// A title worth keeping: not empty, not the placeholder.
+    static func realTitle(_ raw: String?, id: String) -> String? {
+        guard let raw, !raw.isEmpty, raw != placeholderTitle(id) else { return nil }
+        return raw
+    }
+
+    /// The installed folder's name, which is the mod's own name when Steam had no title.
+    static func folderTitle(_ url: URL, id: String) -> String? {
+        let name = url.lastPathComponent
+        return name.isEmpty || name == id ? nil : name
+    }
 
     // Mods outside this folder were moved by the user, so their files can't be read here.
     static let managedRoot: String = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].path
@@ -780,6 +802,8 @@ final class WorkshopStore: ObservableObject {
     @Published var phases: [String] = []
     @Published var revealFolderURL: URL?
     @Published var appUpdateMessage = ""
+    /// Set only when a newer version is waiting, so the banner never nags about being up to date.
+    @Published var appUpdateNotice = ""
     @Published var isCheckingAppUpdate = false
 
     /// The Go engine, left to inference because its type comes from the generated binding. A failure
@@ -926,6 +950,7 @@ final class WorkshopStore: ObservableObject {
         _ = sessionPath
         repairFolders()
         migrateRecords()
+        migrateTitles()
         refreshLibraryBytes()
         resolveGameNames()
         if !username.isEmpty && !password.isEmpty { Task { await signIn(automatic: true) } }
@@ -1825,7 +1850,11 @@ final class WorkshopStore: ObservableObject {
                 // "Updated" only moves when the Workshop version changed, so a reinstall is not an update.
                 let sameVersion = previousVersion > 0 && meta.updatedAt == previousVersion
                 item.updatedAt = sameVersion ? (existing?.updatedAt ?? Date()) : Date()
-                item.title = meta.title
+                if let realTitle = WorkshopItem.realTitle(meta.title, id: activeID) {
+                    item.title = realTitle
+                } else if item.title == nil || item.title == WorkshopItem.placeholderTitle(activeID) {
+                    item.title = WorkshopItem.folderTitle(done.url, id: activeID)
+                }
                 item.description = meta.description.isEmpty ? item.description : meta.description
                 item.imageURL = meta.imageURL.isEmpty ? item.imageURL : meta.imageURL
                 if meta.updatedAt > 0 { item.publishedUpdatedAt = meta.updatedAt }
@@ -2601,7 +2630,8 @@ final class WorkshopStore: ObservableObject {
                 if (library[i].gameName ?? "").isEmpty, let game = manifest.gameName, !game.isEmpty {
                     library[i].gameName = game; changed = true
                 }
-                if (library[i].title ?? "").isEmpty, let title = manifest.title, !title.isEmpty {
+                if (library[i].title ?? "").isEmpty,
+                   let title = WorkshopItem.realTitle(manifest.title, id: library[i].id) {
                     library[i].title = title; changed = true
                 }
             }
@@ -2618,7 +2648,7 @@ final class WorkshopStore: ObservableObject {
                 var item = WorkshopItem(id: id, folder: folder.path,
                                         addedAt: manifest.installedAt ?? Date(),
                                         updatedAt: manifest.installedAt ?? Date())
-                item.title = manifest.title
+                item.title = WorkshopItem.realTitle(manifest.title, id: id)
                 item.appID = manifest.appID
                 item.gameName = manifest.gameName
                 item.publishedUpdatedAt = manifest.publishedUpdatedAt
@@ -2798,7 +2828,7 @@ final class WorkshopStore: ObservableObject {
             guard let fresh = await SteamMeta.fetch(id: id, includePage: false) else { return }
             guard let index = library.firstIndex(where: { $0.id == id }) else { return }
             if fresh.updatedAt > 0 { library[index].publishedUpdatedAt = fresh.updatedAt }
-            if !fresh.title.isEmpty { library[index].title = fresh.title }
+            if let realTitle = WorkshopItem.realTitle(fresh.title, id: id) { library[index].title = realTitle }
             if !fresh.tags.isEmpty { library[index].tags = fresh.tags }
             if fresh.rating != nil { library[index].rating = fresh.rating; library[index].ratingCount = fresh.ratingCount }
             if let game = fresh.gameName { library[index].gameName = game }
@@ -3052,6 +3082,26 @@ final class WorkshopStore: ObservableObject {
         return "\(item.displayTitle) is outside ModShelf now. It was last checked \(Fmt.date(when))\(size), so it should still be fine."
     }
 
+    /// Older builds kept "Workshop item <id>" as a real title when Steam had no details; drop it so the
+    /// installed folder's name can stand in until the real title arrives.
+    private func migrateTitles() {
+        var changed = false
+        for i in library.indices where library[i].title == WorkshopItem.placeholderTitle(library[i].id) {
+            library[i].title = nil
+            changed = true
+        }
+        if changed { saveLibrary() }
+
+        var historyChanged = false
+        for index in history.indices
+        where history[index].title == WorkshopItem.placeholderTitle(history[index].workshopID) {
+            guard let item = library.first(where: { $0.id == history[index].workshopID }) else { continue }
+            history[index].title = item.displayTitle
+            historyChanged = true
+        }
+        if historyChanged { saveHistory() }
+    }
+
     /// Libraries saved before install records existed get one, taken from the download itself.
     func migrateRecords() {
         var changed = false
@@ -3200,7 +3250,9 @@ final class WorkshopStore: ObservableObject {
         }
         library[index].lastCheckedAt = Date()
         library[index].checkFailed = false
-        library[index].title = meta.title
+        if let realTitle = WorkshopItem.realTitle(meta.title, id: library[index].id) {
+            library[index].title = realTitle
+        }
         if !meta.description.isEmpty { library[index].description = meta.description }
         if !meta.imageURL.isEmpty { library[index].imageURL = meta.imageURL }
         if let app = meta.appID { library[index].appID = app }
@@ -3388,15 +3440,15 @@ final class WorkshopStore: ObservableObject {
     /// The release the app checks against: the build publishes a tiny version file next to the IPA.
     nonisolated static let appRepo = "shplash/ModShelf"
 
-    func checkForAppUpdate() {
+    func checkForAppUpdate(quiet: Bool = false) {
         guard !isCheckingAppUpdate else { return }
         isCheckingAppUpdate = true
-        appUpdateMessage = "Checking for updates…"
+        if !quiet { appUpdateMessage = "Checking for updates…" }
         Task { @MainActor in
             defer { isCheckingAppUpdate = false }
             // Follow the releases/latest redirect instead of the API, which rate-limits by IP.
             guard let url = URL(string: "https://github.com/\(Self.appRepo)/releases/latest") else {
-                appUpdateMessage = "Couldn't check for updates."
+                if !quiet { appUpdateMessage = "Couldn't check for updates." }
                 return
             }
             var request = URLRequest(url: url)
@@ -3405,13 +3457,13 @@ final class WorkshopStore: ObservableObject {
                   let finalURL = response.url,
                   let tag = finalURL.pathComponents.last,
                   tag.hasPrefix("v") else {
-                appUpdateMessage = "Couldn't check for updates."
+                if !quiet { appUpdateMessage = "Couldn't check for updates." }
                 return
             }
             let latest = String(tag.dropFirst())
-            appUpdateMessage = Self.version(latest, isNewerThan: modShelfVersion)
-                ? "v\(latest) is available."
-                : "You're on the latest version."
+            let newer = Self.version(latest, isNewerThan: modShelfVersion)
+            appUpdateMessage = newer ? "v\(latest) is available." : "You're on the latest version."
+            appUpdateNotice = newer ? "v\(latest) is available." : ""
             log("app update check: latest \(latest), current \(modShelfVersion)")
         }
     }
@@ -3703,6 +3755,34 @@ struct SectionTitle: View {
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 6)
+    }
+}
+
+/// The refresh arrow, turning on its own so its colour never animates with it.
+struct SpinningRefreshIcon: View {
+    let busy: Bool
+    @State private var angle: Double = 0
+
+    var body: some View {
+        Image(systemName: "arrow.triangle.2.circlepath")
+            .font(.system(size: 15, weight: .semibold))
+            .foregroundStyle(busy ? Color.accentColor : Color.secondary)
+            .rotationEffect(.degrees(angle))
+            .onAppear { if busy { start() } }
+            .onChange(of: busy) { isBusy in
+                if isBusy {
+                    start()
+                } else {
+                    withAnimation(.easeOut(duration: 0.2)) { angle = 0 }
+                }
+            }
+    }
+
+    private func start() {
+        angle = 0
+        withAnimation(.linear(duration: 1).repeatForever(autoreverses: false)) {
+            angle = 360
+        }
     }
 }
 
@@ -4172,7 +4252,9 @@ struct ContentView: View {
     @State private var dragOffsetY: CGFloat = 0
     @State private var dragTarget: Int?
     @State private var confirmReorder: ReorderRequest?
-    @State private var moreMenuOpen = false
+    @State private var showingGamePicker = false
+    @State private var showingMoreMenu = false
+    @AppStorage("options.appUpdateNotice") private var appUpdateNoticeOn = true
     @State private var bannerClearTask: Task<Void, Never>?
 
     /// Space reserved under every tab for the tab bar, so content can always scroll clear of it.
@@ -4397,6 +4479,7 @@ struct ContentView: View {
             .task {
                 store.runLaunchChecks()
                 rebuildLibraryOptions()
+                if appUpdateNoticeOn { store.checkForAppUpdate(quiet: true) }
             }
     }
 
@@ -4774,8 +4857,9 @@ struct ContentView: View {
         let isError = !store.errorMessage.isEmpty && !store.showLogin
         let verifyLine = store.verifyStatus
         let updateLine = store.updateCheckStatus
+        let appNotice = store.appUpdateNotice
         let note = store.operationMessage
-        if isError || !verifyLine.isEmpty || !updateLine.isEmpty || !note.isEmpty {
+        if isError || !verifyLine.isEmpty || !updateLine.isEmpty || !appNotice.isEmpty || !note.isEmpty {
             HStack(alignment: .top, spacing: 10) {
                 if store.isExporting || store.isCheckingUpdates || store.isVerifyingAll {
                     ProgressView().scaleEffect(0.7).frame(width: 16, height: 18)
@@ -4796,6 +4880,9 @@ struct ContentView: View {
                     if !verifyLine.isEmpty {
                         bannerLine("Validating files", verifyLine, tint: .accentColor)
                     }
+                    if !appNotice.isEmpty {
+                        bannerLine("App update", appNotice, tint: .accentColor)
+                    }
                     if !note.isEmpty {
                         bannerLine("Status", note, tint: .accentColor)
                     }
@@ -4806,6 +4893,7 @@ struct ContentView: View {
                     store.operationMessage = ""
                     store.verifyStatus = ""
                     store.updateCheckStatus = ""
+                    store.appUpdateNotice = ""
                 } label: {
                     Image(systemName: "xmark").font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(.tertiary)
@@ -5477,15 +5565,20 @@ struct ContentView: View {
                 glanceStat("\(store.library.count)", "mods", symbol: "square.grid.2x2.fill") {
                     openLibrary(filter: "All")
                 }
-                glanceStat("\(gameCount)", gameCount == 1 ? "game" : "games", symbol: "gamecontroller.fill") {
-                    openLibrary(sortedByGame: true)
+                glanceStat("\(gameCount)", gameCount == 1 ? "game" : "games", symbol: "gamecontroller.fill",
+                           enabled: gameCount > 1) {
+                    openLibrary(filter: "All")
+                    // The library's picker lives on that tab, so let it appear before asking.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showingGamePicker = true }
                 }
             }
             HStack(spacing: 8) {
-                glanceStat("\(updateCount)", "updates", symbol: "arrow.down.circle.fill") {
+                glanceStat("\(updateCount)", "updates", symbol: "arrow.down.circle.fill",
+                           enabled: updateCount > 0) {
                     openLibrary(filter: "Updates")
                 }
-                glanceStat("\(favouriteCount)", "favourites", symbol: "star.fill") {
+                glanceStat("\(favouriteCount)", "favourites", symbol: "star.fill",
+                           enabled: favouriteCount > 0) {
                     openLibrary(filter: "Favourites")
                 }
             }
@@ -5510,6 +5603,7 @@ struct ContentView: View {
 
     /// A figure on the download screen; each one opens a different view of the library.
     private func glanceStat(_ value: String, _ label: String, symbol: String,
+                            enabled: Bool = true,
                             action: @escaping () -> Void) -> some View {
         Button { action() } label: {
             HStack(spacing: 10) {
@@ -5534,8 +5628,10 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Theme.insetFill, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             .contentShape(Rectangle())
+            .opacity(enabled ? 1 : 0.55)
         }
         .buttonStyle(.plain)
+        .disabled(!enabled)
         .accessibilityLabel("\(value) \(label)")
     }
 
@@ -5723,6 +5819,20 @@ struct ContentView: View {
             }
             .background(Theme.pageFill)
             .toolbar(.hidden, for: .navigationBar)
+            .confirmationDialog("Choose a game", isPresented: $showingGamePicker, titleVisibility: .visible) {
+                Button("All games") {
+                    selectedGame = nil
+                    selectedTag = nil
+                }
+                ForEach(installedGameOptions, id: \.id) { game in
+                    Button(game.name) {
+                        Haptics.select()
+                        selectedGame = game.id
+                        selectedTag = nil
+                    }
+                }
+                Button("Cancel", role: .cancel) { }
+            }
         }
     }
 
@@ -5791,12 +5901,7 @@ struct ContentView: View {
             Haptics.tap()
             store.refreshAndVerify()
         } label: {
-            Image(systemName: "arrow.triangle.2.circlepath")
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(busy ? Color.accentColor : Color.secondary)
-                .rotationEffect(.degrees(busy ? 360 : 0))
-                .animation(busy ? .linear(duration: 1).repeatForever(autoreverses: false) : .default,
-                           value: busy)
+            SpinningRefreshIcon(busy: busy)
                 .frame(width: 40, height: 40)
                 .background(Circle().fill(Theme.insetFill))
                 .contentShape(Circle())
@@ -5939,58 +6044,51 @@ struct ContentView: View {
     }
 
     private var moreMenu: some View {
-        Menu {
-            if selecting {
-                Button { selectAllVisible() } label: { Label("Select all", systemImage: "checkmark.circle") }
-                Button { selection.removeAll() } label: { Label("Deselect all", systemImage: "circle.dashed") }
-                Divider()
-                Button { exportSelection() } label: {
-                    Label(selection.isEmpty ? "Export as ZIP" : "Export selected (\(selection.count)) as ZIP", systemImage: "square.and.arrow.up")
-                }
-                .disabled(selection.isEmpty || store.isExporting)
-                Button(role: .destructive) { requestDeleteSelected() } label: {
-                    Label("Delete selected (\(selection.count))", systemImage: "trash")
-                }
-                .disabled(selection.isEmpty)
-            } else {
-                Button { Haptics.tap(); showingHistory = true } label: {
-                    Label("Download history", systemImage: "clock.arrow.circlepath")
-                }
-                Divider()
-                let pending = store.library.filter { $0.updateAvailable }.count
-                Button { store.updateAll(); selectedTab = 0 } label: { Label("Update all (\(pending))", systemImage: "arrow.down.circle") }
-                    .disabled(pending == 0 || store.isBusy)
-                Button { startExportSelection() } label: { Label("Select and export as ZIP", systemImage: "square.and.arrow.up.on.square") }
-                    .disabled(store.library.isEmpty || store.isExporting)
-                Button { beginExport(all: true) } label: { Label(store.isExporting ? "Exporting…" : "Export all as ZIP", systemImage: "square.and.arrow.up") }
-                    .disabled(store.library.isEmpty || store.isExporting)
-                Button {
-                    UIPasteboard.general.string = store.library.map(\.id).joined(separator: "\n")
-                    Haptics.success()
-                    store.operationMessage = "Copied \(store.library.count) Workshop ID\(store.library.count == 1 ? "" : "s")."
-                } label: {
-                    Label("Copy all Workshop IDs", systemImage: "doc.on.doc")
-                }
-                .disabled(store.library.isEmpty)
-            }
+        Button {
+            Haptics.tap()
+            showingMoreMenu = true
         } label: {
             Image(systemName: "ellipsis")
                 .font(.system(size: 16, weight: .bold))
-                .foregroundStyle(moreMenuOpen ? Color.accentColor : Color.secondary)
+                .foregroundStyle(showingMoreMenu ? Color.accentColor : Color.secondary)
                 .frame(width: 40, height: 40)
                 .background(Circle().fill(Theme.insetFill))
                 .contentShape(Circle())
-                .simultaneousGesture(TapGesture().onEnded { flashMoreMenu() })
+        }
+        .buttonStyle(.plain)
+        .confirmationDialog("More", isPresented: $showingMoreMenu, titleVisibility: .hidden) {
+            moreMenuActions
         }
         .accessibilityLabel("More")
     }
 
-    /// The menu has no "is open" callback, so light the icon as it is tapped and fade it back.
-    private func flashMoreMenu() {
-        moreMenuOpen = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) {
-            if moreMenuOpen { withAnimation(.easeOut(duration: 0.2)) { moreMenuOpen = false } }
+    @ViewBuilder private var moreMenuActions: some View {
+        if selecting {
+            Button("Select all") { selectAllVisible() }
+            Button("Deselect all") { selection.removeAll() }
+            Button(selection.isEmpty ? "Export as ZIP" : "Export selected (\(selection.count)) as ZIP") { exportSelection() }
+                .disabled(selection.isEmpty || store.isExporting)
+            Button("Delete selected (\(selection.count))", role: .destructive) { requestDeleteSelected() }
+                .disabled(selection.isEmpty)
+        } else {
+            Button("Download history") { Haptics.tap(); showingHistory = true }
+            let pending = store.library.filter { $0.updateAvailable }.count
+            Button("Update all (\(pending))") { store.updateAll(); selectedTab = 0 }
+                .disabled(pending == 0 || store.isBusy)
+            Button("Select and export as ZIP") { startExportSelection() }
+                .disabled(store.library.isEmpty || store.isExporting)
+            Button(store.isExporting ? "Exporting…" : "Export all as ZIP") { beginExport(all: true) }
+                .disabled(store.library.isEmpty || store.isExporting)
+            Button("Copy all Workshop IDs") { copyAllWorkshopIDs() }
+                .disabled(store.library.isEmpty)
         }
+        Button("Cancel", role: .cancel) { }
+    }
+
+    private func copyAllWorkshopIDs() {
+        UIPasteboard.general.string = store.library.map(\.id).joined(separator: "\n")
+        Haptics.success()
+        store.operationMessage = "Copied \(store.library.count) Workshop ID\(store.library.count == 1 ? "" : "s")."
     }
 
     private func resetLibraryFilters() {
@@ -6445,7 +6543,7 @@ struct ContentView: View {
                 toggleRow("Confirm auto download", symbol: "checkmark.circle", isOn: $confirmAutoDownload)
                 divider
                 Button { Haptics.tap(); confirmClearViewed = true } label: {
-                    rowContent("Clear recently viewed mods and games in the browser", symbol: "trash", detail: nil)
+                    rowContent("Clear recently viewed mods", symbol: "trash", detail: "and games in the browser")
                 }
                 .buttonStyle(.plain)
             }
@@ -6535,6 +6633,8 @@ struct ContentView: View {
                 .buttonStyle(.plain)
                 .disabled(store.isCheckingAppUpdate)
 
+                divider
+                toggleRow("App update notice on launch", symbol: "arrow.up.circle", isOn: $appUpdateNoticeOn)
                 divider
                 linkRow("GitHub", symbol: "chevron.left.forwardslash.chevron.right", detail: WorkshopStore.appRepo,
                         url: "https://github.com/\(WorkshopStore.appRepo)")
