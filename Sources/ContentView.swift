@@ -3765,12 +3765,12 @@ struct TabHeader: View {
                 .lineLimit(1)
             if let subtitle, !subtitle.isEmpty {
                 Text(subtitle)
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
-                    .lineSpacing(-2)
+                    .lineSpacing(-1)
                     .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxHeight: 34, alignment: .center)
+                    .frame(maxHeight: 30, alignment: .center)
             }
             Spacer(minLength: 0)
         }
@@ -5917,7 +5917,8 @@ struct ContentView: View {
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                    .minimumScaleFactor(0.8)
+                    .minimumScaleFactor(0.85)
+                    .layoutPriority(1)
                 Spacer(minLength: 4)
                 if showingHistory {
                     circleControl("chevron.backward", active: true) { showingHistory = false }
@@ -6048,7 +6049,8 @@ struct ContentView: View {
                 }
             }
             Section("Sort by") {
-                ForEach(Array(sortGroups.enumerated()), id: \.offset) { _, group in
+                ForEach(Array(sortGroups.enumerated()), id: \.offset) { index, group in
+                    if index > 0 { Divider() }
                     ForEach(group, id: \.self) { order in
                         Button {
                             Haptics.select()
@@ -6091,7 +6093,6 @@ struct ContentView: View {
             parts.append("\(shown) of \(total)")
         }
         parts.append(Fmt.bytes(store.libraryStorageBytes))
-        if libraryFilter != "All" { parts.append(libraryFilter) }
         if let game = selectedGameName { parts.append(game) }
         if let tag = selectedTag { parts.append(tag) }
         return parts.joined(separator: " · ")
