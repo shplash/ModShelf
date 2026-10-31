@@ -303,11 +303,14 @@ enum ErrorText {
         let owner = (game ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         if r.contains("own this game") || r.contains("not own") || r.contains("don't own")
             || r.contains("no license") || r.contains("licen") || r.contains("not purchased")
-            || r.contains("depot key") || r.contains("no workshop depot") || r.contains("app ownership") {
+            || r.contains("depot key") || r.contains("app ownership") {
             let tail = "free-to-play games count once you add them"
             return owner.isEmpty
                 ? "Steam only hands over Workshop items for a game your account owns. Add the game to your Steam library (\(tail)), then try again."
                 : "Steam only hands over Workshop items for a game your account owns. \(owner) isn't in your Steam library — add it there (\(tail)), then try again."
+        }
+        if r.contains("no workshop depot") || r.contains("http 401") || r.contains("http 403") {
+            return "Steam wouldn't hand this item over. Older Workshop items fail this way sometimes — try another item, or download this one on a computer."
         }
         if r.contains("removed") || r.contains("banned") || r.contains("violat") {
             return "Steam has taken this item down, so it can't be downloaded any more."
