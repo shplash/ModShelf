@@ -4678,6 +4678,7 @@ struct ContentView: View {
                 HistoryActionPopup(record: record,
                                    openWorkshop: { openWorkshop(record.workshopID); contextHistory = nil },
                                    copyID: { UIPasteboard.general.string = record.workshopID; store.operationMessage = "Workshop ID copied."; contextHistory = nil },
+                                   copyError: { copyHistoryError(record); contextHistory = nil },
                                    retry: { store.retry(record); selectedTab = 0; contextHistory = nil },
                                    close: { contextHistory = nil })
                     .padding(28).transition(.scale(scale: 0.96).combined(with: .opacity)).zIndex(9)
@@ -6395,6 +6396,20 @@ struct ContentView: View {
     }
 
 
+    /// Everything worth pasting into a bug report about one failed attempt.
+    private func copyHistoryError(_ record: DownloadRecord) {
+        var lines: [String] = []
+        lines.append("\(record.title) (Workshop \(record.workshopID))")
+        if let game = record.gameName, !game.isEmpty { lines.append("Game: \(game)") }
+        lines.append("Result: \(record.result)")
+        if let error = record.error, !error.isEmpty { lines.append("Error: \(error)") }
+        lines.append("When: \(Fmt.date(record.date))")
+        lines.append("ModShelf \(modShelfVersion) (build \(modShelfBuild))")
+        UIPasteboard.general.string = lines.joined(separator: "\n")
+        store.operationMessage = "Error message copied."
+        Haptics.select()
+    }
+
     private var historyContent: some View {
         Group {
             if store.history.isEmpty {
@@ -7113,6 +7128,7 @@ struct HistoryActionPopup: View {
     let record: DownloadRecord
     let openWorkshop: () -> Void
     let copyID: () -> Void
+    let copyError: () -> Void
     let retry: () -> Void
     let close: () -> Void
     var body: some View {
@@ -7120,6 +7136,7 @@ struct HistoryActionPopup: View {
             Text(record.title).font(.headline).lineLimit(1).padding(.horizontal, 16).padding(.top, 16).padding(.bottom, 10)
             row("Open Workshop page", "safari", action: openWorkshop)
             row("Copy Workshop ID", "doc.on.doc", action: copyID)
+            if record.error?.isEmpty == false { row("Copy error message", "exclamationmark.bubble", action: copyError) }
             if record.result == "Failed" || record.result == "Cancelled" { row("Try again", "arrow.clockwise", action: retry) }
             row("Close", "xmark", action: close)
         }
