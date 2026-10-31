@@ -23,7 +23,7 @@
     <img src="https://img.shields.io/github/v/release/shplash/ModShelf?style=for-the-badge&label=release&color=0A84FF">
   </a>
 
-  <a href="https://github.com/shplash/ModShelf/releases/latest">
+  <a href="https://github.com/shplash/ModShelf/releases/latest/download/ModShelf.ipa">
     <img src="https://img.shields.io/badge/Download-IPA-0A84FF?style=for-the-badge">
   </a>
 
