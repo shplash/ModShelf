@@ -310,7 +310,7 @@ enum ErrorText {
                 : "Steam only hands over Workshop items for a game your account owns. \(owner) isn't in your Steam library — add it there (\(tail)), then try again."
         }
         if r.contains("no workshop depot") || r.contains("http 401") || r.contains("http 403") {
-            return "Steam keeps this item in a storage ModShelf can't read yet. Try another item for now — this one needs a different download path."
+            return "Steam didn't offer a file for this item. Try another item, or download this one on a computer."
         }
         if r.contains("removed") || r.contains("banned") || r.contains("violat") {
             return "Steam has taken this item down, so it can't be downloaded any more."
