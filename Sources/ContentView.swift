@@ -192,6 +192,8 @@ struct DownloadRecord: Identifiable, Codable {
     var date: Date
     var result: String
     var error: String? = nil
+    /// The engine's own wording, kept for bug reports.
+    var detail: String? = nil
     var imageURL: String? = nil
     var attempt: Int? = nil
     var gameName: String? = nil
@@ -1962,11 +1964,12 @@ final class WorkshopStore: ObservableObject {
             resumePending = false
             pausedAt = nil
             pausedStaging = nil
+            let raw = !error.isEmpty ? error : (!failureText.isEmpty ? failureText : "The download didn't finish.")
             let reason = cancelled
                 ? "The download was cancelled."
-                : ErrorText.friendly(!error.isEmpty ? error : (!failureText.isEmpty ? failureText : "The download didn't finish."),
-                                      game: meta.gameName)
-            updateHistory(id: activeID, result: cancelled ? "Cancelled" : "Failed", error: reason)
+                : ErrorText.friendly(raw, game: meta.gameName)
+            updateHistory(id: activeID, result: cancelled ? "Cancelled" : "Failed", error: reason,
+                          detail: cancelled ? nil : raw)
             // A transfer the system stopped while the app was away, and the one automatic retry, are
             // not failures yet: the banner only speaks once both have had their chance.
             let interrupted = suspendedDownloadID == activeID
@@ -2038,9 +2041,10 @@ final class WorkshopStore: ObservableObject {
         }
     }
 
-    private func updateHistory(id: String, result: String, error: String?) {
+    private func updateHistory(id: String, result: String, error: String?, detail: String? = nil) {
         if let index = history.firstIndex(where: { $0.workshopID == id && $0.result == "Downloading" }) {
             history[index].result = result; history[index].date = Date(); history[index].error = error
+            history[index].detail = detail
             if let m = activeMeta, m.id == id, !m.imageURL.isEmpty { history[index].imageURL = m.imageURL }
         } else { record(id, title: activeTitle, result: result, error: error) }
     }
@@ -6403,6 +6407,7 @@ struct ContentView: View {
         if let game = record.gameName, !game.isEmpty { lines.append("Game: \(game)") }
         lines.append("Result: \(record.result)")
         if let error = record.error, !error.isEmpty { lines.append("Error: \(error)") }
+        if let detail = record.detail, !detail.isEmpty { lines.append("Detail: \(detail)") }
         lines.append("When: \(Fmt.date(record.date))")
         lines.append("ModShelf \(modShelfVersion) (build \(modShelfBuild))")
         UIPasteboard.general.string = lines.joined(separator: "\n")
