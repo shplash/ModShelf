@@ -89,6 +89,7 @@ jobs:
         with:
           path: SteamEngine.xcframework
           key: steamengine-${{ runner.os }}-${{ hashFiles('ios-engine/**') }}
+          restore-keys: steamengine-${{ runner.os }}-
 
       - name: Set up Go
         if: steps.engine-cache.outputs.cache-hit != 'true'
