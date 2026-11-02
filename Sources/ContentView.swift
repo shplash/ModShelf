@@ -1065,7 +1065,9 @@ final class WorkshopStore: ObservableObject {
         let base = Self.sanitizedName(name ?? "", fallback: "App \(appID)")
         let plain = downloadsRoot.appendingPathComponent(base, isDirectory: true)
         let claimedByAnotherGame = library.contains { other in
-            guard other.appID != appID else { return false }
+            // A mod with no game recorded belongs to nobody yet, so it must not push this game into
+            // a second folder named after it.
+            guard let otherApp = other.appID, otherApp != appID else { return false }
             return other.folder == plain.path || other.folder.hasPrefix(plain.path + "/")
         }
         guard claimedByAnotherGame else { return plain }
@@ -3122,18 +3124,20 @@ final class WorkshopStore: ObservableObject {
         }
     }
 
-    /// Adds one mod's folder, a file at a time, so a big mod is read where it already is.
+    /// Adds one mod's folder, a file at a time, so a big mod is read where it already is. The paths
+    /// come from subpathsOfDirectory, which hands them back relative to the folder: the enumerator's
+    /// URLs can start /private/var while the folder starts /var, which broke cutting the prefix off
+    /// and left every file at the top of its mod's folder.
     nonisolated private static func add(folder: URL, as name: String, to archive: Archive) throws {
         let fm = FileManager.default
-        let keys: [URLResourceKey] = [.isDirectoryKey, .isRegularFileKey]
-        guard let walker = fm.enumerator(at: folder, includingPropertiesForKeys: keys) else { return }
-        for case let file as URL in walker {
-            let values = try? file.resourceValues(forKeys: Set(keys))
-            guard values?.isRegularFile == true else { continue }
+        // A folder that vanished mid-export is left out, as the enumerator used to leave it out.
+        let relatives = (try? fm.subpathsOfDirectory(atPath: folder.path)) ?? []
+        for relative in relatives.sorted() {
             // ModShelf's own hidden record of the install has no place in a shared archive.
-            guard !file.lastPathComponent.hasPrefix(".modshelf") else { continue }
-            let prefix = folder.path + "/"
-            let relative = file.path.hasPrefix(prefix) ? String(file.path.dropFirst(prefix.count)) : file.lastPathComponent
+            guard !(relative as NSString).lastPathComponent.hasPrefix(".modshelf") else { continue }
+            let file = folder.appendingPathComponent(relative)
+            var isDirectory: ObjCBool = false
+            guard fm.fileExists(atPath: file.path, isDirectory: &isDirectory), !isDirectory.boolValue else { continue }
             try archive.addEntry(with: "\(name)/\(relative)", fileURL: file, compressionMethod: .deflate)
         }
     }
