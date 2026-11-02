@@ -1546,6 +1546,45 @@ final class WorkshopStore: ObservableObject {
         input = ""
         if !isBusy, !isPaused { startNextInQueue() }
     }
+
+    /// Queues every mod in the library to be downloaded again, installed or not. The
+    /// Workshop ID is all a queue entry needs, so a mod whose files were moved or
+    /// deleted is fetched back into the same folder it came from.
+    func reinstallAll() {
+        guard devTask == nil else { operationMessage = "A simulated run is on screen. Let it finish first."; return }
+        guard !library.isEmpty else {
+            operationMessage = "There's nothing in the library to install yet."
+            log("reinstall all: library is empty")
+            return
+        }
+        guard isAuthenticated else {
+            operationMessage = "Sign in to Steam and these downloads can start."
+            showLogin = true
+            return
+        }
+        guard engine != nil else {
+            errorMessage = "The Steam engine didn't start. Reopening the app usually sorts it."
+            return
+        }
+        // Finished rows from the last run are not part of this batch, and they must not hide it.
+        queueRows.removeAll { $0.state == .done }
+        var added = 0
+        for item in library where item.id != activeID && !queue.contains(item.id) {
+            guard let meta = metaFor(item.id) else { continue }
+            enqueue(item.id, meta: meta)
+            added += 1
+        }
+        guard added > 0 else {
+            operationMessage = "Every mod is already on its way."
+            log("reinstall all: nothing to add")
+            return
+        }
+        // The batch speaks for itself, and the page should not also offer one of its mods.
+        preview = nil
+        input = ""
+        if !isBusy, !isPaused { startNextInQueue() }
+        log("reinstall all: queued \(added) of \(library.count) mods")
+    }
     private func startNextInQueue() {
         guard !isBusy else { return }
         if blockedByWifiOnly, !queue.isEmpty {
@@ -4272,6 +4311,8 @@ struct ContentView: View {
     @State private var tabStyleOpen = false
     @State private var sortOpen = false
     @State private var confirmClearHistory = false
+    /// Reinstalling every mod is a lot of downloading, so it asks first.
+    @State private var confirmReinstallAll = false
     /// Cancelling the whole queue asks first.
     @State private var confirmCancelQueue = false
     /// Scroll bookkeeping kept in a reference type, so a scroll frame never re-renders the whole app.
@@ -4716,6 +4757,17 @@ struct ContentView: View {
                              confirm: { store.clearHistory(); confirmClearHistory = false },
                              cancel: { confirmClearHistory = false })
                     .padding(30).zIndex(13)
+            }
+            if confirmReinstallAll {
+                Color.black.opacity(0.38).ignoresSafeArea().contentShape(Rectangle())
+                    .onTapGesture { confirmReinstallAll = false }.zIndex(14)
+                ConfirmPopup(heading: "Reinstall all mods?",
+                             message: "Every mod in your library is downloaded again, whether or not it is installed. Files already here are replaced.",
+                             actionTitle: "Reinstall \(store.library.count)",
+                             tint: Color.accentColor,
+                             confirm: { store.reinstallAll(); confirmReinstallAll = false },
+                             cancel: { confirmReinstallAll = false })
+                    .padding(30).zIndex(15)
             }
             if store.showDeleteConfirmation, let item = store.pendingDelete {
                 Color.black.opacity(0.38).ignoresSafeArea().contentShape(Rectangle())
@@ -6140,6 +6192,10 @@ struct ContentView: View {
                 let pending = store.library.filter { $0.updateAvailable }.count
                 Button { store.updateAll(); selectedTab = 0 } label: { Label("Update all (\(pending))", systemImage: "arrow.down.circle") }
                     .disabled(pending == 0 || store.isBusy)
+                Button { Haptics.tap(); confirmReinstallAll = true } label: {
+                    Label("Reinstall all (\(store.library.count))", systemImage: "arrow.clockwise.circle")
+                }
+                .disabled(store.library.isEmpty || store.isBusy)
                 Button { startExportSelection() } label: { Label("Select and export as ZIP", systemImage: "square.and.arrow.up.on.square") }
                     .disabled(store.library.isEmpty || store.isExporting)
                 Button { beginExport(all: true) } label: { Label(store.isExporting ? "Exporting…" : "Export all as ZIP", systemImage: "square.and.arrow.up") }
