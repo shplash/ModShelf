@@ -3396,29 +3396,63 @@ final class WorkshopStore: ObservableObject {
     func runLaunchChecks() {
         guard !didLaunchChecks else { return }
         didLaunchChecks = true
-        // The cleanup only deletes files and reads sizes, so it runs off the main thread and is not
-        // waited for. Only the two folders are captured.
-        let documents = documents
-        let downloadsRoot = downloadsRoot
-        let cleanup = Task.detached(priority: .utility) {
-            Self.purgeTemporaryFiles(documents: documents, downloadsRoot: downloadsRoot)
-        }
-        Task { @MainActor in
-            let freed = await cleanup.value
-            if freed > 0 { self.log("launch cleanup freed \(Fmt.bytes(freed))") }
-        }
         // The folder repair edits the library, so it stays on this actor. A short pause lets the
         // first frame draw, so launch never waits behind a disk walk.
         Task { @MainActor in
+            // A replace that never finished leaves the old version beside the new one, so put it
+            // back before any cleanup gets the chance to treat it as abandoned.
+            self.restoreReplacedFolders()
+            // The cleanup only deletes files and reads sizes, so it runs off the main thread.
+            let documents = self.documents
+            let downloadsRoot = self.downloadsRoot
+            let cleanup = Task.detached(priority: .utility) {
+                Self.purgeTemporaryFiles(documents: documents, downloadsRoot: downloadsRoot)
+            }
             try? await Task.sleep(nanoseconds: 250_000_000)
             self.repairFolders()
             self.refreshMovedFlags()
             self.settleInterruptedHistory()
+            let freed = await cleanup.value
+            if freed > 0 { self.log("launch cleanup freed \(Fmt.bytes(freed))") }
             if UserDefaults.standard.object(forKey: "options.autoCheck") as? Bool ?? true {
                 self.checkAllUpdates(silent: true)
             }
             try? await Task.sleep(nanoseconds: 1_500_000_000)
             self.fillInMissingDetails()
+        }
+    }
+
+    /// A replacement that never finished leaves the old version beside the new one. The launch
+    /// cleanup would delete that copy, so put it back first: the library still knows where it goes.
+    private func restoreReplacedFolders() {
+        let fm = FileManager.default
+        let prefix = ".modshelf-replacing-"
+        var restored = 0
+        for url in Self.partialLeftovers(in: downloadsRoot) {
+            let name = url.lastPathComponent
+            guard name.hasPrefix(prefix) else { continue }
+            let tail = name.dropFirst(prefix.count)
+            guard let id = tail.split(separator: "-").first.map(String.init), !id.isEmpty,
+                  let item = library.first(where: { $0.id == id })
+            else { continue }
+            let destination = URL(fileURLWithPath: item.folder, isDirectory: true)
+            let parent = destination.deletingLastPathComponent()
+            // Only a copy sitting in the folder it belongs to can be put back safely.
+            guard !fm.fileExists(atPath: destination.path),
+                  url.deletingLastPathComponent().path == parent.path,
+                  fm.fileExists(atPath: parent.path)
+            else { continue }
+            do {
+                try fm.moveItem(at: url, to: destination)
+                restored += 1
+                log("restored \(id) from an interrupted replace")
+            } catch {
+                log("couldn't restore \(id): \(error)")
+            }
+        }
+        if restored > 0 {
+            operationMessage = "Put \(restored) mod\(restored == 1 ? "" : "s") back after an interrupted replace."
+            refreshLibraryBytes()
         }
     }
 
