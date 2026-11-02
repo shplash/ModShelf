@@ -990,6 +990,7 @@ final class WorkshopStore: ObservableObject {
         _ = NetworkWatcher.shared
         _ = sessionPath
         repairFolders()
+        rescueTrashedMods()
         migrateRecords()
         migrateTitles()
         refreshLibraryBytes()
@@ -1214,9 +1215,10 @@ final class WorkshopStore: ObservableObject {
     }
 
     /// A mod keeps the folder it lives in, so an update replaces it in place. One whose files were
-    /// moved into a game is installed fresh in ModShelf's own storage.
+    /// moved into a game is installed fresh in ModShelf's own storage, and so is one whose folder
+    /// ended up in Files' bin, which Files never shows.
     private func installRoot(for item: WorkshopItem?, appID: String?) -> URL {
-        if let item, FileManager.default.fileExists(atPath: item.folder) {
+        if let item, FileManager.default.fileExists(atPath: item.folder), !Self.isTrashed(item.folder) {
             let folder = URL(fileURLWithPath: item.folder, isDirectory: true)
             guard Self.isInsideAppStorage(folder) else { return root(forGame: appID) }
             let parent = folder.deletingLastPathComponent()
@@ -2616,7 +2618,8 @@ final class WorkshopStore: ObservableObject {
             if fm.fileExists(atPath: direct.path) { return direct }
         }
         for root in roots {
-            let children = (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
+            let children = (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey],
+                                                        options: [.skipsHiddenFiles])) ?? []
             for child in children where (try? child.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
                 let candidate = child.appendingPathComponent(name, isDirectory: true)
                 if fm.fileExists(atPath: candidate.path) { return candidate }
@@ -2841,9 +2844,10 @@ final class WorkshopStore: ObservableObject {
         name = singleMod ? sanitize(payload.lastPathComponent, fallback: id) : sanitize(meta.title, fallback: id)
 
         // An update replaces the installation where it lives; a new download goes into the game's
-        // folder inside ModShelf.
+        // folder inside ModShelf. A folder that ended up in Files' bin is left alone and replaced
+        // with a fresh one where the mod belongs.
         let destination: URL
-        if let existing, fm.fileExists(atPath: existing.folder),
+        if let existing, fm.fileExists(atPath: existing.folder), !Self.isTrashed(existing.folder),
            Self.isInsideAppStorage(URL(fileURLWithPath: existing.folder, isDirectory: true)) {
             destination = URL(fileURLWithPath: existing.folder, isDirectory: true)
         } else {
@@ -3623,6 +3627,43 @@ final class WorkshopStore: ObservableObject {
         if changed { saveLibrary() }
     }
 
+    /// Whether a path sits inside the hidden ".Trash" folder Files uses for what it deleted.
+    nonisolated static func isTrashed(_ path: String) -> Bool {
+        path.split(separator: "/").contains(".Trash")
+    }
+
+    /// Mods whose folder ended up in Files' bin are moved back into their game's folder. They still
+    /// counted as installed, and a later install would have replaced them where Files never shows
+    /// them, so nothing looked wrong while half the library was out of sight.
+    func rescueTrashedMods() {
+        let fm = FileManager.default
+        var moved = 0
+        for i in library.indices {
+            let current = URL(fileURLWithPath: library[i].folder, isDirectory: true)
+            guard Self.isTrashed(current.path), fm.fileExists(atPath: current.path) else { continue }
+            let app = library[i].appID ?? Self.readManifest(in: current)?.appID
+            let destination = Self.availableURL(name: current.lastPathComponent, id: library[i].id,
+                                                in: root(forGame: app))
+            guard (try? fm.moveItem(at: current, to: destination)) != nil else { continue }
+            library[i].folder = destination.path
+            moved += 1
+        }
+        if moved > 0 {
+            saveLibrary()
+            refreshLibraryBytes()
+            log("moved \(moved) mod(s) out of .Trash into their game folders")
+        }
+        // Anything else in the bin is left where it is, since it may be a deletion the user meant,
+        // but naming it says how much else is hiding there.
+        let trash = documents.appendingPathComponent(".Trash", isDirectory: true)
+        guard fm.fileExists(atPath: trash.path) else { return }
+        let known = Set(library.map(\.id))
+        let leftovers = Self.foldersWithManifest(in: trash, depth: 2).keys.filter { !known.contains($0) }
+        if !leftovers.isEmpty {
+            log(".Trash also holds \(leftovers.count) mod folder(s) the library does not list: \(leftovers.sorted().joined(separator: ", "))")
+        }
+    }
+
     func retry(_ record: DownloadRecord) {
         input = record.workshopID
         if let item = library.first(where: { $0.id == record.workshopID }) { update(item) }
@@ -3813,6 +3854,7 @@ final class WorkshopStore: ObservableObject {
             var line = "mod \(item.id) · \(item.displayTitle) · \(item.gameName ?? "no game")"
             line += " · \(Self.readablePath(folder))"
             line += exists ? " · on disk" : " · MISSING"
+            if Self.isTrashed(item.folder) { line += " · in .Trash" }
             if let when = item.lastVerifiedAt { line += " · verified \(Fmt.date(when))" }
             if item.filesBroken { line += " · files differ" }
             if item.filesMoved { line += " · moved out" }
