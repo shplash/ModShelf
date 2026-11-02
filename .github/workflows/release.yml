@@ -7,7 +7,7 @@ on:
         description: Version number, without the v (e.g. 1.1.2)
         required: true
       notes:
-        description: Release notes (Markdown). Shown on the release, in the app's update check and on the alt source.
+        description: Release notes (Markdown) for the release, the app's update check and the alt source. The field is one line, so put \n between lines.
         required: false
         type: string
 
