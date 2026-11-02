@@ -861,6 +861,9 @@ final class WorkshopStore: ObservableObject {
     /// Everything worth knowing when something goes wrong: download starts, phases, progress and errors.
     @Published var runtimeLog: [String] = []
     private var lastLoggedDecade = -1
+    /// A compaction rewrites the whole log file, so it follows the number of lines written rather
+    /// than the length the log happens to have.
+    private var logWritesSinceCompact = 0
     private var autoRetries = 0
     private var autoRetryItem = ""
     private var queueFailed = 0
@@ -1620,6 +1623,7 @@ final class WorkshopStore: ObservableObject {
         input = ""
         if !isBusy, !isPaused { startNextInQueue() }
         log("reinstall all: queued \(added) of \(library.count) mods")
+        logLibraryState("before reinstall")
     }
     private func startNextInQueue() {
         guard !isBusy else { return }
@@ -2870,6 +2874,10 @@ final class WorkshopStore: ObservableObject {
 
         if hadPrevious { try? fm.removeItem(at: backup) }
         try? fm.removeItem(at: staging)
+        // Where this copy actually landed, with what it holds: the one line that answers "where did
+        // that mod go" without opening Files.
+        log("installed \(id) \"\(meta.title)\" · \(Self.readablePath(destination)) · \(counts.count) files · \(Fmt.bytes(counts.bytes))"
+            + (hadPrevious ? " · replaced" : "") + (singleMod ? " · single mod" : ""))
 
         let infoURL = destination.appendingPathComponent(modShelfInfoFileName)
         if UserDefaults.standard.object(forKey: "options.infoFile") as? Bool ?? true {
@@ -3357,15 +3365,19 @@ final class WorkshopStore: ObservableObject {
                 case .ok:
                     ok += 1
                     recordVerified(target.id, files: files, bytes: bytes, save: false)
+                    log("verify \(target.id) · ok · \(files) files · \(Fmt.bytes(bytes))")
                 case .unknown:
                     unknown += 1
                     recordVerified(target.id, files: files, bytes: bytes, save: false)
+                    log("verify \(target.id) · no size to compare · \(files) files · \(Fmt.bytes(bytes))")
                 case .moved:
                     moved += 1
                     markMoved(target.id, save: false)
+                    log("verify \(target.id) · not in ModShelf")
                 case .mismatch:
                     changed.append(target.title)
                     applyCheck(target.id, broken: true, save: false)
+                    log("verify \(target.id) · differs from Steam · \(files) files · \(Fmt.bytes(bytes))")
                 }
                 if !quiet { verifyStatus = "Validating \(done) of \(toCheck.count)…" }
             }
@@ -3539,6 +3551,8 @@ final class WorkshopStore: ObservableObject {
             try? await Task.sleep(nanoseconds: 250_000_000)
             self.repairFolders()
             self.refreshMovedFlags()
+            // What the library says and what the disk holds, side by side, before anything is checked.
+            self.logLibraryState("launch")
             self.settleInterruptedHistory()
             let freed = await cleanup.value
             if freed > 0 { self.log("launch cleanup freed \(Fmt.bytes(freed))") }
@@ -3738,10 +3752,14 @@ final class WorkshopStore: ObservableObject {
         let stamp = Date().formatted(.dateTime.hour().minute().second())
         let line = "\(stamp)  \(message)"
         runtimeLog.append(line)
-        if runtimeLog.count > 400 { runtimeLog.removeFirst(runtimeLog.count - 400) }
+        // A reinstall of a whole library is easily a few hundred lines, so the start of a session has
+        // to survive it: the cap is what decides how much of the run a pasted log still holds.
+        if runtimeLog.count > 2000 { runtimeLog.removeFirst(runtimeLog.count - 2000) }
         Self.appendRuntimeLog(line)
         // Keep the file from growing without bound, and rewrite it with what is still in memory.
-        if runtimeLog.count % 200 == 0, let data = runtimeLog.joined(separator: "\n").data(using: .utf8) {
+        logWritesSinceCompact += 1
+        if logWritesSinceCompact >= 100, let data = runtimeLog.joined(separator: "\n").data(using: .utf8) {
+            logWritesSinceCompact = 0
             try? data.write(to: Self.runtimeLogFile, options: .atomic)
         }
     }
@@ -3769,13 +3787,49 @@ final class WorkshopStore: ObservableObject {
 
     nonisolated private static func loadRuntimeLog() -> [String] {
         guard let text = try? String(contentsOf: runtimeLogFile, encoding: .utf8) else { return [] }
-        return text.split(separator: "\n").suffix(200).map(String.init)
+        return text.split(separator: "\n").suffix(1200).map(String.init)
     }
 
     func clearRuntimeLog() {
         runtimeLog.removeAll()
+        logWritesSinceCompact = 0
         try? FileManager.default.removeItem(at: Self.runtimeLogFile)
         log("log cleared")
+    }
+
+    /// Writes the library and the folders it points at into the runtime log, one line a mod, so a
+    /// pasted log says exactly which mods are where and which folder on disk belongs to nobody. It
+    /// measures the disk as it goes, so it is only taken at a moment worth paying for: launch, and
+    /// when a reinstall is about to start.
+    func logLibraryState(_ reason: String) {
+        guard UserDefaults.standard.bool(forKey: "dev.unlocked") else { return }
+        let fm = FileManager.default
+        log("library (\(reason)): \(library.count) mods · \(Fmt.bytes(libraryStorageBytes))")
+        var present = 0
+        for item in library {
+            let folder = URL(fileURLWithPath: item.folder, isDirectory: true)
+            let exists = fm.fileExists(atPath: folder.path)
+            if exists { present += 1 }
+            var line = "mod \(item.id) · \(item.displayTitle) · \(item.gameName ?? "no game")"
+            line += " · \(Self.readablePath(folder))"
+            line += exists ? " · on disk" : " · MISSING"
+            if let when = item.lastVerifiedAt { line += " · verified \(Fmt.date(when))" }
+            if item.filesBroken { line += " · files differ" }
+            if item.filesMoved { line += " · moved out" }
+            log(line)
+        }
+        log("folders: \(present) of \(library.count) mods on disk")
+        let known = Set(library.map(\.folder))
+        let gameFolders = (try? fm.contentsOfDirectory(at: downloadsRoot, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
+        for folder in gameFolders.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+            guard (try? folder.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true else { continue }
+            let children = visibleChildren(folder)
+            let isFolders = children.filter { isDir($0) }.count
+            log("folder \"\(folder.lastPathComponent)\" holds \(children.count) item(s), \(isFolders) of them folders")
+            for child in children where !known.contains(child.path) {
+                log("unclaimed \(Self.readablePath(child))")
+            }
+        }
     }
 
     func refreshLibraryBytes() {
@@ -9122,7 +9176,12 @@ struct DevLogView: View {
             }
             ToolbarItem(placement: .navigationBarTrailing) {
                 Button("Copy") {
-                    UIPasteboard.general.string = store.runtimeLog.joined(separator: "\n")
+                    // The pasted log says which build and device it came from, so it reads on its own.
+                    let header = "ModShelf \(modShelfVersion) (\(modShelfBuild)) · iOS \(UIDevice.current.systemVersion)"
+                        + " · \(UIDevice.current.model) · \(store.library.count) mods · "
+                        + Date().formatted(date: .abbreviated, time: .standard)
+                    UIPasteboard.general.string = ([header] + store.runtimeLog).joined(separator: "\n")
+                    store.operationMessage = "Runtime log copied."
                 }
                 .disabled(store.runtimeLog.isEmpty)
             }
