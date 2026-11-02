@@ -584,35 +584,68 @@ enum SteamMeta {
         return meta
     }
 
+    /// Steam answers for a whole list of items in one call, so a library of any size costs a request
+    /// or two rather than one per mod. Items Steam has no details for are simply absent.
+    static func fetchMany(ids: [String]) async -> [String: WorkshopMetadata] {
+        guard !ids.isEmpty else { return [:] }
+        var found: [String: WorkshopMetadata] = [:]
+        let most = 100   // more than this in one call and Steam sends nothing back
+        var start = ids.startIndex
+        while start < ids.endIndex {
+            let end = ids.index(start, offsetBy: min(most, ids.distance(from: start, to: ids.endIndex)))
+            for (id, meta) in await fetchChunk(Array(ids[start..<end])) { found[id] = meta }
+            start = end
+        }
+        return found
+    }
+
     private static func fetchAPI(id: String) async -> WorkshopMetadata? {
-        guard let url = URL(string: "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/") else { return nil }
+        await fetchChunk([id]).values.first
+    }
+
+    private static func fetchChunk(_ ids: [String]) async -> [String: WorkshopMetadata] {
+        guard !ids.isEmpty,
+              let url = URL(string: "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/")
+        else { return [:] }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/x-www-form-urlencoded; charset=UTF-8", forHTTPHeaderField: "Content-Type")
-        request.httpBody = "itemcount=1&publishedfileids%5B0%5D=\(id)".data(using: .utf8)
-        request.timeoutInterval = 15
+        let body = "itemcount=\(ids.count)&"
+            + ids.enumerated().map { "publishedfileids%5B\($0.offset)%5D=\($0.element)" }.joined(separator: "&")
+        request.httpBody = body.data(using: .utf8)
+        request.timeoutInterval = 20
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
             guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
                   let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let resp = root["response"] as? [String: Any],
-                  let details = resp["publishedfiledetails"] as? [[String: Any]],
-                  let item = details.first, (item["result"] as? Int) == 1 else { return nil }
-            var meta = WorkshopMetadata(id: id,
-                                        title: item["title"] as? String ?? "Workshop item \(id)",
-                                        author: "",
-                                        description: cleanHTML(item["description"] as? String ?? "No description provided."),
-                                        imageURL: item["preview_url"] as? String ?? "",
-                                        updatedAt: item["time_updated"] as? Int ?? 0)
-            if let app = item["consumer_app_id"] as? Int { meta.appID = String(app) }
-            else if let app = item["consumer_app_id"] as? String { meta.appID = app }
-            if let tags = item["tags"] as? [[String: Any]] {
-                meta.tags = tags.compactMap { $0["tag"] as? String }.filter { !$0.isEmpty }
+                  let details = resp["publishedfiledetails"] as? [[String: Any]] else { return [:] }
+            var found: [String: WorkshopMetadata] = [:]
+            for item in details {
+                guard let id = item["publishedfileid"] as? String, let meta = parse(id: id, item: item) else { continue }
+                found[id] = meta
             }
-            if let s = item["file_size"] as? String, let n = Int64(s) { meta.fileSize = n }
-            else if let n = item["file_size"] as? Int { meta.fileSize = Int64(n) }
-            return meta
-        } catch { return nil }
+            return found
+        } catch { return [:] }
+    }
+
+    /// One entry of Steam's answer, or nil for an item it no longer has.
+    private static func parse(id: String, item: [String: Any]) -> WorkshopMetadata? {
+        guard (item["result"] as? Int) == 1 else { return nil }
+        var meta = WorkshopMetadata(id: id,
+                                    title: item["title"] as? String ?? "Workshop item \(id)",
+                                    author: "",
+                                    description: cleanHTML(item["description"] as? String ?? "No description provided."),
+                                    imageURL: item["preview_url"] as? String ?? "",
+                                    updatedAt: item["time_updated"] as? Int ?? 0)
+        if let app = item["consumer_app_id"] as? Int { meta.appID = String(app) }
+        else if let app = item["consumer_app_id"] as? String { meta.appID = app }
+        if let tags = item["tags"] as? [[String: Any]] {
+            meta.tags = tags.compactMap { $0["tag"] as? String }.filter { !$0.isEmpty }
+        }
+        if let s = item["file_size"] as? String, let n = Int64(s) { meta.fileSize = n }
+        else if let n = item["file_size"] as? Int { meta.fileSize = Int64(n) }
+        return meta
     }
 
     /// Ratings, screenshots, videos and the game name are not in the keyless API, so they are read from the public item page.
@@ -854,8 +887,6 @@ final class WorkshopStore: ObservableObject {
     private var lastDiskSample: (Date, Int64)?
     private var lastProgressLogAt = Date.distantPast
     private var didLaunchChecks = false
-    /// Set when the combined refresh should verify files once the update check has finished.
-    private var verifyAfterCheck = false
 
     var isAuthenticated: Bool { engine?.isAuthenticated() ?? false }
     private var documents: URL { FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0] }
@@ -1050,15 +1081,17 @@ final class WorkshopStore: ObservableObject {
 
     /// Fills in missing game names from Steam and renames the "App <id>" folders that stand for them.
     /// Mods installed while Steam had no details have no real name and no picture. One quiet pass at
-    /// launch asks again for those, one at a time, and keeps whatever comes back.
+    /// launch asks again for those in a single request, and keeps whatever comes back.
     func fillInMissingDetails() {
         let waiting = library.filter { ($0.title ?? "").isEmpty || ($0.imageURL ?? "").isEmpty }
         guard !waiting.isEmpty else { return }
         Task { @MainActor in
+            let details = await SteamMeta.fetchMany(ids: waiting.map(\.id))
+            guard !details.isEmpty else { return }
+            var changed = false
             for item in waiting {
-                try? await Task.sleep(nanoseconds: 400_000_000)
-                guard let fresh = await SteamMeta.fetch(id: item.id, includePage: false) else { continue }
-                guard let index = library.firstIndex(where: { $0.id == item.id }) else { continue }
+                guard let fresh = details[item.id],
+                      let index = library.firstIndex(where: { $0.id == item.id }) else { continue }
                 if let realTitle = WorkshopItem.realTitle(fresh.title, id: item.id) {
                     library[index].title = realTitle
                 }
@@ -1073,8 +1106,9 @@ final class WorkshopStore: ObservableObject {
                 if fresh.updatedAt > 0, library[index].publishedUpdatedAt == nil {
                     library[index].publishedUpdatedAt = fresh.updatedAt
                 }
-                saveLibrary()
+                changed = true
             }
+            if changed { saveLibrary() }
         }
     }
 
@@ -3130,29 +3164,31 @@ final class WorkshopStore: ObservableObject {
         errorMessage = ""
     }
 
-    private func applyCheck(_ id: String, broken: Bool) {
-        if let i = library.firstIndex(where: { $0.id == id }) { library[i].filesBroken = broken; saveLibrary() }
+    private func applyCheck(_ id: String, broken: Bool, save: Bool = true) {
+        guard let i = library.firstIndex(where: { $0.id == id }) else { return }
+        library[i].filesBroken = broken
+        if save { saveLibrary() }
     }
 
     /// Remembers the files were readable and complete, so a mod later moved out can still say when.
-    private func recordVerified(_ id: String, files: Int, bytes: Int64) {
+    private func recordVerified(_ id: String, files: Int, bytes: Int64, save: Bool = true) {
         guard let i = library.firstIndex(where: { $0.id == id }) else { return }
         library[i].lastVerifiedAt = Date()
         library[i].lastVerifiedFiles = files
         library[i].lastVerifiedBytes = bytes
         library[i].filesBroken = false
         library[i].filesMoved = false
-        saveLibrary()
+        if save { saveLibrary() }
     }
 
     /// Files aren't where they were installed, which is what moving a mod into a game does, so it
     /// counts as moved out rather than damaged.
-    private func markMoved(_ id: String) {
+    private func markMoved(_ id: String, save: Bool = true) {
         guard let i = library.firstIndex(where: { $0.id == id }) else { return }
         guard library[i].filesMoved != true || library[i].filesBroken else { return }
         library[i].filesMoved = true
         library[i].filesBroken = false
-        saveLibrary()
+        if save { saveLibrary() }
     }
 
     /// What to say about a mod whose files are no longer inside ModShelf.
@@ -3198,25 +3234,34 @@ final class WorkshopStore: ObservableObject {
 
     private enum FileCheck { case ok, mismatch, moved, unknown }
 
-    /// Reads a mod's files and compares them with the size Steam has. `.unknown` means Steam no
-    /// longer reports a size, so nothing could be compared.
+    /// Walks a mod's folder and compares what is there with the size Steam gave. Nothing here reads
+    /// or writes the library, so a batch of these can run off the main thread side by side.
+    nonisolated private static func compareFiles(folder: String, steamSize: Int64?) -> (check: FileCheck, files: Int, bytes: Int64) {
+        let scanned = scan(folder: folder)
+        guard scanned.exists, scanned.count > 0 else { return (.moved, scanned.count, scanned.bytes) }
+        // A size Steam no longer reports leaves nothing to compare, so the files are only counted.
+        guard let steamSize, steamSize > 0 else { return (.unknown, scanned.count, scanned.bytes) }
+        let check: FileCheck = sizeMatches(disk: scanned.bytes, steam: steamSize) ? .ok : .mismatch
+        return (check, scanned.count, scanned.bytes)
+    }
+
+    /// Reads one mod's files and compares them with the size Steam has now.
     private func checkFiles(id: String, folder: String) async -> FileCheck {
-        let scan = await Task.detached(priority: .utility) { Self.scan(folder: folder) }.value
-        guard scan.exists, scan.count > 0 else {
-            markMoved(id)
-            return .moved
+        let steamSize = await SteamMeta.fetch(id: id, includePage: false)?.fileSize
+        let result = await Task.detached(priority: .utility) {
+            Self.compareFiles(folder: folder, steamSize: steamSize)
+        }.value
+        applyFileCheck(id, result: result)
+        return result.check
+    }
+
+    /// Writes the outcome of a comparison into the library.
+    private func applyFileCheck(_ id: String, result: (check: FileCheck, files: Int, bytes: Int64), save: Bool = true) {
+        switch result.check {
+        case .moved: markMoved(id, save: save)
+        case .ok, .unknown: recordVerified(id, files: result.files, bytes: result.bytes, save: save)
+        case .mismatch: applyCheck(id, broken: true, save: save)
         }
-        guard let meta = await SteamMeta.fetch(id: id, includePage: false), meta.fileSize > 0 else {
-            recordVerified(id, files: scan.count, bytes: scan.bytes)
-            return .unknown
-        }
-        let ok = Self.sizeMatches(disk: scan.bytes, steam: meta.fileSize)
-        guard ok else {
-            applyCheck(id, broken: true)
-            return .mismatch
-        }
-        recordVerified(id, files: scan.count, bytes: scan.bytes)
-        return .ok
     }
 
     func verify(_ item: WorkshopItem) {
@@ -3245,38 +3290,98 @@ final class WorkshopStore: ObservableObject {
     }
 
     func verifyAllFiles() {
-        guard !isVerifyingAll else { return }
-        guard !library.isEmpty else { return }
+        guard !isVerifyingAll, !library.isEmpty else { return }
+        Task { @MainActor in await self.verifyAll(sizes: nil, quiet: false) }
+    }
+
+    /// One mod as the pass sees it, copied before any work starts so the run is not held up by the
+    /// library changing underneath it.
+    private struct VerifyTarget: Sendable {
+        let id: String
+        let title: String
+        let folder: String
+        let inside: Bool
+    }
+
+    /// Reads each mod's files a few folders at a time and compares them with Steam's size. `sizes`
+    /// comes from a check that just ran, so the whole pass usually needs no request of its own.
+    /// `quiet` is the launch pass: it only speaks up when something is actually wrong.
+    private func verifyAll(sizes: [String: Int64]?, quiet: Bool) async {
+        guard !isVerifyingAll, !library.isEmpty else { return }
         repairFolders()
         isVerifyingAll = true
-        let entries = library.map { (id: $0.id, title: $0.displayTitle, folder: $0.folder, inside: $0.isInsideModShelf) }
-        Task { @MainActor in
-            var ok = 0
-            var unknown = 0
-            var moved = 0
-            var changed: [String] = []
-            for (index, entry) in entries.enumerated() {
-                guard entry.inside else { moved += 1; continue }
-                verifyStatus = "Validating \(index + 1) of \(entries.count)…"
-                switch await checkFiles(id: entry.id, folder: entry.folder) {
-                case .ok: ok += 1
-                case .moved: moved += 1
-                case .unknown: unknown += 1
-                case .mismatch: changed.append(entry.title)
-                }
-                if index + 1 < entries.count { try? await Task.sleep(nanoseconds: 250_000_000) }
-            }
-            isVerifyingAll = false
-            var parts: [String] = []
-            if ok > 0 { parts.append(ok == 1 ? "1 mod matches Steam" : "\(ok) mods match Steam") }
-            if !changed.isEmpty {
-                parts.append(changed.count == 1 ? "1 doesn't match" : "\(changed.count) don't match")
-            }
-            if unknown > 0 { parts.append(unknown == 1 ? "1 couldn't be compared" : "\(unknown) couldn't be compared") }
-            if moved > 0 { parts.append(moved == 1 ? "1 moved out of ModShelf" : "\(moved) moved out of ModShelf") }
-            verifyStatus = parts.isEmpty ? "Nothing to validate." : parts.joined(separator: ", ") + "."
-            log("verify all: \(verifyStatus.replacingOccurrences(of: "\n", with: " "))")
+        let targets = library.map {
+            VerifyTarget(id: $0.id, title: $0.displayTitle, folder: $0.folder, inside: $0.isInsideModShelf)
         }
+        let toCheck = targets.filter { $0.inside }
+        var moved = targets.count - toCheck.count
+        let known: [String: Int64]
+        if let sizes {
+            known = sizes
+        } else {
+            known = await SteamMeta.fetchMany(ids: targets.map(\.id)).mapValues { $0.fileSize }
+        }
+        var ok = 0
+        var unknown = 0
+        var changed: [String] = []
+        var done = 0
+        if !quiet {
+            verifyStatus = toCheck.count == 1 ? "Validating 1 mod…" : "Validating \(toCheck.count) mods…"
+        }
+        // Four folders at a time is enough to keep the disk busy without turning a big library into
+        // a storm of reads.
+        let width = 4
+        var start = 0
+        while start < toCheck.count {
+            let slice = Array(toCheck[start..<min(start + width, toCheck.count)])
+            let results = await withTaskGroup(of: (Int, FileCheck, Int, Int64).self) { group in
+                for (offset, target) in slice.enumerated() {
+                    let size = known[target.id]
+                    group.addTask {
+                        let result = Self.compareFiles(folder: target.folder, steamSize: size)
+                        return (offset, result.check, result.files, result.bytes)
+                    }
+                }
+                var collected: [(Int, FileCheck, Int, Int64)] = []
+                for await result in group { collected.append(result) }
+                return collected
+            }
+            for (offset, check, files, bytes) in results {
+                let target = slice[offset]
+                done += 1
+                switch check {
+                case .ok:
+                    ok += 1
+                    recordVerified(target.id, files: files, bytes: bytes, save: false)
+                case .unknown:
+                    unknown += 1
+                    recordVerified(target.id, files: files, bytes: bytes, save: false)
+                case .moved:
+                    moved += 1
+                    markMoved(target.id, save: false)
+                case .mismatch:
+                    changed.append(target.title)
+                    applyCheck(target.id, broken: true, save: false)
+                }
+                if !quiet { verifyStatus = "Validating \(done) of \(toCheck.count)…" }
+            }
+            start += slice.count
+        }
+        saveLibrary()
+        isVerifyingAll = false
+        var parts: [String] = []
+        if ok > 0 { parts.append(ok == 1 ? "1 mod matches Steam" : "\(ok) mods match Steam") }
+        if !changed.isEmpty {
+            parts.append(changed.count == 1 ? "1 doesn't match" : "\(changed.count) don't match")
+        }
+        if unknown > 0 { parts.append(unknown == 1 ? "1 couldn't be compared" : "\(unknown) couldn't be compared") }
+        if moved > 0 { parts.append(moved == 1 ? "1 moved out of ModShelf" : "\(moved) moved out of ModShelf") }
+        if quiet && changed.isEmpty {
+            verifyStatus = ""
+            return
+        }
+        verifyStatus = parts.isEmpty ? "Nothing to validate." : parts.joined(separator: ", ") + "."
+        log("verify all: \(verifyStatus.replacingOccurrences(of: "\n", with: " "))")
     }
 
 
@@ -3301,13 +3406,10 @@ final class WorkshopStore: ObservableObject {
         }
     }
 
-    private func refreshMetadata(for item: WorkshopItem, full: Bool) async -> Bool {
-        let needPage = full || item.rating == nil || item.gameName == nil
-        guard let meta = await SteamMeta.fetch(id: item.id, includePage: needPage) else {
-            if let i = library.firstIndex(where: { $0.id == item.id }) { library[i].checkFailed = true; saveLibrary() }
-            return false
-        }
-        guard let index = library.firstIndex(where: { $0.id == item.id }) else { return false }
+    /// Copies what Steam just said into the library. Returns whether a newer version is waiting.
+    @discardableResult
+    private func applyMetadata(_ meta: WorkshopMetadata, for id: String) -> Bool {
+        guard let index = library.firstIndex(where: { $0.id == id }) else { return false }
         var installedStamp = library[index].publishedUpdatedAt ?? 0
         if installedStamp == 0 {
             // The manifest knows which version was installed, so a real update is not mistaken for
@@ -3341,35 +3443,57 @@ final class WorkshopStore: ObservableObject {
         if let game = meta.gameName { library[index].gameName = game }
         if !meta.tags.isEmpty { library[index].tags = meta.tags }
         if meta.rating != nil { library[index].rating = meta.rating; library[index].ratingCount = meta.ratingCount }
-        saveLibrary()
         if let app = library[index].appID, let game = library[index].gameName, !game.isEmpty {
             renameGameFolder(appID: app, to: game)
         }
+        return library[index].updateAvailable
+    }
+
+    private func refreshMetadata(for item: WorkshopItem, full: Bool) async -> Bool {
+        let needPage = full || item.rating == nil || item.gameName == nil
+        guard let meta = await SteamMeta.fetch(id: item.id, includePage: needPage) else {
+            if let i = library.firstIndex(where: { $0.id == item.id }) { library[i].checkFailed = true; saveLibrary() }
+            return false
+        }
+        guard library.contains(where: { $0.id == item.id }) else { return false }
+        applyMetadata(meta, for: item.id)
+        saveLibrary()
         return true
     }
 
     func checkAllUpdates(silent: Bool = false) {
+        runLibraryCheck(silent: silent, verify: false)
+    }
+
+    /// One pass over the library: Steam is asked about every mod in a single request, and the folders
+    /// on disk are read a few at a time to see they are still intact. Nothing here waits on the item
+    /// pages, which is where the time used to go.
+    private func runLibraryCheck(silent: Bool, verify: Bool) {
         guard !isCheckingUpdates else { if !silent { operationMessage = "An update check is already running." }; return }
         guard !library.isEmpty else { if !silent { operationMessage = "Your library is empty." }; return }
         isCheckingUpdates = true
-        let entries = library
+        let ids = library.map(\.id)
         Task { @MainActor in
-            var checked = 0, updated = 0, failed = 0, unverified = 0
-            for item in entries {
-                if !silent { updateCheckStatus = "Checking \(checked + failed + 1) of \(entries.count)…" }
-                if await refreshMetadata(for: item, full: false) {
-                    checked += 1
-                    if let current = library.first(where: { $0.id == item.id }) {
-                        if current.updateAvailable { updated += 1 }
-                        if !current.isInsideModShelf || current.filesBroken || current.filesMoved { unverified += 1 }
-                    }
-                } else { failed += 1 }
-                if checked + failed < entries.count { try? await Task.sleep(nanoseconds: 300_000_000) }
+            if !silent {
+                updateCheckStatus = ids.count == 1 ? "Checking 1 mod…" : "Checking \(ids.count) mods…"
             }
+            let metas = await SteamMeta.fetchMany(ids: ids)
+            var updated = 0, failed = 0, unverified = 0
+            for id in ids {
+                guard let meta = metas[id] else {
+                    if let index = library.firstIndex(where: { $0.id == id }) { library[index].checkFailed = true }
+                    failed += 1
+                    continue
+                }
+                if applyMetadata(meta, for: id) { updated += 1 }
+                if let current = library.first(where: { $0.id == id }),
+                   !current.isInsideModShelf || current.filesBroken || current.filesMoved { unverified += 1 }
+            }
+            saveLibrary()
             isCheckingUpdates = false
             if silent {
                 updateCheckStatus = updated > 0 ? "\(updated) mod update\(updated == 1 ? "" : "s") available." : ""
-            } else if checked == 0 {
+            } else if failed == ids.count {
                 updateCheckStatus = "Steam didn't answer just now."
             } else {
                 var parts: [String] = [updated > 0 ? "\(updated) update\(updated == 1 ? "" : "s") available" : "Everything is up to date"]
@@ -3378,9 +3502,10 @@ final class WorkshopStore: ObservableObject {
                 if unverified > 0 { updateCheckStatus += "\nUnverified mods checked: \(unverified)" }
                 log("update check: \(updateCheckStatus.replacingOccurrences(of: "\n", with: " "))")
             }
-            if verifyAfterCheck {
-                verifyAfterCheck = false
-                verifyAllFiles()
+            if verify {
+                // The sizes Steam just gave are the ones the files are compared with, so validating
+                // follows on without a request of its own.
+                await verifyAll(sizes: metas.mapValues { $0.fileSize }, quiet: silent)
             }
         }
     }
@@ -3388,11 +3513,10 @@ final class WorkshopStore: ObservableObject {
     /// One control for the two checks: look for new versions, then verify the files that are here.
     func refreshAndVerify() {
         guard !isCheckingUpdates, !isVerifyingAll, !library.isEmpty else { return }
-        verifyAfterCheck = true
-        checkAllUpdates()
+        runLibraryCheck(silent: false, verify: true)
     }
 
-    /// Runs once per launch: quick folder check, then an update check for every mod.
+    /// Runs once per launch: quick folder check, then an update check that also validates the files.
     func runLaunchChecks() {
         guard !didLaunchChecks else { return }
         didLaunchChecks = true
@@ -3415,7 +3539,9 @@ final class WorkshopStore: ObservableObject {
             let freed = await cleanup.value
             if freed > 0 { self.log("launch cleanup freed \(Fmt.bytes(freed))") }
             if UserDefaults.standard.object(forKey: "options.autoCheck") as? Bool ?? true {
-                self.checkAllUpdates(silent: true)
+                // The launch check validates as well, so one pass says whether anything is new and
+                // whether the files are still whole.
+                self.runLibraryCheck(silent: true, verify: true)
             }
             try? await Task.sleep(nanoseconds: 1_500_000_000)
             self.fillInMissingDetails()
